@@ -53,8 +53,19 @@ if [[ "\${reply}" != *"pong"* ]]; then
 fi
 
 capabilities="\$(gdbus call --session --dest "${service_name}" --object-path "${object_path}" --method "${interface_name}.GetCapabilities")"
-if [[ "\${capabilities}" != *"false"* ]]; then
-    echo "Pepper X capabilities unexpectedly reported modifier-only support in headless mode: \${capabilities}" >&2
-    exit 1
-fi
+python3 - "\${capabilities}" <<'PY'
+import ast
+import sys
+
+raw = sys.argv[1].strip()
+parsed = ast.literal_eval(
+    raw.replace("true", "True").replace("false", "False")
+)
+
+if parsed[0] is not False or parsed[1] is not True:
+    raise SystemExit(
+        "Pepper X headless capabilities must be "
+        f"(false, true, version); got {raw}"
+    )
+PY
 EOF
