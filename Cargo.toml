@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "app",
+    "crates/pepperx-ipc",
+    "crates/pepperx-session",
+    "crates/pepperx-platform-gnome",
+]
+resolver = "2"
