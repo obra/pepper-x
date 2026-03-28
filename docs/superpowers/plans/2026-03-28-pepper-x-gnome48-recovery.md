@@ -4,7 +4,7 @@
 
 **Goal:** Finish Pepper X subproject 1 on a GNOME 48+ baseline with a working GTK/libadwaita app shell, a thin GNOME Shell extension, a narrow D-Bus contract, and a proven modifier-only hold-to-talk path that does not depend on unsupported GNOME 46 extension behavior.
 
-**Architecture:** Carry forward the existing app-first Rust shell, session state, D-Bus service, and packaging skeleton. Move modifier-only capture out of the unproven extension-only path and spike GNOME 48+ accessibility/device monitoring first. Keep the extension thin by limiting it to shell-facing status and app actions unless the GNOME 48+ spike proves it can safely own the hotkey seam.
+**Architecture:** Carry forward the existing app-first Rust shell, session state, D-Bus service, and packaging skeleton. Move modifier-only capture out of the unproven extension-only path and into an app-owned GNOME 48+ accessibility/device backend built on `libatspi`. Keep the extension thin by limiting it to shell-facing status and app actions, and treat live modifier verification as a real-session requirement rather than something VNC or QEMU key injection can prove.
 
 **Tech Stack:** Rust, Cargo workspace, GTK4, libadwaita, D-Bus, libatspi, GObject Introspection, GNOME Shell extension (GJS), shell-based smoke tests, Debian/RPM metadata
 
@@ -24,15 +24,13 @@
 - `README.md`
   - Document the GNOME 48+ baseline and development/test prerequisites.
 - `app/Cargo.toml`
-  - Add the GNOME accessibility/device monitoring dependency needed for the hotkey spike.
+  - Keep app-side wiring aligned with the GNOME modifier backend and IPC contract.
 - `app/src/app.rs`
   - Wire the modifier-only capture backend into the app lifecycle.
-- `app/src/background.rs`
-  - Surface runtime actions and diagnostics for the capture backend.
-- `app/src/settings.rs`
-  - Persist the preferred trigger mode and backend capability flags.
-- `crates/pepperx-session/src/lib.rs`
-  - Keep trigger-source semantics aligned with the chosen capture backend.
+- `crates/pepperx-ipc/src/lib.rs`
+  - Keep the service name and shell capability defaults aligned with the live contract.
+- `crates/pepperx-platform-gnome/Cargo.toml`
+  - Link the GNOME accessibility/device backend against the required native libraries.
 - `crates/pepperx-platform-gnome/src/lib.rs`
   - Export the GNOME-side capture/bootstrap surface.
 - `crates/pepperx-platform-gnome/src/service.rs`
@@ -62,10 +60,8 @@
 
 **Test:**
 - `app/src/app.rs`
-- `app/src/background.rs`
-- `app/src/settings.rs`
-- `crates/pepperx-session/src/lib.rs`
 - `crates/pepperx-platform-gnome/src/atspi.rs`
+- `crates/pepperx-platform-gnome/src/service.rs`
 - `tests/smoke/test_extension_ipc.sh`
 
 ---
@@ -87,6 +83,7 @@
 Add explicit documentation assertions for:
 - GNOME 48+ as the hotkey-test baseline
 - Ubuntu 25.04+ and Fedora 42+ as the practical distro floor for this path
+- Rust 1.92+ as the minimum toolchain for the selected GTK/libadwaita stack
 - app-first ownership of product logic
 - modifier-only capture no longer assumed to be an extension-only capability
 
@@ -143,7 +140,7 @@ git -C pepper-x commit -m "Revise Pepper X GNOME 48 planning"
 Add tests that prove:
 - the GNOME platform layer can describe whether modifier capture is available
 - duplicate start/stop transitions are still rejected by the session state machine
-- the app settings can represent the chosen runtime trigger backend
+- the app and IPC layers agree on the live capability state they report
 
 - [ ] **Step 2: Run the targeted tests to verify failure**
 
@@ -155,14 +152,14 @@ cargo test -p pepperx-session -- --nocapture
 ```
 
 Expected:
-- the new availability/backend assertions fail because the GNOME 48+ bridge does not exist yet
+- the new availability/capability assertions fail because the GNOME 48+ bridge does not exist yet
 
 - [ ] **Step 3: Implement the smallest GNOME 48+ bridge**
 
 Implement:
 - a focused `atspi.rs` module that translates the chosen modifier sequence into app callbacks
 - app lifecycle wiring that starts the bridge only when the runtime environment supports it
-- settings and capability plumbing that surfaces the chosen backend cleanly
+- capability plumbing that surfaces modifier support cleanly
 
 Keep this tight:
 - no insertion work
@@ -174,7 +171,7 @@ Keep this tight:
 Run the commands from Step 2.
 
 Expected:
-- the availability/backend tests pass
+- the availability/capability tests pass
 
 - [ ] **Step 5: Commit**
 
@@ -223,7 +220,7 @@ Expected:
 
 Implement:
 - an extension entrypoint that only owns shell-facing actions and startup reachability
-- D-Bus capability queries that report the current app-owned hotkey backend accurately
+- D-Bus capability queries that report the current app-owned hotkey capability state accurately
 - either an empty or explicitly unsupported keybinding module if the app now owns modifier capture
 
 - [ ] **Step 4: Re-run the shell checks**
@@ -260,7 +257,7 @@ Document and script the exact expectations for:
 - modifier-only press starts recording
 - modifier release stops recording
 - repeated use stays stable
-- disable or teardown behavior is clean
+- the helper proves only live-session prerequisites, not the final keypress itself
 
 - [ ] **Step 2: Run the automated local checks**
 
@@ -286,8 +283,13 @@ Run the helper and checklist on a real GNOME 48+ Wayland session on:
 
 Expected:
 - the app and extension start cleanly
-- modifier-only hold-to-talk works end to end
-- the chosen backend is visible in diagnostics
+- the helper reports live-session capability readiness
+- modifier-only hold-to-talk works end to end when driven from a physical keyboard on the live GNOME session
+- the current capability state is visible in diagnostics
+
+Notes:
+- Do not treat QEMU `send-key`, VNC, or noVNC injection as authoritative for this path.
+- If guest-local `uinput` injection is later proven to hit the same monitor path, it may be added as an automation aid, but it is not the baseline assumption for this plan.
 
 - [ ] **Step 4: Commit**
 
@@ -331,7 +333,7 @@ Expected:
 
 Update:
 - package metadata
-- README prerequisites
+- README prerequisites, including Rust 1.92+ and the native `libatspi` development packages needed for the GNOME 48+ backend
 - packaging tests
 
 - [ ] **Step 4: Re-run the full automated verification**

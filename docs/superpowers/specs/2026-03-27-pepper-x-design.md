@@ -83,7 +83,8 @@ The Rust app owns all product logic. The GNOME extension exists only for shell-f
    - owns session state, models, settings, history, and the full recording pipeline
 
 2. Thin GNOME Shell extension
-   - owns modifier-only global hotkey capture
+   - owns shell-facing actions and status affordances
+   - does not own core product logic or assume global modifier capture
    - can expose GNOME-native status affordances if useful
    - communicates with the app over a narrow IPC boundary
 
@@ -214,7 +215,7 @@ Pepper X should remain an always-available utility, but it should express that t
 
 ### Modifier-only hold-to-talk
 
-Modifier-only hold-to-talk remains required, but Pepper X should not assume the GNOME Shell extension is the only viable capture path. GNOME-native accessibility/device monitoring on GNOME 48+ should be investigated before dropping to lower-level input helpers. If GNOME-native paths fail, Pepper X may need a dedicated privileged input helper for this seam.
+Modifier-only hold-to-talk remains required, but Pepper X should not assume the GNOME Shell extension is the only viable capture path. The current GNOME-first choice is app-owned `libatspi` device monitoring on GNOME 48+ before dropping to lower-level input helpers. If that GNOME-native path proves inadequate, Pepper X may need a dedicated privileged input helper for this seam.
 
 ### Local transcription
 

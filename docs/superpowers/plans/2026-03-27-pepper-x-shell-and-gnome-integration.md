@@ -1,6 +1,6 @@
 # Pepper X Shell And GNOME Integration Implementation Plan
 
-> **Status:** This plan reflects the original GNOME-first shell foundation work and remains useful historical context, but ongoing execution is superseded by `docs/superpowers/plans/2026-03-28-pepper-x-gnome48-recovery.md` after live GNOME testing showed the original modifier-only hotkey assumption was too optimistic.
+> **Status:** This plan reflects the original GNOME-first shell foundation work and remains useful historical context, but ongoing execution is superseded by `docs/superpowers/plans/2026-03-28-pepper-x-gnome48-recovery.md` after live GNOME testing showed the original modifier-only hotkey assumption was too optimistic. The recovery plan is the current source of truth for app-owned GNOME 48+ modifier capture, thin-extension scope, and live-session verification.
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 

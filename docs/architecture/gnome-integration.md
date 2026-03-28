@@ -2,7 +2,7 @@
 
 ## D-Bus contract
 
-- Service name: `com.obra.PepperX`
+- Service name: `com.obra.PepperX.Service`
 - Object path: `/com/obra/PepperX`
 - Interface: `com.obra.PepperX`
 
@@ -40,6 +40,8 @@ The GNOME Shell extension should:
 1. call `Ping` during startup to prove reachability
 2. call `GetCapabilities` after a successful ping
 3. use `ShowSettings` for a manual shell action
-4. use `StartRecording` and `StopRecording` for hold-to-talk signaling
+4. use `ShowHistory` for a manual shell action
+
+Modifier-only hold-to-talk now lives in the app on GNOME 48+ through an app-owned `libatspi` device watcher. The extension should not own global hotkey capture.
 
 If the app service is unavailable, the extension should log a clear error and avoid hanging GNOME Shell.
