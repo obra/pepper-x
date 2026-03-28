@@ -25,7 +25,7 @@ Pepper X should feel native to GNOME instead of mimicking macOS UI conventions l
 - Zero shared code with Ghost Pepper
 - GNOME-first
 - Wayland-only for V1
-- Fedora and Ubuntu as supported distros for V1
+- Fedora and Ubuntu releases shipping GNOME 48 or newer for V1
 - Unsandboxed for V1
 - Native `.deb` and `.rpm` distribution
 - No cloud features
@@ -214,7 +214,7 @@ Pepper X should remain an always-available utility, but it should express that t
 
 ### Modifier-only hold-to-talk
 
-This is the strongest reason to accept a GNOME Shell extension in V1. The extension should be used to capture modifier-only chords and relay start/stop events to the app.
+Modifier-only hold-to-talk remains required, but Pepper X should not assume the GNOME Shell extension is the only viable capture path. GNOME-native accessibility/device monitoring on GNOME 48+ should be investigated before dropping to lower-level input helpers. If GNOME-native paths fail, Pepper X may need a dedicated privileged input helper for this seam.
 
 ### Local transcription
 
@@ -236,6 +236,13 @@ OCR should be rebuilt for Linux from scratch. The implementation may differ enti
 ### Text insertion
 
 Text insertion is a Linux-critical subsystem and should be designed as a first-class capability with multiple internal strategies and clear runtime diagnostics.
+
+The preferred backend order is:
+
+- semantic accessibility insertion
+- accessibility-mediated string injection
+- clipboard-assisted paste
+- privileged `uinput` fallback
 
 ### History and diagnostics
 
@@ -377,7 +384,7 @@ V1 should be planned and implemented in that order.
 
 ### Modifier-only hotkeys
 
-This is a real platform risk. The GNOME extension is the chosen mitigation, and V1 scope should not pretend this is a generic Linux capability.
+This is a real platform risk. GNOME Shell extension APIs alone do not appear to guarantee Pepper X's required pure-modifier capture on current GNOME releases. V1 should target GNOME 48+ explicitly and treat modifier capture as a spike-backed subsystem rather than an assumed extension feature.
 
 ### Focused-app insertion
 

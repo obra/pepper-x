@@ -2,12 +2,13 @@
 
 ## Scope
 
-This document defines the V1 text insertion architecture for Pepper X on GNOME Wayland.
+This document defines the V1 text insertion architecture for Pepper X on GNOME 48+ Wayland.
 
 Constraints:
 
 - GNOME-first
 - Wayland-only for V1
+- GNOME 48+ baseline
 - unsandboxed
 - Ubuntu and Fedora targets
 - modern baseline acceptable

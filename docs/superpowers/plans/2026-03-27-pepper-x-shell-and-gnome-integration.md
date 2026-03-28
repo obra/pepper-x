@@ -1,5 +1,7 @@
 # Pepper X Shell And GNOME Integration Implementation Plan
 
+> **Status:** This plan reflects the original GNOME-first shell foundation work and remains useful historical context, but ongoing execution is superseded by `docs/superpowers/plans/2026-03-28-pepper-x-gnome48-recovery.md` after live GNOME testing showed the original modifier-only hotkey assumption was too optimistic.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bootstrap the new `pepper-x` repo as a GNOME-first Linux desktop app with a Rust GTK4/libadwaita shell, a thin GNOME Shell extension, a narrow IPC contract between them, and working modifier-only hold-to-talk signaling.
