@@ -9,3 +9,6 @@ name = "pepper-x"
 path = "src/main.rs"
 
 [dependencies]
+adw = { package = "libadwaita", version = "0.9.1", features = ["v1_5"] }
+gtk = { package = "gtk4", version = "0.11.1", features = ["gnome_46"] }
+serde = { version = "1.0.228", features = ["derive"] }

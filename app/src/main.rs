@@ -1,3 +1,8 @@
+mod app;
+mod background;
+mod settings;
+mod window;
+
 fn main() {
-    println!("Pepper X bootstrap");
+    app::run();
 }
