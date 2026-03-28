@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "app",
+    "crates/pepperx-asr",
     "crates/pepperx-ipc",
     "crates/pepperx-session",
     "crates/pepperx-platform-gnome",
