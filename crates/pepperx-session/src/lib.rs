@@ -91,7 +91,9 @@ mod session_state {
     fn session_state_starts_recording() {
         let mut session = RecordingSession::new();
 
-        session.start_recording(TriggerSource::ModifierOnly).unwrap();
+        session
+            .start_recording(TriggerSource::ModifierOnly)
+            .unwrap();
 
         assert_eq!(session.state(), SessionState::Recording);
         assert_eq!(
@@ -103,7 +105,9 @@ mod session_state {
     #[test]
     fn session_state_stops_recording() {
         let mut session = RecordingSession::new();
-        session.start_recording(TriggerSource::ModifierOnly).unwrap();
+        session
+            .start_recording(TriggerSource::ModifierOnly)
+            .unwrap();
 
         session.stop_recording().unwrap();
 
@@ -114,7 +118,9 @@ mod session_state {
     #[test]
     fn session_state_rejects_duplicate_start() {
         let mut session = RecordingSession::new();
-        session.start_recording(TriggerSource::ModifierOnly).unwrap();
+        session
+            .start_recording(TriggerSource::ModifierOnly)
+            .unwrap();
 
         let error = session
             .start_recording(TriggerSource::StandardShortcut)
@@ -136,7 +142,9 @@ mod session_state {
     fn session_state_tracks_trigger_sources() {
         let mut session = RecordingSession::new();
 
-        session.start_recording(TriggerSource::StandardShortcut).unwrap();
+        session
+            .start_recording(TriggerSource::StandardShortcut)
+            .unwrap();
         assert_eq!(
             session.active_trigger_source(),
             Some(TriggerSource::StandardShortcut)
@@ -145,7 +153,10 @@ mod session_state {
         session.stop_recording().unwrap();
         session.start_recording(TriggerSource::ShellAction).unwrap();
 
-        assert_eq!(session.active_trigger_source(), Some(TriggerSource::ShellAction));
+        assert_eq!(
+            session.active_trigger_source(),
+            Some(TriggerSource::ShellAction)
+        );
     }
 
     #[test]

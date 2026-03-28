@@ -2,14 +2,10 @@ use pepperx_ipc::{
     parse_trigger_source, Capabilities, CapabilityPayload, OBJECT_PATH, SERVICE_NAME,
 };
 use pepperx_session::{RecordingSession, SessionError, SessionState, TriggerSource};
-use std::sync::{
-    mpsc::Sender,
-    Arc, Mutex,
-};
+use std::sync::{mpsc::Sender, Arc, Mutex};
 use zbus::{
     blocking::{connection::Builder as ConnectionBuilder, Connection},
-    fdo,
-    interface,
+    fdo, interface,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +57,11 @@ impl PepperXService {
     }
 
     pub fn session_state(&self) -> SessionState {
-        self.state.session.lock().expect("session lock poisoned").state()
+        self.state
+            .session
+            .lock()
+            .expect("session lock poisoned")
+            .state()
     }
 
     fn mark_extension_connected(&self) {
@@ -81,9 +81,10 @@ impl PepperXService {
     }
 
     fn send_command(&self, command: AppCommand) -> fdo::Result<()> {
-        self.state.command_sender.send(command).map_err(|error| {
-            fdo::Error::Failed(format!("failed to route app command: {error}"))
-        })
+        self.state
+            .command_sender
+            .send(command)
+            .map_err(|error| fdo::Error::Failed(format!("failed to route app command: {error}")))
     }
 
     fn start_session(&self, trigger_source: TriggerSource) -> fdo::Result<()> {
@@ -168,7 +169,9 @@ mod service_contract {
 
         assert_eq!(service.ping(), "pong");
         service
-            .start_recording(pepperx_ipc::trigger_source_name(TriggerSource::ModifierOnly))
+            .start_recording(pepperx_ipc::trigger_source_name(
+                TriggerSource::ModifierOnly,
+            ))
             .unwrap();
         assert_eq!(service.session_state(), SessionState::Recording);
 
@@ -209,10 +212,14 @@ mod service_contract {
         let service = PepperXService::new(sender);
 
         service
-            .start_recording(pepperx_ipc::trigger_source_name(TriggerSource::ModifierOnly))
+            .start_recording(pepperx_ipc::trigger_source_name(
+                TriggerSource::ModifierOnly,
+            ))
             .unwrap();
         service
-            .start_recording(pepperx_ipc::trigger_source_name(TriggerSource::ModifierOnly))
+            .start_recording(pepperx_ipc::trigger_source_name(
+                TriggerSource::ModifierOnly,
+            ))
             .unwrap();
 
         assert_eq!(service.session_state(), SessionState::Recording);
