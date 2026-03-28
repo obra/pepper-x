@@ -1,6 +1,4 @@
-use sherpa_onnx::{
-    OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig, Wave,
-};
+use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig, Wave};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -19,7 +17,11 @@ pub struct TranscriptionRequest {
 }
 
 impl TranscriptionRequest {
-    pub fn new(wav_path: impl Into<PathBuf>, model_dir: impl Into<PathBuf>, model_name: impl Into<String>) -> Self {
+    pub fn new(
+        wav_path: impl Into<PathBuf>,
+        model_dir: impl Into<PathBuf>,
+        model_name: impl Into<String>,
+    ) -> Self {
         Self {
             wav_path: wav_path.into(),
             model_dir: model_dir.into(),
@@ -49,7 +51,9 @@ pub enum TranscriptionError {
     DecodeFailed(PathBuf),
 }
 
-pub fn transcribe_wav(request: &TranscriptionRequest) -> Result<TranscriptionResult, TranscriptionError> {
+pub fn transcribe_wav(
+    request: &TranscriptionRequest,
+) -> Result<TranscriptionResult, TranscriptionError> {
     validate_wav_path(&request.wav_path)?;
     let model_paths = ModelPaths::discover(&request.model_dir)?;
     let wave = Wave::read(&request.wav_path.to_string_lossy())
@@ -64,8 +68,9 @@ pub fn transcribe_wav(request: &TranscriptionRequest) -> Result<TranscriptionRes
     config.model_config.model_type = Some(MODEL_TYPE_NEMO_TRANSDUCER.into());
     config.model_config.provider = Some("cpu".into());
 
-    let recognizer = OfflineRecognizer::create(&config)
-        .ok_or_else(|| TranscriptionError::RecognizerInitializationFailed(request.model_dir.clone()))?;
+    let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
+        TranscriptionError::RecognizerInitializationFailed(request.model_dir.clone())
+    })?;
     let stream = recognizer.create_stream();
     let start = Instant::now();
     stream.accept_waveform(wave.sample_rate(), wave.samples());
@@ -153,11 +158,8 @@ mod tests {
         fs::create_dir_all(&model_dir).unwrap();
         let wav_path = model_dir.join("existing.wav");
         fs::write(&wav_path, b"not-a-real-wave-yet").unwrap();
-        let request = TranscriptionRequest::new(
-            &wav_path,
-            &model_dir,
-            "nemo-parakeet-tdt-0.6b-v2-int8",
-        );
+        let request =
+            TranscriptionRequest::new(&wav_path, &model_dir, "nemo-parakeet-tdt-0.6b-v2-int8");
 
         let error = transcribe_wav(&request).unwrap_err();
 
@@ -182,11 +184,8 @@ mod tests {
             std::env::var("PEPPERX_PARAKEET_MODEL_DIR")
                 .expect("PEPPERX_PARAKEET_MODEL_DIR must point at a Parakeet model bundle"),
         );
-        let request = TranscriptionRequest::new(
-            fixture_path(),
-            model_dir,
-            "nemo-parakeet-tdt-0.6b-v2-int8",
-        );
+        let request =
+            TranscriptionRequest::new(fixture_path(), model_dir, "nemo-parakeet-tdt-0.6b-v2-int8");
 
         let result = transcribe_wav(&request).expect("transcribe fixture");
 
@@ -195,8 +194,7 @@ mod tests {
     }
 
     fn fixture_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/loop1-hello.wav")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/loop1-hello.wav")
     }
 
     fn unique_test_root(suffix: &str) -> PathBuf {

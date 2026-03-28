@@ -1098,6 +1098,7 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "libadwaita",
+ "pepperx-asr",
  "pepperx-ipc",
  "pepperx-platform-gnome",
  "serde",

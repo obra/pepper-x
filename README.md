@@ -78,3 +78,24 @@ For live GNOME 48+ modifier capture validation on a real Wayland session, run:
 ```
 
 Run that helper inside the live GNOME session, or export that session's `DBUS_SESSION_BUS_ADDRESS` first. It only proves the live-session prerequisites. The final press/release check still needs a physical keyboard on the live GNOME session because QEMU `send-key`, VNC, and noVNC injection were not authoritative for the app-owned AT-SPI watcher path.
+
+## Loop 1 Prerecorded ASR
+
+Loop 1 uses a real local `sherpa-onnx` Parakeet bundle, with prerecorded WAV input as the only simplification. Point `PEPPERX_PARAKEET_MODEL_DIR` at the extracted `nemo-parakeet-tdt-0.6b-v2-int8` model directory before running the ASR checks.
+
+The stable non-GUI entrypoint inside the Pepper X app binary is:
+
+```sh
+cargo run -p pepper-x-app -- --transcribe-wav tests/fixtures/loop1-hello.wav
+```
+
+It reuses the same supported Rust, GTK4, and libadwaita environment as the GUI shell. Loop 1 does not split this into a separate ASR-only binary.
+
+To run the loop-1 verification path with a caller-owned state root:
+
+```sh
+export PEPPERX_STATE_ROOT="$(mktemp -d)"
+PEPPERX_PARAKEET_MODEL_DIR=/path/to/model cargo test -p pepperx-asr transcriber_real_ -- --ignored --nocapture
+PEPPERX_PARAKEET_MODEL_DIR=/path/to/model PEPPERX_STATE_ROOT="$PEPPERX_STATE_ROOT" tests/smoke/test_prerecorded_asr.sh
+PEPPERX_STATE_ROOT="$PEPPERX_STATE_ROOT" cargo run -p pepper-x-app
+```

@@ -3,12 +3,15 @@ use gtk::{Align, Orientation};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::transcript_log::TranscriptEntry;
+
 const SETTINGS_PAGE_NAME: &str = "settings";
 const HISTORY_PAGE_NAME: &str = "history";
 
 #[derive(Clone)]
 pub struct MainWindow {
     app: adw::Application,
+    history_summary: Rc<String>,
     state: Rc<RefCell<Option<WindowState>>>,
 }
 
@@ -18,9 +21,15 @@ struct WindowState {
 }
 
 impl MainWindow {
+    #[cfg(test)]
     pub fn new(app: &adw::Application) -> Self {
+        Self::new_with_history(app, Vec::new())
+    }
+
+    pub fn new_with_history(app: &adw::Application, history_entries: Vec<TranscriptEntry>) -> Self {
         Self {
             app: app.clone(),
+            history_summary: Rc::new(history_summary_text(&history_entries)),
             state: Rc::new(RefCell::new(None)),
         }
     }
@@ -66,10 +75,7 @@ impl MainWindow {
             "Settings",
         );
         stack.add_titled(
-            &build_page(
-                "History",
-                "History, reruns, and diagnostics arrive in a later task.",
-            ),
+            &build_page("History", self.history_summary.as_str()),
             Some(HISTORY_PAGE_NAME),
             "History",
         );
@@ -94,6 +100,23 @@ impl MainWindow {
             .build();
 
         *self.state.borrow_mut() = Some(WindowState { window, stack });
+    }
+}
+
+pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
+    if let Some(latest) = entries.first() {
+        format!(
+            "Latest transcript:\n{}\n\nSource WAV: {}\nBackend: {}\nModel: {}\nElapsed: {} ms\nArchived entries: {}",
+            latest.transcript_text,
+            latest.source_wav_path.display(),
+            latest.backend_name,
+            latest.model_name,
+            latest.elapsed_ms,
+            entries.len()
+        )
+    } else {
+        "No dictation runs yet. Run `pepper-x --transcribe-wav <path>` to archive a transcript."
+            .to_string()
     }
 }
 

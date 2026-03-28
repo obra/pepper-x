@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const LOG_FILE_NAME: &str = "transcript-log.jsonl";
+const APP_STATE_DIR_NAME: &str = "pepper-x";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptEntry {
@@ -75,9 +76,9 @@ impl TranscriptLog {
                 continue;
             }
 
-            let entry = serde_json::from_str(&line)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            entries.push(entry);
+            if let Ok(entry) = serde_json::from_str(&line) {
+                entries.push(entry);
+            }
         }
 
         entries.reverse();
@@ -90,17 +91,53 @@ impl TranscriptLog {
     }
 }
 
+pub fn state_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("PEPPERX_STATE_ROOT") {
+        return PathBuf::from(root);
+    }
+
+    if let Some(xdg_state_home) = std::env::var_os("XDG_STATE_HOME") {
+        return PathBuf::from(xdg_state_home).join(APP_STATE_DIR_NAME);
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join(APP_STATE_DIR_NAME);
+    }
+
+    PathBuf::from(APP_STATE_DIR_NAME)
+}
+
+#[cfg(test)]
+pub(crate) fn env_lock() -> &'static std::sync::Mutex<()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn set_or_remove_env_var(name: &str, value: Option<OsString>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
 
     fn temp_root() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("pepper-x-transcript-log-{unique}-{}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "pepper-x-transcript-log-{unique}-{}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -170,5 +207,49 @@ mod tests {
         assert!(raw.contains("\"transcript_text\":\"sample\""));
         assert!(raw.contains("\"backend_name\":\"backend\""));
         assert!(raw.contains("\"model_name\":\"model\""));
+    }
+
+    #[test]
+    fn transcript_log_prefers_explicit_state_root_override() {
+        let _guard = env_lock().lock().unwrap();
+        let expected = temp_root();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_xdg_state_home = std::env::var_os("XDG_STATE_HOME");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("PEPPERX_STATE_ROOT", &expected);
+        std::env::remove_var("XDG_STATE_HOME");
+        std::env::remove_var("HOME");
+
+        let root = state_root();
+
+        assert_eq!(root, expected);
+        set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
+        set_or_remove_env_var("XDG_STATE_HOME", previous_xdg_state_home);
+        set_or_remove_env_var("HOME", previous_home);
+    }
+
+    #[test]
+    fn transcript_log_skips_truncated_lines_and_keeps_valid_entries() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        let expected = TranscriptEntry::new(
+            root.join("sample.wav"),
+            "hello from pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            Duration::from_millis(42),
+        );
+
+        log.append(&expected).expect("append valid entry");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(br#"{"transcript_text":"truncated""#)
+            .expect("append truncated json");
+
+        let entries = log.recent_entries().expect("load entries");
+
+        assert_eq!(entries, vec![expected]);
     }
 }

@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 adw = { package = "libadwaita", version = "0.9.1", features = ["v1_5"] }
 gtk = { package = "gtk4", version = "0.11.1", features = ["gnome_46"] }
+pepperx-asr = { path = "../crates/pepperx-asr" }
 pepperx-ipc = { path = "../crates/pepperx-ipc" }
 pepperx-platform-gnome = { path = "../crates/pepperx-platform-gnome" }
 serde = { version = "1.0.228", features = ["derive"] }
