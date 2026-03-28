@@ -10,6 +10,7 @@ import {KeybindingRegistry} from './keybindings.js';
 
 const LOG_PREFIX = '[Pepper X]';
 const SETTINGS_ACTION_LABEL = 'Open Pepper X Settings';
+const TRIGGER_SOURCE_MODIFIER_ONLY = 'modifier-only';
 
 const PepperXIndicator = GObject.registerClass(
 class PepperXIndicator extends PanelMenu.Button {
@@ -32,6 +33,7 @@ export default class PepperXExtension extends Extension {
     enable() {
         this._client = createPepperXClient();
         this._keybindings = new KeybindingRegistry();
+        this._modifierHoldActive = false;
         this._indicator = new PepperXIndicator(() => this.showSettings());
 
         Main.panel.addToStatusArea(this.uuid, this._indicator);
@@ -39,6 +41,10 @@ export default class PepperXExtension extends Extension {
             this._indicator?.destroy();
             this._indicator = null;
         });
+        this._keybindings.registerModifierHold(
+            () => this._startModifierOnlyRecording(),
+            () => this._stopModifierOnlyRecording()
+        );
 
         this._bootstrapConnection();
     }
@@ -49,6 +55,7 @@ export default class PepperXExtension extends Extension {
         this._indicator = null;
         this._client = null;
         this._capabilities = null;
+        this._modifierHoldActive = false;
     }
 
     showSettings() {
@@ -72,6 +79,37 @@ export default class PepperXExtension extends Extension {
         } catch (error) {
             this._capabilities = null;
             console.error(`${LOG_PREFIX} Failed to reach Pepper X app service`, error);
+        }
+    }
+
+    _startModifierOnlyRecording() {
+        if (this._modifierHoldActive) {
+            console.log(`${LOG_PREFIX} duplicate request ignored: modifier-only start`);
+            return;
+        }
+
+        try {
+            this._client.startRecording(TRIGGER_SOURCE_MODIFIER_ONLY);
+            this._modifierHoldActive = true;
+            console.log(`${LOG_PREFIX} modifier-only start sent`);
+        } catch (error) {
+            console.error(`${LOG_PREFIX} App unavailable for modifier-only start`, error);
+        }
+    }
+
+    _stopModifierOnlyRecording() {
+        if (!this._modifierHoldActive) {
+            console.log(`${LOG_PREFIX} duplicate request ignored: modifier-only stop`);
+            return;
+        }
+
+        try {
+            this._client.stopRecording();
+            console.log(`${LOG_PREFIX} modifier-only stop sent`);
+        } catch (error) {
+            console.error(`${LOG_PREFIX} App unavailable for modifier-only stop`, error);
+        } finally {
+            this._modifierHoldActive = false;
         }
     }
 }

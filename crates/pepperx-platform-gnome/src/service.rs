@@ -1,7 +1,7 @@
 use pepperx_ipc::{
     parse_trigger_source, Capabilities, CapabilityPayload, OBJECT_PATH, SERVICE_NAME,
 };
-use pepperx_session::{RecordingSession, SessionState, TriggerSource};
+use pepperx_session::{RecordingSession, SessionError, SessionState, TriggerSource};
 use std::sync::{
     mpsc::Sender,
     Arc, Mutex,
@@ -87,23 +87,41 @@ impl PepperXService {
     }
 
     fn start_session(&self, trigger_source: TriggerSource) -> fdo::Result<()> {
-        self.state
+        match self
+            .state
             .session
             .lock()
             .expect("session lock poisoned")
             .start_recording(trigger_source)
-            .map(|_| ())
-            .map_err(|error| fdo::Error::Failed(format!("failed to start recording: {error:?}")))
+        {
+            Ok(_) => Ok(()),
+            Err(SessionError::AlreadyRecording) => {
+                eprintln!("[Pepper X] duplicate request ignored: start");
+                Ok(())
+            }
+            Err(error) => Err(fdo::Error::Failed(format!(
+                "failed to start recording: {error:?}"
+            ))),
+        }
     }
 
     fn stop_session(&self) -> fdo::Result<()> {
-        self.state
+        match self
+            .state
             .session
             .lock()
             .expect("session lock poisoned")
             .stop_recording()
-            .map(|_| ())
-            .map_err(|error| fdo::Error::Failed(format!("failed to stop recording: {error:?}")))
+        {
+            Ok(_) => Ok(()),
+            Err(SessionError::NotRecording) => {
+                eprintln!("[Pepper X] duplicate request ignored: stop");
+                Ok(())
+            }
+            Err(error) => Err(fdo::Error::Failed(format!(
+                "failed to stop recording: {error:?}"
+            ))),
+        }
     }
 }
 
@@ -183,5 +201,30 @@ mod service_contract {
                 version: "0.1.0".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn service_contract_ignores_duplicate_start_requests() {
+        let (sender, _receiver) = channel();
+        let service = PepperXService::new(sender);
+
+        service
+            .start_recording(pepperx_ipc::trigger_source_name(TriggerSource::ModifierOnly))
+            .unwrap();
+        service
+            .start_recording(pepperx_ipc::trigger_source_name(TriggerSource::ModifierOnly))
+            .unwrap();
+
+        assert_eq!(service.session_state(), SessionState::Recording);
+    }
+
+    #[test]
+    fn service_contract_ignores_duplicate_stop_requests() {
+        let (sender, _receiver) = channel();
+        let service = PepperXService::new(sender);
+
+        service.stop_recording().unwrap();
+
+        assert_eq!(service.session_state(), SessionState::Idle);
     }
 }

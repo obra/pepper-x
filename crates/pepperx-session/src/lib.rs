@@ -17,6 +17,12 @@ pub enum SessionError {
     NotRecording,
 }
 
+impl SessionError {
+    pub fn is_duplicate_request(self) -> bool {
+        matches!(self, Self::AlreadyRecording | Self::NotRecording)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordingSession {
     state: SessionState,
@@ -140,5 +146,11 @@ mod session_state {
         session.start_recording(TriggerSource::ShellAction).unwrap();
 
         assert_eq!(session.active_trigger_source(), Some(TriggerSource::ShellAction));
+    }
+
+    #[test]
+    fn session_state_flags_duplicate_requests() {
+        assert!(SessionError::AlreadyRecording.is_duplicate_request());
+        assert!(SessionError::NotRecording.is_duplicate_request());
     }
 }
