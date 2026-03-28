@@ -10,17 +10,18 @@ This repo starts from the approved design and implementation plan:
 Current direction:
 
 - brand new app with zero shared code from Ghost Pepper
-- GNOME-first, Wayland-only for V1
+- GNOME 48+ baseline, Wayland-only for V1
 - Rust + GTK4/libadwaita app
+- app-first ownership of product logic
 - thin GNOME Shell extension for shell-facing integration
 - unsandboxed `.deb` and `.rpm` distribution
 - fully local runtime, no cloud dependencies
 
-The first execution phase is repo bootstrap, app shell, GNOME extension scaffold, IPC, and modifier-only hold-to-talk signaling.
+The first execution phase is repo bootstrap, app shell, GNOME extension scaffold, IPC, and modifier-only hold-to-talk signaling. Modifier-only capture is not assumed to be extension-only.
 
 ## Local prerequisites
 
-Pepper X V1 targets Fedora and Ubuntu on Wayland. The workspace is unsandboxed and currently bootstraps the Rust app shell plus GNOME integration scaffolding.
+Pepper X V1 targets GNOME 48+ on Wayland. The practical distro floor for this path is Ubuntu 25.04+ and Fedora 42+. The workspace is unsandboxed and currently bootstraps the Rust app shell plus GNOME integration scaffolding.
 
 ### Fedora
 
