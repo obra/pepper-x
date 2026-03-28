@@ -49,15 +49,15 @@ impl TranscriptLog {
     }
 
     pub fn append(&self, entry: &TranscriptEntry) -> io::Result<()> {
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.log_path)?;
-        let mut writer = io::BufWriter::new(file);
-        serde_json::to_writer(&mut writer, entry)
+        let mut payload = serde_json::to_vec(entry)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        writer.write_all(b"\n")?;
-        writer.flush()
+        payload.push(b'\n');
+        file.write_all(&payload)?;
+        file.flush()
     }
 
     pub fn recent_entries(&self) -> io::Result<Vec<TranscriptEntry>> {
@@ -92,22 +92,25 @@ impl TranscriptLog {
 }
 
 pub fn state_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("PEPPERX_STATE_ROOT") {
-        return PathBuf::from(root);
+    if let Some(root) = nonempty_env_path("PEPPERX_STATE_ROOT") {
+        return root;
     }
 
-    if let Some(xdg_state_home) = std::env::var_os("XDG_STATE_HOME") {
-        return PathBuf::from(xdg_state_home).join(APP_STATE_DIR_NAME);
+    if let Some(xdg_state_home) = nonempty_env_path("XDG_STATE_HOME") {
+        return xdg_state_home.join(APP_STATE_DIR_NAME);
     }
 
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".local")
-            .join("state")
-            .join(APP_STATE_DIR_NAME);
+    if let Some(home) = nonempty_env_path("HOME") {
+        return home.join(".local").join("state").join(APP_STATE_DIR_NAME);
     }
 
     PathBuf::from(APP_STATE_DIR_NAME)
+}
+
+pub(crate) fn nonempty_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -251,5 +254,24 @@ mod tests {
         let entries = log.recent_entries().expect("load entries");
 
         assert_eq!(entries, vec![expected]);
+    }
+
+    #[test]
+    fn transcript_log_ignores_empty_state_root_override() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_xdg_state_home = std::env::var_os("XDG_STATE_HOME");
+        let previous_home = std::env::var_os("HOME");
+        let expected = temp_root();
+        std::env::set_var("PEPPERX_STATE_ROOT", "");
+        std::env::set_var("XDG_STATE_HOME", &expected);
+        std::env::remove_var("HOME");
+
+        let root = state_root();
+
+        assert_eq!(root, expected.join(APP_STATE_DIR_NAME));
+        set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
+        set_or_remove_env_var("XDG_STATE_HOME", previous_xdg_state_home);
+        set_or_remove_env_var("HOME", previous_home);
     }
 }

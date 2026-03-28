@@ -1,4 +1,5 @@
-use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig, Wave};
+use hound::{SampleFormat, WavReader};
+use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -55,9 +56,8 @@ pub fn transcribe_wav(
     request: &TranscriptionRequest,
 ) -> Result<TranscriptionResult, TranscriptionError> {
     validate_wav_path(&request.wav_path)?;
+    let (wav_path, sample_rate, samples) = load_wav(&request.wav_path)?;
     let model_paths = ModelPaths::discover(&request.model_dir)?;
-    let wave = Wave::read(&request.wav_path.to_string_lossy())
-        .ok_or_else(|| TranscriptionError::InvalidWaveFile(request.wav_path.clone()))?;
     let mut config = OfflineRecognizerConfig::default();
     config.model_config.transducer = OfflineTransducerModelConfig {
         encoder: Some(model_paths.encoder.to_string_lossy().into_owned()),
@@ -73,14 +73,14 @@ pub fn transcribe_wav(
     })?;
     let stream = recognizer.create_stream();
     let start = Instant::now();
-    stream.accept_waveform(wave.sample_rate(), wave.samples());
+    stream.accept_waveform(sample_rate, &samples);
     recognizer.decode(&stream);
     let result = stream
         .get_result()
         .ok_or_else(|| TranscriptionError::DecodeFailed(request.wav_path.clone()))?;
 
     Ok(TranscriptionResult {
-        wav_path: request.wav_path.clone(),
+        wav_path,
         transcript_text: result.text,
         backend_name: BACKEND_NAME.to_string(),
         model_name: request.model_name.clone(),
@@ -93,6 +93,49 @@ fn validate_wav_path(wav_path: &Path) -> Result<(), TranscriptionError> {
         Ok(())
     } else {
         Err(TranscriptionError::MissingWavFile(wav_path.to_path_buf()))
+    }
+}
+
+fn load_wav(wav_path: &Path) -> Result<(PathBuf, i32, Vec<f32>), TranscriptionError> {
+    let canonical_wav_path = std::fs::canonicalize(wav_path)
+        .map_err(|_| TranscriptionError::MissingWavFile(wav_path.to_path_buf()))?;
+    let mut reader = WavReader::open(&canonical_wav_path)
+        .map_err(|_| TranscriptionError::InvalidWaveFile(canonical_wav_path.clone()))?;
+    let spec = reader.spec();
+
+    if spec.channels != 1 {
+        return Err(TranscriptionError::InvalidWaveFile(canonical_wav_path));
+    }
+
+    let sample_rate = spec.sample_rate as i32;
+    let samples = read_wav_samples(&mut reader, spec.bits_per_sample, spec.sample_format)
+        .map_err(|_| TranscriptionError::InvalidWaveFile(canonical_wav_path.clone()))?;
+
+    Ok((canonical_wav_path, sample_rate, samples))
+}
+
+fn read_wav_samples<R>(
+    reader: &mut WavReader<R>,
+    bits_per_sample: u16,
+    sample_format: SampleFormat,
+) -> Result<Vec<f32>, hound::Error>
+where
+    R: std::io::Read,
+{
+    match sample_format {
+        SampleFormat::Float => reader.samples::<f32>().collect(),
+        SampleFormat::Int if bits_per_sample <= 16 => reader
+            .samples::<i16>()
+            .map(|sample| sample.map(|sample| sample as f32 / i16::MAX as f32))
+            .collect(),
+        SampleFormat::Int if bits_per_sample <= 32 => {
+            let scale = ((1_i64 << (bits_per_sample - 1)) - 1) as f32;
+            reader
+                .samples::<i32>()
+                .map(|sample| sample.map(|sample| sample as f32 / scale))
+                .collect()
+        }
+        _ => Err(hound::Error::FormatError("unsupported wave encoding")),
     }
 }
 
@@ -134,6 +177,8 @@ fn required_model_file(
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStringExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -157,7 +202,7 @@ mod tests {
         let model_dir = unique_test_root("incomplete-model");
         fs::create_dir_all(&model_dir).unwrap();
         let wav_path = model_dir.join("existing.wav");
-        fs::write(&wav_path, b"not-a-real-wave-yet").unwrap();
+        fs::copy(fixture_path(), &wav_path).unwrap();
         let request =
             TranscriptionRequest::new(&wav_path, &model_dir, "nemo-parakeet-tdt-0.6b-v2-int8");
 
@@ -175,6 +220,23 @@ mod tests {
     #[test]
     fn transcriber_exposes_sherpa_backend_name() {
         assert_eq!(BACKEND_NAME, "sherpa-onnx");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transcriber_loads_non_utf8_wav_paths_and_normalizes_source_path() {
+        let root = unique_test_root("non-utf8-wave");
+        fs::create_dir_all(&root).unwrap();
+        let wav_path = root.join(std::ffi::OsString::from_vec(vec![
+            0x70, 0x65, 0x70, 0x70, 0x65, 0x72, 0x80, 0x2e, 0x77, 0x61, 0x76,
+        ]));
+        fs::copy(fixture_path(), &wav_path).unwrap();
+
+        let (normalized_path, sample_rate, samples) = load_wav(&wav_path).unwrap();
+
+        assert_eq!(normalized_path, std::fs::canonicalize(&wav_path).unwrap());
+        assert_eq!(sample_rate, 16_000);
+        assert!(!samples.is_empty());
     }
 
     #[test]

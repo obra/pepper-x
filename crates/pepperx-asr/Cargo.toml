@@ -5,4 +5,5 @@ edition = "2021"
 publish = false
 
 [dependencies]
+hound = "3.5.1"
 sherpa-onnx = "1.12.34"

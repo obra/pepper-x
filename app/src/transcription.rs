@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
 
-use crate::transcript_log::{state_root, TranscriptEntry, TranscriptLog};
+use crate::transcript_log::{nonempty_env_path, state_root, TranscriptEntry, TranscriptLog};
 
 const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
 
@@ -47,9 +47,7 @@ impl std::fmt::Display for TranscriptionRunError {
 }
 
 pub fn transcribe_wav_to_log(wav_path: &Path) -> Result<TranscriptEntry, TranscriptionRunError> {
-    let model_dir = std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR")
-        .map(PathBuf::from)
-        .ok_or(TranscriptionRunError::MissingModelDir)?;
+    let model_dir = configured_model_dir()?;
     let request = TranscriptionRequest::new(wav_path, &model_dir, MODEL_NAME);
     let result = transcribe_wav(&request)?;
     archive_transcription_result(result)
@@ -92,6 +90,31 @@ fn describe_asr_error(error: &TranscriptionError) -> String {
         ),
         TranscriptionError::DecodeFailed(path) => {
             format!("failed to decode {}", path.display())
+        }
+    }
+}
+
+fn configured_model_dir() -> Result<PathBuf, TranscriptionRunError> {
+    nonempty_env_path("PEPPERX_PARAKEET_MODEL_DIR").ok_or(TranscriptionRunError::MissingModelDir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcription_run_rejects_empty_model_dir_override() {
+        let previous_model_dir = std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR");
+        std::env::set_var("PEPPERX_PARAKEET_MODEL_DIR", "");
+
+        let error = configured_model_dir().unwrap_err();
+
+        assert!(matches!(error, TranscriptionRunError::MissingModelDir));
+        match previous_model_dir {
+            Some(previous_model_dir) => {
+                std::env::set_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir)
+            }
+            None => std::env::remove_var("PEPPERX_PARAKEET_MODEL_DIR"),
         }
     }
 }

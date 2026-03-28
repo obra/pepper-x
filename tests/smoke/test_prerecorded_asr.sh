@@ -59,7 +59,7 @@ entry = json.loads(lines[-1])
 if not entry.get("transcript_text", "").strip():
     raise SystemExit(f"Transcript log entry is missing transcript_text: {entry}")
 
-source_wav_path = Path(entry["source_wav_path"]).resolve()
+source_wav_path = Path(entry["source_wav_path"])
 if source_wav_path != fixture_path:
     raise SystemExit(
         "Transcript log entry used the wrong WAV path: "
