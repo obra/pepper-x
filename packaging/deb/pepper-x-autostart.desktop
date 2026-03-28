@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Pepper X Background
+Comment=Start Pepper X when the GNOME session begins
+Exec=pepper-x
+Icon=com.obra.PepperX
+X-GNOME-Autostart-enabled=false
+NoDisplay=true
+Terminal=false

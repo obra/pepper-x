@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Pepper X
+Comment=GNOME-first local Linux dictation shell
+Exec=pepper-x
+Icon=com.obra.PepperX
+StartupWMClass=com.obra.PepperX
+Categories=Utility;GNOME;
+Terminal=false

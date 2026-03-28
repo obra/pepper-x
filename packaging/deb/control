@@ -1,0 +1,12 @@
+Source: pepper-x
+Section: utils
+Priority: optional
+Maintainer: Pepper X Maintainers <pepper-x@obra>
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: pepper-x
+Architecture: amd64
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: GNOME-first local Linux dictation shell
+ Pepper X is an unsandboxed GTK4/libadwaita desktop shell for local dictation on GNOME Wayland.
