@@ -17,3 +17,48 @@ Current direction:
 - fully local runtime, no cloud dependencies
 
 The first execution phase is repo bootstrap, app shell, GNOME extension scaffold, IPC, and modifier-only hold-to-talk signaling.
+
+## Local prerequisites
+
+Pepper X V1 targets Fedora and Ubuntu on Wayland. The workspace is unsandboxed and currently bootstraps the Rust app shell plus GNOME integration scaffolding.
+
+### Fedora
+
+Install the toolchain and native development packages:
+
+```sh
+sudo dnf install \
+  cargo \
+  gcc \
+  glib2-devel \
+  gobject-introspection-devel \
+  gtk4-devel \
+  libadwaita-devel \
+  pkgconf-pkg-config
+```
+
+### Ubuntu
+
+Install the toolchain and native development packages:
+
+```sh
+sudo apt install \
+  build-essential \
+  cargo \
+  libadwaita-1-dev \
+  libgirepository1.0-dev \
+  libglib2.0-dev \
+  libgtk-4-dev \
+  pkg-config
+```
+
+## Bootstrap checks
+
+Run the current workspace checks from the repository root:
+
+```sh
+cargo check --workspace
+bash tests/smoke/test_extension_ipc.sh
+```
+
+The Cargo check should pass after Task 1. The IPC smoke test is expected to fail until the D-Bus service lands in the later IPC tasks.
