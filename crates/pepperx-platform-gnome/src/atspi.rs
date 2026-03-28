@@ -6,43 +6,70 @@ use std::sync::Mutex;
 
 const CONTROL_LEFT_KEYSYM: u32 = 65_507;
 const CONTROL_RIGHT_KEYSYM: u32 = 65_508;
-const GNOME_TEXT_EDITOR_APP_ID: &str = "org.gnome.TextEditor";
 
 pub const FRIENDLY_INSERT_BACKEND_NAME: &str = "atspi-editable-text";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FriendlyInsertPolicy {
+    pub target_application_id: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FriendlyFocusedTarget {
-    pub application_name: String,
+    pub application_id: String,
     pub is_editable: bool,
     pub supports_editable_text: bool,
+    pub supports_caret: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FriendlyInsertSelection {
     pub backend_name: &'static str,
-    pub target_application_name: String,
+    pub target_application_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FriendlyInsertFailure {
+    pub backend_name: &'static str,
+    pub reason: FriendlyInsertError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FriendlyInsertError {
-    UnsupportedApplication(String),
+    UnsupportedApplication {
+        expected_application_id: String,
+        actual_application_id: String,
+    },
     TargetNotEditable,
     MissingEditableText,
+    MissingCaretSurface,
+}
+
+impl fmt::Display for FriendlyInsertFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.backend_name, self.reason)
+    }
 }
 
 impl fmt::Display for FriendlyInsertError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedApplication(application_name) => {
+            Self::UnsupportedApplication {
+                expected_application_id,
+                actual_application_id,
+            } => {
                 write!(
                     f,
-                    "friendly insertion is limited to {} for loop 2; got {}",
-                    GNOME_TEXT_EDITOR_APP_ID, application_name
+                    "friendly insertion target application id {} does not match {}",
+                    actual_application_id, expected_application_id
                 )
             }
             Self::TargetNotEditable => f.write_str("friendly insertion target is not editable"),
             Self::MissingEditableText => {
                 f.write_str("friendly insertion target is missing EditableText support")
+            }
+            Self::MissingCaretSurface => {
+                f.write_str("friendly insertion target is missing a caret surface")
             }
         }
     }
@@ -205,26 +232,44 @@ impl CallbackState {
     }
 }
 
-fn validate_friendly_target(
+pub fn select_friendly_insert_backend(
     target: &FriendlyFocusedTarget,
-) -> Result<FriendlyInsertSelection, FriendlyInsertError> {
-    if target.application_name != GNOME_TEXT_EDITOR_APP_ID {
-        return Err(FriendlyInsertError::UnsupportedApplication(
-            target.application_name.clone(),
-        ));
+    policy: &FriendlyInsertPolicy,
+) -> Result<FriendlyInsertSelection, FriendlyInsertFailure> {
+    if target.application_id != policy.target_application_id {
+        return Err(FriendlyInsertFailure {
+            backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+            reason: FriendlyInsertError::UnsupportedApplication {
+                expected_application_id: policy.target_application_id.into(),
+                actual_application_id: target.application_id.clone(),
+            },
+        });
     }
 
     if !target.is_editable {
-        return Err(FriendlyInsertError::TargetNotEditable);
+        return Err(FriendlyInsertFailure {
+            backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+            reason: FriendlyInsertError::TargetNotEditable,
+        });
     }
 
     if !target.supports_editable_text {
-        return Err(FriendlyInsertError::MissingEditableText);
+        return Err(FriendlyInsertFailure {
+            backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+            reason: FriendlyInsertError::MissingEditableText,
+        });
+    }
+
+    if !target.supports_caret {
+        return Err(FriendlyInsertFailure {
+            backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+            reason: FriendlyInsertError::MissingCaretSurface,
+        });
     }
 
     Ok(FriendlyInsertSelection {
         backend_name: FRIENDLY_INSERT_BACKEND_NAME,
-        target_application_name: target.application_name.clone(),
+        target_application_id: target.application_id.clone(),
     })
 }
 
@@ -347,53 +392,102 @@ mod friendly_insert_validation {
 
     #[test]
     fn friendly_insert_rejects_non_text_editor_targets() {
-        let error = validate_friendly_target(&FriendlyFocusedTarget {
-            application_name: "org.gnome.Calculator".into(),
-            is_editable: true,
-            supports_editable_text: true,
-        })
+        let error = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "org.gnome.Calculator".into(),
+                is_editable: true,
+                supports_editable_text: true,
+                supports_caret: true,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "org.gnome.TextEditor",
+            },
+        )
         .unwrap_err();
 
+        assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
         assert_eq!(
-            error,
-            FriendlyInsertError::UnsupportedApplication("org.gnome.Calculator".into())
+            error.reason,
+            FriendlyInsertError::UnsupportedApplication {
+                expected_application_id: "org.gnome.TextEditor".into(),
+                actual_application_id: "org.gnome.Calculator".into(),
+            }
         );
     }
 
     #[test]
     fn friendly_insert_rejects_non_editable_targets() {
-        let error = validate_friendly_target(&FriendlyFocusedTarget {
-            application_name: "org.gnome.TextEditor".into(),
-            is_editable: false,
-            supports_editable_text: true,
-        })
+        let error = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "org.gnome.TextEditor".into(),
+                is_editable: false,
+                supports_editable_text: true,
+                supports_caret: true,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "org.gnome.TextEditor",
+            },
+        )
         .unwrap_err();
 
-        assert_eq!(error, FriendlyInsertError::TargetNotEditable);
+        assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
+        assert_eq!(error.reason, FriendlyInsertError::TargetNotEditable);
     }
 
     #[test]
     fn friendly_insert_rejects_targets_without_editable_text() {
-        let error = validate_friendly_target(&FriendlyFocusedTarget {
-            application_name: "org.gnome.TextEditor".into(),
-            is_editable: true,
-            supports_editable_text: false,
-        })
+        let error = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "org.gnome.TextEditor".into(),
+                is_editable: true,
+                supports_editable_text: false,
+                supports_caret: true,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "org.gnome.TextEditor",
+            },
+        )
         .unwrap_err();
 
-        assert_eq!(error, FriendlyInsertError::MissingEditableText);
+        assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
+        assert_eq!(error.reason, FriendlyInsertError::MissingEditableText);
+    }
+
+    #[test]
+    fn friendly_insert_rejects_targets_without_caret_surface() {
+        let error = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "org.gnome.TextEditor".into(),
+                is_editable: true,
+                supports_editable_text: true,
+                supports_caret: false,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "org.gnome.TextEditor",
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
+        assert_eq!(error.reason, FriendlyInsertError::MissingCaretSurface);
     }
 
     #[test]
     fn friendly_insert_reports_stable_backend_name() {
-        let selection = validate_friendly_target(&FriendlyFocusedTarget {
-            application_name: "org.gnome.TextEditor".into(),
-            is_editable: true,
-            supports_editable_text: true,
-        })
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "org.gnome.TextEditor".into(),
+                is_editable: true,
+                supports_editable_text: true,
+                supports_caret: true,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "org.gnome.TextEditor",
+            },
+        )
         .unwrap();
 
         assert_eq!(selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
-        assert_eq!(selection.target_application_name, "org.gnome.TextEditor");
+        assert_eq!(selection.target_application_id, "org.gnome.TextEditor");
     }
 }
