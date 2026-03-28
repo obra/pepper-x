@@ -862,6 +862,7 @@ dependencies = [
  "pepperx-ipc",
  "pepperx-platform-gnome",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
