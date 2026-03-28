@@ -1,6 +1,6 @@
 import Gio from 'gi://Gio';
 
-export const SERVICE_NAME = 'com.obra.PepperX';
+export const SERVICE_NAME = 'com.obra.PepperX.Service';
 export const OBJECT_PATH = '/com/obra/PepperX';
 export const INTERFACE_NAME = 'com.obra.PepperX';
 

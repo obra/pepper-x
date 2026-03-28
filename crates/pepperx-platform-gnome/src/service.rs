@@ -17,6 +17,7 @@ pub enum AppCommand {
 #[derive(Debug)]
 pub struct ServiceHandle {
     _connection: Connection,
+    service: PepperXService,
 }
 
 impl ServiceHandle {
@@ -24,12 +25,17 @@ impl ServiceHandle {
         let service = PepperXService::new(command_sender);
         let connection = ConnectionBuilder::session()?
             .name(SERVICE_NAME)?
-            .serve_at(OBJECT_PATH, service)?
+            .serve_at(OBJECT_PATH, service.clone())?
             .build()?;
 
         Ok(Self {
             _connection: connection,
+            service,
         })
+    }
+
+    pub fn service(&self) -> PepperXService {
+        self.service.clone()
     }
 }
 
@@ -62,6 +68,28 @@ impl PepperXService {
             .lock()
             .expect("session lock poisoned")
             .state()
+    }
+
+    pub fn set_modifier_only_supported(&self, supported: bool) {
+        self.state
+            .capabilities
+            .lock()
+            .expect("capabilities lock poisoned")
+            .modifier_only_supported = supported;
+    }
+
+    pub fn start_modifier_only_recording(&self) {
+        match self.start_session(TriggerSource::ModifierOnly) {
+            Ok(()) => eprintln!("[Pepper X] modifier-only start"),
+            Err(error) => eprintln!("[Pepper X] modifier-only start failed: {error}"),
+        }
+    }
+
+    pub fn stop_modifier_only_recording(&self) {
+        match self.stop_session() {
+            Ok(()) => eprintln!("[Pepper X] modifier-only stop"),
+            Err(error) => eprintln!("[Pepper X] modifier-only stop failed: {error}"),
+        }
     }
 
     fn mark_extension_connected(&self) {
@@ -199,7 +227,7 @@ mod service_contract {
         assert_eq!(
             Capabilities::from_dbus_payload(service.get_capabilities()),
             Capabilities {
-                modifier_only_supported: true,
+                modifier_only_supported: false,
                 extension_connected: false,
                 version: "0.1.0".to_string(),
             }

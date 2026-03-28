@@ -859,6 +859,7 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "libadwaita",
+ "pepperx-ipc",
  "pepperx-platform-gnome",
  "serde",
 ]
@@ -875,6 +876,7 @@ dependencies = [
 name = "pepperx-platform-gnome"
 version = "0.1.0"
 dependencies = [
+ "glib",
  "pepperx-ipc",
  "pepperx-session",
  "zbus",

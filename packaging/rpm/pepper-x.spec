@@ -10,6 +10,7 @@ BuildArch:      x86_64
 
 %description
 Pepper X is an unsandboxed GTK4/libadwaita desktop shell for local dictation on GNOME Wayland.
+Pepper X V1 targets GNOME 48+ on Wayland, with a practical floor of Ubuntu 25.04+ and Fedora 42+.
 
 %install
 install -Dpm0755 target/release/pepper-x %{buildroot}%{_bindir}/pepper-x

@@ -1,5 +1,8 @@
 use adw::prelude::*;
-use pepperx_platform_gnome::service::{AppCommand, ServiceHandle};
+use pepperx_platform_gnome::{
+    atspi::ModifierCaptureHandle,
+    service::{AppCommand, PepperXService, ServiceHandle},
+};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -27,7 +30,9 @@ pub fn run() {
     let app = build_application();
     let window = MainWindow::new(&app);
     let (command_sender, command_receiver) = mpsc::channel();
-    let _service = ServiceHandle::start(command_sender).expect("failed to start GNOME IPC service");
+    let service_handle =
+        ServiceHandle::start(command_sender).expect("failed to start GNOME IPC service");
+    let _modifier_capture = start_modifier_capture(service_handle.service());
 
     install_command_pump(window.clone(), command_receiver);
     app.connect_activate(move |app| {
@@ -46,11 +51,27 @@ pub fn run() {
 
 fn run_headless() {
     let (command_sender, command_receiver) = mpsc::channel::<AppCommand>();
-    let _service = ServiceHandle::start(command_sender).expect("failed to start GNOME IPC service");
+    let service_handle =
+        ServiceHandle::start(command_sender).expect("failed to start GNOME IPC service");
+    let _modifier_capture = start_modifier_capture(service_handle.service());
     let _command_receiver = command_receiver;
     let main_loop = gtk::glib::MainLoop::new(None, false);
 
     main_loop.run();
+}
+
+fn start_modifier_capture(service: PepperXService) -> Option<ModifierCaptureHandle> {
+    match ModifierCaptureHandle::start(APPLICATION_ID, service.clone()) {
+        Ok(handle) => {
+            service.set_modifier_only_supported(true);
+            Some(handle)
+        }
+        Err(error) => {
+            service.set_modifier_only_supported(false);
+            eprintln!("[Pepper X] modifier-only capture unavailable: {error}");
+            None
+        }
+    }
 }
 
 fn install_command_pump(window: MainWindow, receiver: Receiver<AppCommand>) {
@@ -70,6 +91,7 @@ fn install_command_pump(window: MainWindow, receiver: Receiver<AppCommand>) {
 mod app_shell {
     use super::*;
     use crate::settings::RecordingTriggerMode;
+    use pepperx_ipc::SERVICE_NAME;
 
     #[test]
     fn app_shell_builds_application_with_stable_id() {
@@ -109,5 +131,10 @@ mod app_shell {
             settings.preferred_recording_trigger_mode,
             RecordingTriggerMode::ModifierOnly
         );
+    }
+
+    #[test]
+    fn app_shell_uses_distinct_application_and_ipc_bus_names() {
+        assert_ne!(APPLICATION_ID, SERVICE_NAME);
     }
 }

@@ -1,7 +1,7 @@
 use pepperx_session::TriggerSource;
 use serde::{Deserialize, Serialize};
 
-pub const SERVICE_NAME: &str = "com.obra.PepperX";
+pub const SERVICE_NAME: &str = "com.obra.PepperX.Service";
 pub const OBJECT_PATH: &str = "/com/obra/PepperX";
 pub const INTERFACE_NAME: &str = "com.obra.PepperX";
 
@@ -37,7 +37,7 @@ pub struct Capabilities {
 impl Capabilities {
     pub fn shell_default(version: impl Into<String>) -> Self {
         Self {
-            modifier_only_supported: true,
+            modifier_only_supported: false,
             extension_connected: false,
             version: version.into(),
         }
