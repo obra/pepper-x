@@ -6,6 +6,47 @@ use std::sync::Mutex;
 
 const CONTROL_LEFT_KEYSYM: u32 = 65_507;
 const CONTROL_RIGHT_KEYSYM: u32 = 65_508;
+const GNOME_TEXT_EDITOR_APP_ID: &str = "org.gnome.TextEditor";
+
+pub const FRIENDLY_INSERT_BACKEND_NAME: &str = "atspi-editable-text";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FriendlyFocusedTarget {
+    pub application_name: String,
+    pub is_editable: bool,
+    pub supports_editable_text: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FriendlyInsertSelection {
+    pub backend_name: &'static str,
+    pub target_application_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FriendlyInsertError {
+    UnsupportedApplication(String),
+    TargetNotEditable,
+    MissingEditableText,
+}
+
+impl fmt::Display for FriendlyInsertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedApplication(application_name) => {
+                write!(
+                    f,
+                    "friendly insertion is limited to {} for loop 2; got {}",
+                    GNOME_TEXT_EDITOR_APP_ID, application_name
+                )
+            }
+            Self::TargetNotEditable => f.write_str("friendly insertion target is not editable"),
+            Self::MissingEditableText => {
+                f.write_str("friendly insertion target is missing EditableText support")
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ModifierCaptureHandle {
@@ -164,6 +205,29 @@ impl CallbackState {
     }
 }
 
+fn validate_friendly_target(
+    target: &FriendlyFocusedTarget,
+) -> Result<FriendlyInsertSelection, FriendlyInsertError> {
+    if target.application_name != GNOME_TEXT_EDITOR_APP_ID {
+        return Err(FriendlyInsertError::UnsupportedApplication(
+            target.application_name.clone(),
+        ));
+    }
+
+    if !target.is_editable {
+        return Err(FriendlyInsertError::TargetNotEditable);
+    }
+
+    if !target.supports_editable_text {
+        return Err(FriendlyInsertError::MissingEditableText);
+    }
+
+    Ok(FriendlyInsertSelection {
+        backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+        target_application_name: target.application_name.clone(),
+    })
+}
+
 fn control_bit(keysym: u32) -> Option<u8> {
     match keysym {
         CONTROL_LEFT_KEYSYM => Some(0b01),
@@ -274,5 +338,62 @@ mod modifier_hold_state {
             state.handle_key_event(true, CONTROL_RIGHT_KEYSYM),
             Some(HoldSignal::Start)
         );
+    }
+}
+
+#[cfg(test)]
+mod friendly_insert_validation {
+    use super::*;
+
+    #[test]
+    fn friendly_insert_rejects_non_text_editor_targets() {
+        let error = validate_friendly_target(&FriendlyFocusedTarget {
+            application_name: "org.gnome.Calculator".into(),
+            is_editable: true,
+            supports_editable_text: true,
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            FriendlyInsertError::UnsupportedApplication("org.gnome.Calculator".into())
+        );
+    }
+
+    #[test]
+    fn friendly_insert_rejects_non_editable_targets() {
+        let error = validate_friendly_target(&FriendlyFocusedTarget {
+            application_name: "org.gnome.TextEditor".into(),
+            is_editable: false,
+            supports_editable_text: true,
+        })
+        .unwrap_err();
+
+        assert_eq!(error, FriendlyInsertError::TargetNotEditable);
+    }
+
+    #[test]
+    fn friendly_insert_rejects_targets_without_editable_text() {
+        let error = validate_friendly_target(&FriendlyFocusedTarget {
+            application_name: "org.gnome.TextEditor".into(),
+            is_editable: true,
+            supports_editable_text: false,
+        })
+        .unwrap_err();
+
+        assert_eq!(error, FriendlyInsertError::MissingEditableText);
+    }
+
+    #[test]
+    fn friendly_insert_reports_stable_backend_name() {
+        let selection = validate_friendly_target(&FriendlyFocusedTarget {
+            application_name: "org.gnome.TextEditor".into(),
+            is_editable: true,
+            supports_editable_text: true,
+        })
+        .unwrap();
+
+        assert_eq!(selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
+        assert_eq!(selection.target_application_name, "org.gnome.TextEditor");
     }
 }
