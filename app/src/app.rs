@@ -1,4 +1,7 @@
 use adw::prelude::*;
+use pepperx_platform_gnome::service::{AppCommand, ServiceHandle};
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
 
 use crate::background::BackgroundController;
 use crate::settings::AppSettings;
@@ -13,23 +16,54 @@ pub fn build_application() -> adw::Application {
 }
 
 pub fn run() {
+    if std::env::var("PEPPERX_HEADLESS").as_deref() == Ok("1") {
+        run_headless();
+        return;
+    }
+
     adw::init().expect("failed to initialize GTK/libadwaita");
 
     let _settings = AppSettings::default();
     let app = build_application();
-    app.connect_activate(|app| {
+    let window = MainWindow::new(&app);
+    let (command_sender, command_receiver) = mpsc::channel();
+    let _service = ServiceHandle::start(command_sender).expect("failed to start GNOME IPC service");
+
+    install_command_pump(window.clone(), command_receiver);
+    app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
             window.present();
             return;
         }
 
-        let window = MainWindow::new(app);
         let controller = BackgroundController::new();
 
         controller.install(app, &window);
         window.present_settings();
     });
     app.run();
+}
+
+fn run_headless() {
+    let (command_sender, command_receiver) = mpsc::channel::<AppCommand>();
+    let _service = ServiceHandle::start(command_sender).expect("failed to start GNOME IPC service");
+    let _command_receiver = command_receiver;
+    let main_loop = gtk::glib::MainLoop::new(None, false);
+
+    main_loop.run();
+}
+
+fn install_command_pump(window: MainWindow, receiver: Receiver<AppCommand>) {
+    gtk::glib::timeout_add_local(Duration::from_millis(50), move || {
+        while let Ok(command) = receiver.try_recv() {
+            match command {
+                AppCommand::ShowSettings => window.present_settings(),
+                AppCommand::ShowHistory => window.present_history(),
+            }
+        }
+
+        gtk::glib::ControlFlow::Continue
+    });
 }
 
 #[cfg(test)]

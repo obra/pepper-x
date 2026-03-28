@@ -1,1 +1,1 @@
-//! Pepper X GNOME platform placeholder crate.
+pub mod service;

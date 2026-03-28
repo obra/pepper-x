@@ -6,3 +6,8 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+pepperx-ipc = { path = "../pepperx-ipc" }
+pepperx-session = { path = "../pepperx-session" }
+zbus = "=5.12.0"

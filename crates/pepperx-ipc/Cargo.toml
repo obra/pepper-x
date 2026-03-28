@@ -6,3 +6,7 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+pepperx-session = { path = "../pepperx-session" }
+serde = { version = "1.0.228", features = ["derive"] }
