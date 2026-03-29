@@ -930,6 +930,7 @@ mod app_shell {
     use pepperx_corrections::CorrectionStore;
     use pepperx_models::catalog_model;
     use pepperx_platform_gnome::context::SupportingContext;
+    use std::ffi::OsString;
 
     fn materialize_ready_model(cache_root: &Path, model_id: &str) -> PathBuf {
         let model = catalog_model(model_id).expect("model should exist in catalog");
@@ -955,8 +956,22 @@ mod app_shell {
         install_path
     }
 
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_or_remove_env_var(name: &str, value: Option<OsString>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
     #[test]
     fn transcription_run_rejects_empty_model_dir_override() {
+        let _guard = lock_env();
         let previous_model_dir = std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR");
         std::env::set_var("PEPPERX_PARAKEET_MODEL_DIR", "");
 
@@ -967,20 +982,18 @@ mod app_shell {
             TranscriptionRunError::UnreadyAsrModel { model_id, .. }
                 if model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
         ));
-        match previous_model_dir {
-            Some(previous_model_dir) => {
-                std::env::set_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir)
-            }
-            None => std::env::remove_var("PEPPERX_PARAKEET_MODEL_DIR"),
-        }
+        set_or_remove_env_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir);
     }
 
     #[test]
     fn model_status_transcription_rejects_unready_selected_asr_model() {
+        let _guard = lock_env();
         let settings = AppSettings {
             preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
             ..AppSettings::default()
         };
+        let previous_model_dir = std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR");
+        std::env::remove_var("PEPPERX_PARAKEET_MODEL_DIR");
         let cache_root = std::env::temp_dir().join(format!(
             "pepper-x-model-status-unready-{}-{}",
             std::process::id(),
@@ -997,6 +1010,8 @@ mod app_shell {
             TranscriptionRunError::UnreadyAsrModel { model_id, .. }
                 if model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
         ));
+        set_or_remove_env_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir);
+        let _ = std::fs::remove_dir_all(cache_root);
     }
 
     #[test]
@@ -1349,9 +1364,17 @@ mod app_shell {
 
     #[test]
     fn cleanup_runtime_archives_missing_cleanup_model_configuration_as_failure() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-missing-model-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache_home = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-missing-model-cache-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1361,8 +1384,10 @@ mod app_shell {
         let _ = std::fs::remove_dir_all(&state_root);
         let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
         let previous_cleanup_model = std::env::var_os("PEPPERX_CLEANUP_MODEL_PATH");
+        let previous_xdg_cache_home = std::env::var_os("XDG_CACHE_HOME");
         std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
         std::env::remove_var("PEPPERX_CLEANUP_MODEL_PATH");
+        std::env::set_var("XDG_CACHE_HOME", &cache_home);
 
         let entry = archive_transcription_result_with_cleanup(
             TranscriptionResult {
@@ -1387,8 +1412,10 @@ mod app_shell {
             },
         )
         .expect("archive raw-only fallback entry");
-        let expected_model_path =
-            default_cache_root().join("cleanup/qwen2.5-3b-instruct-q4_k_m.gguf");
+        let expected_model_path = cache_home
+            .join("pepper-x")
+            .join("models")
+            .join("cleanup/qwen2.5-3b-instruct-q4_k_m.gguf");
 
         assert_eq!(entry.transcript_text, "hello from pepper x");
         assert_eq!(entry.display_text(), "hello from pepper x");
@@ -1396,7 +1423,7 @@ mod app_shell {
             entry.cleanup,
             Some(CleanupDiagnostics::failed(
                 "llama.cpp",
-                "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "unknown",
                 format!(
                     "cleanup model path does not exist: {}",
                     expected_model_path.display()
@@ -1410,12 +1437,14 @@ mod app_shell {
             }
             None => std::env::remove_var("PEPPERX_CLEANUP_MODEL_PATH"),
         }
+        set_or_remove_env_var("XDG_CACHE_HOME", previous_xdg_cache_home);
         match previous_state_root {
             Some(previous_state_root) => {
                 std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
             }
             None => std::env::remove_var("PEPPERX_STATE_ROOT"),
         }
+        let _ = std::fs::remove_dir_all(cache_home);
         let _ = std::fs::remove_dir_all(state_root);
     }
 
