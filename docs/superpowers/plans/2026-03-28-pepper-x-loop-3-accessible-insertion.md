@@ -2,144 +2,17 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Extend loop 2 so Pepper X can insert a prerecorded-WAV transcript into common accessible targets beyond GNOME Text Editor while keeping the insertion path text-oriented and honest.
+**Goal:** Finish loop 3 by carrying the already-landed accessible insertion target classes through Pepper X's app diagnostics and by validating the declared GNOME Text Editor and browser textarea surface.
 
-**Architecture:** Reuse the loop-2 transcript pipeline, keep the app first, and expand only the GNOME platform insertion selector. Loop 3 broadens semantic AT-SPI insertion from one allowlisted app to a small declared class of common accessible targets, records the chosen target class, and refuses everything else without inventing clipboard or `uinput` fallback behavior yet.
+**Architecture:** Loop 3 already has the platform-side selector and live smoke helper in place. The remaining work is app-owned: record the selected target class on transcript entries, surface it in the History summary, document the new target classes honestly, and rerun the exact loop-3 checks without broadening into clipboard or `uinput` fallback behavior.
 
-**Tech Stack:** Rust, Cargo workspace, GTK4/libadwaita, AT-SPI/libatspi, GNOME Wayland, Firefox or Chromium textareas for browser smoke, JSON Lines transcript archive
+**Tech Stack:** Rust, Cargo workspace, GTK4/libadwaita, AT-SPI/libatspi, GNOME Wayland, Firefox browser textareas, JSON Lines transcript archive
 
 ---
 
-## Chunk 1: Multi-Target Selection
+## Chunk 1: App Diagnostics
 
-### Task 1: Add failing classification tests for common accessible targets
-
-**Files:**
-- Modify: `crates/pepperx-platform-gnome/src/atspi.rs`
-
-- [ ] **Step 1: Write the failing classification tests**
-
-Add narrow pure tests that prove:
-- GNOME Text Editor still selects the semantic AT-SPI insertion backend
-- a browser textarea target class can select the same semantic backend without an app-specific allowlist
-- an ambiguous target without the required editable/caret surface still fails fast
-- unsupported targets stay rejected
-
-Use a tiny selector seam only:
-- target application identity key derived from runtime metadata
-- target class enum with only the loop-3 classes you are actually shipping
-- no fallback chain yet
-
-- [ ] **Step 2: Run the targeted selector tests**
-
-Run:
-```sh
-cd pepper-x
-cargo test -p pepperx-platform-gnome accessible_insert_selection -- --nocapture
-```
-
-Expected:
-- the new selector tests fail because loop 2 still only accepts GNOME Text Editor
-
-- [ ] **Step 3: Implement the minimal selector expansion**
-
-Implement:
-- one small target-class enum for loop 3
-- classification from focused-target metadata into:
-  - GNOME Text Editor
-  - browser textarea
-  - unsupported
-- semantic insertion selection for the supported classes only
-
-Do not add:
-- clipboard fallback
-- `uinput`
-- generic app heuristics beyond the declared classes
-
-- [ ] **Step 4: Re-run the targeted selector tests**
-
-Run the command from Step 2.
-
-Expected:
-- the loop-3 selector tests pass
-
-- [ ] **Step 5: Commit**
-
-```bash
-git -C pepper-x status --short
-git -C pepper-x add crates/pepperx-platform-gnome/src/atspi.rs
-git -C pepper-x commit -m "Expand Pepper X accessible target selection"
-```
-
-### Task 2: Add a real-session browser textarea smoke
-
-**Files:**
-- Modify: `crates/pepperx-platform-gnome/src/atspi.rs`
-- Create: `scripts/smoke-insert-accessible.sh`
-
-- [ ] **Step 1: Write the failing live smoke helper**
-
-Create `scripts/smoke-insert-accessible.sh`.
-
-The helper should:
-- require a live GNOME 48+ Wayland session
-- require a focused supported target before running
-- support exactly two declared smoke modes:
-  - `text-editor`
-  - `browser-textarea`
-- run an exact ignored test for the requested target class
-
-Keep the helper honest:
-- do not fake a browser target
-- do not route through the loop-4 fallback path
-- do not use clipboard or `uinput`
-
-- [ ] **Step 2: Run the live smoke helper to confirm failure**
-
-Run inside a live supported GNOME session:
-```sh
-cd pepper-x
-./scripts/smoke-insert-accessible.sh browser-textarea
-```
-
-Expected:
-- the browser smoke fails because loop 2 still only supports GNOME Text Editor
-
-- [ ] **Step 3: Implement browser textarea insertion through the semantic backend**
-
-Implement in `crates/pepperx-platform-gnome/src/atspi.rs`:
-- focused-target classification for browser textareas
-- reuse of the existing semantic insertion and readback path
-- one ignored live test for browser textarea insertion
-
-The implementation must:
-- keep GNOME Text Editor working
-- share as much of the insertion path as possible with loop 2
-- reject unsupported browser surfaces instead of pretending they are editable
-
-- [ ] **Step 4: Re-run the live smoke helper**
-
-Run:
-```sh
-cd pepper-x
-./scripts/smoke-insert-accessible.sh text-editor
-./scripts/smoke-insert-accessible.sh browser-textarea
-```
-
-Expected:
-- both declared loop-3 live smokes pass in a real GNOME Wayland session
-
-- [ ] **Step 5: Commit**
-
-```bash
-git -C pepper-x status --short
-git -C pepper-x add crates/pepperx-platform-gnome/src/atspi.rs scripts/smoke-insert-accessible.sh
-git -C pepper-x commit -m "Add Pepper X browser textarea insertion smoke"
-```
-
-## Chunk 2: App Diagnostics
-
-### Task 3: Record the target class on loop-3 transcript entries
+### Task 1: Record the target class on loop-3 transcript entries
 
 **Files:**
 - Modify: `app/src/transcript_log.rs`
@@ -151,7 +24,7 @@ git -C pepper-x commit -m "Add Pepper X browser textarea insertion smoke"
 Add tests that prove:
 - Pepper X records the supported target class on a successful loop-3 insertion
 - Pepper X preserves the existing loop-2 diagnostics for GNOME Text Editor
-- the History summary can show the latest target class without turning into a full diagnostics browser
+- the History summary can show the latest target class without turning into a diagnostics browser
 
 - [ ] **Step 2: Run the targeted app tests**
 
@@ -192,7 +65,9 @@ git -C pepper-x add app/src/transcript_log.rs app/src/transcription.rs app/src/w
 git -C pepper-x commit -m "Record Pepper X accessible target classes"
 ```
 
-### Task 4: Document the loop-3 surface
+## Chunk 2: Documentation
+
+### Task 2: Document the loop-3 surface
 
 **Files:**
 - Modify: `README.md`
@@ -220,7 +95,7 @@ git -C pepper-x commit -m "Document Pepper X accessible insertion loop"
 
 ## Chunk 3: Verification
 
-### Task 5: Run the exact loop-3 verification set
+### Task 3: Run the exact loop-3 verification set
 
 **Files:**
 - Test: `crates/pepperx-platform-gnome/src/atspi.rs`
