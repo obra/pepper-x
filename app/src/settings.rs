@@ -9,6 +9,8 @@ use crate::transcript_log::state_root;
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
 pub const DEFAULT_CLEANUP_PROMPT_PROFILE: &str = "ordinary-dictation";
+#[allow(dead_code)]
+pub const LAUNCH_AT_LOGIN_DESKTOP_FILE_NAME: &str = "pepper-x-autostart.desktop";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]

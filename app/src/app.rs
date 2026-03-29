@@ -1,10 +1,13 @@
 use adw::prelude::*;
+use pepper_x_app::startup_policy::{startup_launch_policy, StartupLaunchPolicy};
 use pepperx_models::{default_cache_root, model_inventory};
 use pepperx_platform_gnome::{
     atspi::ModifierCaptureHandle,
     service::{AppCommand, PepperXService, ServiceHandle},
 };
+use std::cell::Cell;
 use std::io;
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -13,7 +16,7 @@ use crate::history_store::{ArchivedRun, HistoryStore};
 use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::AppSettings;
 use crate::transcript_log::{state_root, TranscriptEntry};
-use crate::window::{settings_summary_text, MainWindow};
+use crate::window::{diagnostics_summary_text, settings_summary_text, MainWindow};
 
 pub const APPLICATION_ID: &str = "com.obra.PepperX";
 
@@ -35,19 +38,30 @@ pub fn run() {
     let app = build_application();
     let cache_root = default_cache_root();
     let inventory = model_inventory(&cache_root);
-    let window = MainWindow::new_with_history_and_settings(
-        &app,
-        load_history_runs().unwrap_or_else(|error| {
-            eprintln!("[Pepper X] failed to load transcript history: {error}");
-            Vec::new()
-        }),
-        settings_summary_text(&settings, &cache_root, &inventory),
-    );
+    let history_runs = load_history_runs().unwrap_or_else(|error| {
+        eprintln!("[Pepper X] failed to load transcript history: {error}");
+        Vec::new()
+    });
     let (command_sender, command_receiver) = mpsc::channel();
     let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))
         .expect("failed to start GNOME IPC service");
     let _modifier_capture = start_modifier_capture(service_handle.service());
+    let capabilities = service_handle.service().current_capabilities();
+    let window = MainWindow::new_with_history_and_settings(
+        &app,
+        history_runs.clone(),
+        settings_summary_text(&settings, &cache_root, &inventory),
+        diagnostics_summary_text(
+            &settings,
+            &cache_root,
+            &inventory,
+            history_runs.first(),
+            &capabilities,
+        ),
+    );
 
+    let startup_launch_policy = startup_launch_policy();
+    let skipped_initial_activation = Rc::new(Cell::new(false));
     install_command_pump(window.clone(), command_receiver);
     app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
@@ -58,6 +72,11 @@ pub fn run() {
         let controller = BackgroundController::new();
 
         controller.install(app, &window);
+        if matches!(startup_launch_policy, StartupLaunchPolicy::Background)
+            && !skipped_initial_activation.replace(true)
+        {
+            return;
+        }
         window.present_settings();
     });
     app.run();
@@ -139,6 +158,7 @@ mod app_shell {
             archived_source_wav_path: Some(std::path::PathBuf::from(
                 "/tmp/history/run-1/source.wav",
             )),
+            parent_run_id: None,
             prompt_profile: None,
             supporting_context_text: None,
             ocr_text: None,
@@ -216,6 +236,7 @@ mod app_shell {
                 wav_path: state_root.join("loop1.wav"),
             },
             || unreachable!(),
+            |_| unreachable!(),
             |wav_path| {
                 archive_transcription_result(TranscriptionResult {
                     wav_path: wav_path.to_path_buf(),
