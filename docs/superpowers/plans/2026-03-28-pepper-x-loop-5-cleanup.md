@@ -84,6 +84,7 @@ Add tests that prove:
 - Pepper X rejects a missing cleanup model path
 - the cleanup request preserves the raw ASR transcript and returns cleaned text separately
 - the cleanup prompt stays deterministic for the same transcript input
+- a cleanup backend failure falls back to the raw transcript path while recording cleanup failure diagnostics
 - the cleanup smoke path writes cleaned output to stdout while the JSONL archive still keeps the raw transcript text
 
 Keep one ignored real-backend test for the actual `llama.cpp` invocation.
@@ -109,8 +110,11 @@ Implement:
   - optional OCR context text
   - cleanup backend/model metadata
   - cleaned text and elapsed time
+  - explicit success/failure diagnostics
 - app-owned orchestration for `transcribe_wav_and_cleanup_to_log`
 - `PEPPERX_CLEANUP_MODEL_PATH` as the model locator for the real cleanup backend
+
+If cleanup is unavailable or fails after ASR succeeds, continue with the raw transcript path and archive the cleanup failure instead of aborting the entire dictation run.
 
 Keep the first cleanup prompt narrow:
 - punctuation and capitalization
@@ -165,6 +169,7 @@ Add tests that prove:
 - friendly insertion receives the cleaned text, not the raw ASR transcript
 - the archive still stores the raw transcript separately from the cleaned transcript
 - insertion diagnostics remain independent from cleanup diagnostics
+- a friendly insertion failure still returns the insertion error even when cleanup succeeded
 
 - [ ] **Step 2: Run the targeted cleanup-plus-insertion tests**
 
@@ -185,6 +190,7 @@ Implement:
 - one dedicated smoke helper that reuses the same GNOME Text Editor target from loop 2
 
 Do not fork or duplicate the insertion backend logic. Reuse the loop-2/3/4 insertion pipeline.
+If the insertion step fails, surface that insertion failure while preserving the cleanup diagnostics on the archived transcript entry.
 
 - [ ] **Step 4: Re-run the targeted cleanup-plus-insertion tests**
 
