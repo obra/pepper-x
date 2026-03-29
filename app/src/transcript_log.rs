@@ -412,4 +412,40 @@ mod tests {
         let copied = std::fs::read_to_string(copy_log.log_path()).expect("read copied log");
         assert!(copied.contains("\"attempted_backends\":[\"atspi-editable-text\",\"clipboard-paste\"]"));
     }
+
+    #[test]
+    fn transcript_log_round_trips_uinput_fallback_diagnostics_from_jsonl() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(
+                br#"{"source_wav_path":"loop4-uinput.wav","transcript_text":"hello wine","backend_name":"sherpa-onnx","model_name":"nemo-parakeet-tdt-0.6b-v2-int8","elapsed_ms":9,"insertion":{"backend_name":"uinput-text","target_application_name":"Wine","target_class":"hostile","attempted_backends":["atspi-editable-text","atspi-key-string","clipboard-paste","uinput-text"],"succeeded":true}}"#,
+            )
+            .expect("append loop4 uinput entry");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(b"\n")
+            .expect("append newline");
+
+        let entry = log
+            .recent_entries()
+            .expect("load entries")
+            .into_iter()
+            .next()
+            .expect("load loop4 uinput entry");
+        let copy_root = temp_root();
+        let copy_log = TranscriptLog::open(&copy_root).expect("open copy log");
+
+        copy_log.append(&entry).expect("append copied entry");
+
+        let copied = std::fs::read_to_string(copy_log.log_path()).expect("read copied log");
+        assert!(copied.contains("\"backend_name\":\"uinput-text\""));
+        assert!(copied.contains("\"attempted_backends\":[\"atspi-editable-text\",\"atspi-key-string\",\"clipboard-paste\",\"uinput-text\"]"));
+    }
 }

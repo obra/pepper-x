@@ -1,9 +1,14 @@
+use serde::{Deserialize, Serialize};
+use std::io::{BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
 use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
 use pepperx_platform_gnome::atspi::{
     insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
-    FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME,
+    FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME, UINPUT_TEXT_BACKEND_NAME,
 };
 
 use crate::transcript_log::{
@@ -12,6 +17,21 @@ use crate::transcript_log::{
 
 const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
 const FRIENDLY_TARGET_APPLICATION_ID: &str = "org.gnome.TextEditor";
+const DEFAULT_UINPUT_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-uinput-helper";
+const UINPUT_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
+const UINPUT_HELPER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct UinputInsertRequest {
+    text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct UinputInsertResponse {
+    ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
 
 #[derive(Debug)]
 pub enum TranscriptionRunError {
@@ -63,13 +83,168 @@ pub fn transcribe_wav_and_insert_friendly_to_log(
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
     let result = transcribe_wav_result(wav_path)?;
     archive_transcription_result_with_friendly_insert(result, |transcript_text| {
-        insert_text_into_friendly_target(
+        insert_with_uinput_fallback(
             transcript_text,
-            &FriendlyInsertPolicy {
-                target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
+            |transcript_text| {
+                insert_text_into_friendly_target(
+                    transcript_text,
+                    &FriendlyInsertPolicy {
+                        target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
+                    },
+                )
             },
+            request_uinput_text_insertion,
         )
     })
+}
+
+fn insert_with_uinput_fallback<P, H>(
+    text: &str,
+    platform_insert: P,
+    helper_insert: H,
+) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>
+where
+    P: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
+    H: FnOnce(UinputInsertRequest) -> Result<(), FriendlyInsertRunError>,
+{
+    match platform_insert(text) {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            let Some(selection) = error.selected_backend().cloned() else {
+                return Err(error);
+            };
+
+            if selection.backend_name != UINPUT_TEXT_BACKEND_NAME {
+                return Err(error);
+            }
+
+            let target_application_name = error.target_application_name().unwrap_or("unknown");
+            helper_insert(UinputInsertRequest { text: text.into() }).map_err(|helper_error| {
+                FriendlyInsertRunError::SelectedBackendFailure {
+                    selection: selection.clone(),
+                    target_application_name: target_application_name.into(),
+                    reason: Box::new(helper_error),
+                }
+            })?;
+            let target_class = selection.target_class.to_string();
+
+            Ok(FriendlyInsertOutcome {
+                selection,
+                target_application_name: target_application_name.into(),
+                target_class,
+                caret_offset: -1,
+                before_text: String::new(),
+                after_text: String::new(),
+            })
+        }
+    }
+}
+
+fn request_uinput_text_insertion(
+    request: UinputInsertRequest,
+) -> Result<(), FriendlyInsertRunError> {
+    let socket_path = configured_uinput_helper_socket_path()?;
+    let mut stream = connect_or_spawn_uinput_helper(&socket_path)?;
+    serde_json::to_writer(&mut stream, &request).map_err(|error| {
+        FriendlyInsertRunError::Access(format!(
+            "failed to encode Pepper X uinput request: {error}"
+        ))
+    })?;
+    stream.write_all(b"\n").map_err(|error| {
+        FriendlyInsertRunError::Access(format!(
+            "failed to write Pepper X uinput request: {error}"
+        ))
+    })?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|error| {
+            FriendlyInsertRunError::Access(format!(
+                "failed to finish Pepper X uinput request: {error}"
+            ))
+        })?;
+
+    let response: UinputInsertResponse =
+        serde_json::from_reader(BufReader::new(stream)).map_err(|error| {
+            FriendlyInsertRunError::Access(format!(
+                "failed to decode Pepper X uinput response: {error}"
+            ))
+        })?;
+
+    match response.error {
+        Some(error) => Err(FriendlyInsertRunError::Access(format!(
+            "Pepper X uinput helper failed: {error}"
+        ))),
+        None if response.ok => Ok(()),
+        None => Err(FriendlyInsertRunError::Access(
+            "Pepper X uinput helper returned an empty response".into(),
+        )),
+    }
+}
+
+fn connect_or_spawn_uinput_helper(socket_path: &Path) -> Result<UnixStream, FriendlyInsertRunError> {
+    match UnixStream::connect(socket_path) {
+        Ok(stream) => return Ok(stream),
+        Err(initial_error) if initial_error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(FriendlyInsertRunError::Access(format!(
+                "failed to connect to Pepper X uinput helper at {}: {initial_error}",
+                socket_path.display()
+            )));
+        }
+        Err(_) => {}
+    }
+
+    let helper_bin = configured_uinput_helper_bin_path();
+    Command::new(&helper_bin)
+        .spawn()
+        .map_err(|error| {
+            FriendlyInsertRunError::Access(format!(
+                "failed to launch Pepper X uinput helper {}: {error}",
+                helper_bin.display()
+            ))
+        })?;
+
+    let deadline = std::time::Instant::now() + UINPUT_HELPER_STARTUP_TIMEOUT;
+    loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if std::time::Instant::now() < deadline
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::NotFound
+                    ) =>
+            {
+                std::thread::sleep(UINPUT_HELPER_STARTUP_POLL_INTERVAL);
+            }
+            Err(error) => {
+                return Err(FriendlyInsertRunError::Access(format!(
+                    "Pepper X uinput helper did not become ready at {}: {error}",
+                    socket_path.display()
+                )));
+            }
+        }
+    }
+}
+
+fn configured_uinput_helper_bin_path() -> PathBuf {
+    nonempty_env_path("PEPPERX_UINPUT_HELPER_BIN")
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_UINPUT_HELPER_BIN))
+}
+
+fn configured_uinput_helper_socket_path() -> Result<PathBuf, FriendlyInsertRunError> {
+    if let Some(socket_path) = nonempty_env_path("PEPPERX_UINPUT_HELPER_SOCKET") {
+        return Ok(socket_path);
+    }
+
+    let runtime_dir = nonempty_env_path("XDG_RUNTIME_DIR").ok_or_else(|| {
+        FriendlyInsertRunError::Access(
+            "Pepper X uinput fallback requires XDG_RUNTIME_DIR or PEPPERX_UINPUT_HELPER_SOCKET"
+                .into(),
+        )
+    })?;
+
+    Ok(runtime_dir.join("pepper-x").join("uinput-helper.sock"))
 }
 
 fn transcribe_wav_result(wav_path: &Path) -> Result<TranscriptionResult, TranscriptionRunError> {
@@ -321,6 +496,192 @@ mod app_shell {
                     pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
                     pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
                 ])
+            )
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn uinput_insert_routes_selected_uinput_backend_to_helper() {
+        let mut helper_requests = Vec::new();
+
+        let outcome = insert_with_uinput_fallback(
+            "hello hostile target",
+            |_| {
+                Err(FriendlyInsertRunError::SelectedBackendFailure {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: UINPUT_TEXT_BACKEND_NAME,
+                        target_application_id: "wine".into(),
+                        target_class: "hostile",
+                        attempted_backends: vec![
+                            pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                            pepperx_platform_gnome::atspi::STRING_INJECTION_BACKEND_NAME,
+                            pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                            UINPUT_TEXT_BACKEND_NAME,
+                        ],
+                    },
+                    target_application_name: "Wine".into(),
+                    reason: Box::new(FriendlyInsertRunError::Access(
+                        "friendly insertion backend uinput-text is not implemented yet".into(),
+                    )),
+                })
+            },
+            |request| {
+                helper_requests.push(request.text.clone());
+                Ok(())
+            },
+        )
+        .expect("uinput helper should recover the last fallback");
+
+        assert_eq!(helper_requests, vec!["hello hostile target".to_string()]);
+        assert_eq!(outcome.selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
+        assert_eq!(outcome.target_application_name, "Wine");
+        assert_eq!(outcome.target_class, "hostile");
+        assert_eq!(
+            outcome.selection.attempted_backends,
+            vec![
+                pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                pepperx_platform_gnome::atspi::STRING_INJECTION_BACKEND_NAME,
+                pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                UINPUT_TEXT_BACKEND_NAME,
+            ]
+        );
+    }
+
+    #[test]
+    fn uinput_insert_skips_helper_when_platform_backend_is_not_uinput() {
+        let error = insert_with_uinput_fallback(
+            "leave this alone",
+            |_| {
+                Err(FriendlyInsertRunError::SelectedBackendFailure {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                        target_application_id: "firefox".into(),
+                        target_class: "browser-textarea",
+                        attempted_backends: vec![
+                            pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                            pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                        ],
+                    },
+                    target_application_name: "Firefox".into(),
+                    reason: Box::new(FriendlyInsertRunError::Access(
+                        "clipboard mediation failed".into(),
+                    )),
+                })
+            },
+            |_| panic!("helper should not run before the uinput fallback"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.selected_backend().expect("selected backend").backend_name,
+            pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME
+        );
+        assert_eq!(error.target_application_name(), Some("Firefox"));
+    }
+
+    #[test]
+    fn uinput_insert_request_serializes_text_only_payload() {
+        let payload = serde_json::to_string(&UinputInsertRequest {
+            text: "hello wine".into(),
+        })
+        .expect("serialize request");
+
+        assert_eq!(payload, r#"{"text":"hello wine"}"#);
+        assert!(!payload.contains("keycode"));
+        assert!(!payload.contains("modifier"));
+        assert!(!payload.contains("shortcut"));
+    }
+
+    #[test]
+    fn uinput_insert_uses_libexec_helper_path_by_default() {
+        let previous_helper_bin = std::env::var_os("PEPPERX_UINPUT_HELPER_BIN");
+        std::env::remove_var("PEPPERX_UINPUT_HELPER_BIN");
+
+        let helper_path = configured_uinput_helper_bin_path();
+
+        assert_eq!(
+            helper_path,
+            PathBuf::from("/usr/libexec/pepper-x/pepperx-uinput-helper")
+        );
+
+        match previous_helper_bin {
+            Some(previous_helper_bin) => {
+                std::env::set_var("PEPPERX_UINPUT_HELPER_BIN", previous_helper_bin)
+            }
+            None => std::env::remove_var("PEPPERX_UINPUT_HELPER_BIN"),
+        }
+    }
+
+    #[test]
+    fn uinput_insert_archives_last_fallback_diagnostics() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-uinput-insert-success-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_friendly_insert(
+            TranscriptionResult {
+                wav_path: state_root.join("loop4-uinput.wav"),
+                transcript_text: "type into wine".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| {
+                insert_with_uinput_fallback(
+                    "type into wine",
+                    |_| {
+                        Err(FriendlyInsertRunError::SelectedBackendFailure {
+                            selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                                backend_name: UINPUT_TEXT_BACKEND_NAME,
+                                target_application_id: "wine".into(),
+                                target_class: "hostile",
+                                attempted_backends: vec![
+                                    pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                                    pepperx_platform_gnome::atspi::STRING_INJECTION_BACKEND_NAME,
+                                    pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                                    UINPUT_TEXT_BACKEND_NAME,
+                                ],
+                            },
+                            target_application_name: "Wine".into(),
+                            reason: Box::new(FriendlyInsertRunError::Access(
+                                "friendly insertion backend uinput-text is not implemented yet"
+                                    .into(),
+                            )),
+                        })
+                    },
+                    |_| Ok(()),
+                )
+            },
+        )
+        .expect("archive entry");
+
+        assert_eq!(
+            entry.insertion,
+            Some(
+                InsertionDiagnostics::succeeded(UINPUT_TEXT_BACKEND_NAME, "Wine")
+                    .with_target_class("hostile")
+                    .with_attempted_backends([
+                        pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                        pepperx_platform_gnome::atspi::STRING_INJECTION_BACKEND_NAME,
+                        pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                        UINPUT_TEXT_BACKEND_NAME,
+                    ])
             )
         );
 

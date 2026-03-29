@@ -13,8 +13,10 @@ CONTROL_FILE = DEB_ROOT / "control"
 
 APPLICATION_ID = "com.obra.PepperX"
 EXECUTABLE_NAME = "pepper-x"
+UINPUT_HELPER_NAME = "pepperx-uinput-helper"
 DESKTOP_INSTALL_PATH = "/usr/share/applications/com.obra.PepperX.desktop"
 AUTOSTART_INSTALL_PATH = "/etc/xdg/autostart/pepper-x-autostart.desktop"
+UINPUT_HELPER_INSTALL_PATH = f"pepper-x/{UINPUT_HELPER_NAME}"
 
 
 def load_desktop_entry(path: Path) -> dict[str, str]:
@@ -57,6 +59,7 @@ def test_rpm_spec_references_expected_install_paths() -> None:
     assert "Name:           pepper-x" in spec
     assert "BuildArch:      x86_64" in spec
     assert f"%{{_bindir}}/{EXECUTABLE_NAME}" in spec
+    assert f"%{{_libexecdir}}/{UINPUT_HELPER_INSTALL_PATH}" in spec
     assert DESKTOP_INSTALL_PATH in spec
     assert AUTOSTART_INSTALL_PATH in spec
     assert "GNOME 48+" in spec

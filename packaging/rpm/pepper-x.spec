@@ -14,10 +14,12 @@ Pepper X V1 targets GNOME 48+ on Wayland, with a practical floor of Ubuntu 25.04
 
 %install
 install -Dpm0755 target/release/pepper-x %{buildroot}%{_bindir}/pepper-x
+install -Dpm0755 target/release/pepperx-uinput-helper %{buildroot}%{_libexecdir}/pepper-x/pepperx-uinput-helper
 install -Dpm0644 packaging/deb/pepper-x.desktop %{buildroot}/usr/share/applications/com.obra.PepperX.desktop
 install -Dpm0644 packaging/deb/pepper-x-autostart.desktop %{buildroot}/etc/xdg/autostart/pepper-x-autostart.desktop
 
 %files
 %{_bindir}/pepper-x
+%{_libexecdir}/pepper-x/pepperx-uinput-helper
 /usr/share/applications/com.obra.PepperX.desktop
 /etc/xdg/autostart/pepper-x-autostart.desktop
