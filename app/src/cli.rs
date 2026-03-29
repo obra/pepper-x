@@ -88,7 +88,7 @@ where
 }
 
 pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, TranscriptionRunError> {
-    let settings = AppSettings::default();
+    let settings = AppSettings::load_or_default();
 
     run_with(
         startup_mode,
@@ -145,8 +145,24 @@ where
 }
 
 fn wait_for_stop_signal() -> std::io::Result<()> {
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
+    wait_for_stop_signal_from(&mut stdin)
+}
+
+fn wait_for_stop_signal_from<R>(reader: &mut R) -> std::io::Result<()>
+where
+    R: std::io::BufRead,
+{
     let mut stop_line = String::new();
-    std::io::stdin().read_line(&mut stop_line)?;
+    let bytes_read = reader.read_line(&mut stop_line)?;
+    if bytes_read == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "stdin closed before Pepper X live stop signal",
+        ));
+    }
+
     Ok(())
 }
 
@@ -203,6 +219,15 @@ mod cli_mode {
         .expect("live recording mode should succeed");
 
         assert_eq!(result, Some(expected));
+    }
+
+    #[test]
+    fn app_shell_recording_cli_mode_rejects_eof_stop_signal() {
+        let mut closed_stdin = std::io::Cursor::new(Vec::<u8>::new());
+
+        let error = wait_for_stop_signal_from(&mut closed_stdin).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[test]

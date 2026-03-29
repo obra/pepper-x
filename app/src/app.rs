@@ -29,7 +29,7 @@ pub fn run() {
 
     adw::init().expect("failed to initialize GTK/libadwaita");
 
-    let settings = AppSettings::default();
+    let settings = AppSettings::load_or_default();
     let app = build_application();
     let window = MainWindow::new_with_history(
         &app,
@@ -59,7 +59,7 @@ pub fn run() {
 }
 
 fn run_headless() {
-    let settings = AppSettings::default();
+    let settings = AppSettings::load_or_default();
     let (command_sender, command_receiver) = mpsc::channel::<AppCommand>();
     let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))
         .expect("failed to start GNOME IPC service");
