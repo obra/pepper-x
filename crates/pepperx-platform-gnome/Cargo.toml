@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 glib = "0.22.3"
+gtk = { package = "gtk4", version = "0.11.1", features = ["gnome_46"] }
 pepperx-ipc = { path = "../pepperx-ipc" }
 pepperx-session = { path = "../pepperx-session" }
 zbus = "=5.12.0"

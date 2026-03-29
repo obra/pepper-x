@@ -267,6 +267,73 @@ mod app_shell {
     }
 
     #[test]
+    fn app_shell_archives_clipboard_insert_success_diagnostics() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-clipboard-insert-success-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_friendly_insert(
+            TranscriptionResult {
+                wav_path: state_root.join("loop4.wav"),
+                transcript_text: "paste through clipboard".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| {
+                Ok(FriendlyInsertOutcome {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                        target_application_id: "firefox".into(),
+                        target_class: "browser-textarea",
+                        attempted_backends: vec![
+                            pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                            pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                        ],
+                    },
+                    target_application_name: "Firefox".into(),
+                    target_class: "browser-textarea".into(),
+                    caret_offset: -1,
+                    before_text: String::new(),
+                    after_text: String::new(),
+                })
+            },
+        )
+        .expect("archive entry");
+
+        assert_eq!(
+            entry.insertion,
+            Some(
+                InsertionDiagnostics::succeeded(
+                    pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                    "Firefox",
+                )
+                .with_target_class("browser-textarea")
+                .with_attempted_backends([
+                    pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                    pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                ])
+            )
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
     fn app_shell_archives_friendly_insert_failure_diagnostics() {
         let _guard = env_lock().lock().unwrap();
         let state_root = std::env::temp_dir().join(format!(
