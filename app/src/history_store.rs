@@ -13,6 +13,7 @@ const ARCHIVED_SOURCE_WAV_FILE_NAME: &str = "source.wav";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveWriteRequest {
     pub entry: TranscriptEntry,
+    pub parent_run_id: Option<String>,
     pub prompt_profile: Option<String>,
     pub supporting_context_text: Option<String>,
     pub ocr_text: Option<String>,
@@ -22,10 +23,16 @@ impl ArchiveWriteRequest {
     pub fn new(entry: TranscriptEntry) -> Self {
         Self {
             entry,
+            parent_run_id: None,
             prompt_profile: None,
             supporting_context_text: None,
             ocr_text: None,
         }
+    }
+
+    pub fn with_parent_run_id(mut self, parent_run_id: impl Into<String>) -> Self {
+        self.parent_run_id = Some(parent_run_id.into());
+        self
     }
 
     pub fn with_prompt_profile(mut self, prompt_profile: impl Into<String>) -> Self {
@@ -54,6 +61,7 @@ pub struct ArchivedRun {
     pub metadata_path: PathBuf,
     pub entry: TranscriptEntry,
     pub archived_source_wav_path: Option<PathBuf>,
+    pub parent_run_id: Option<String>,
     pub prompt_profile: Option<String>,
     pub supporting_context_text: Option<String>,
     pub ocr_text: Option<String>,
@@ -96,6 +104,7 @@ impl HistoryStore {
             archived_at_ms,
             entry: request.entry.clone(),
             archived_source_wav_path: archived_source_wav_path.clone(),
+            parent_run_id: request.parent_run_id.clone(),
             prompt_profile: request.prompt_profile.clone(),
             supporting_context_text: request.supporting_context_text.clone(),
             ocr_text: request.ocr_text.clone(),
@@ -107,6 +116,20 @@ impl HistoryStore {
         self.legacy_log.append(&request.entry)?;
 
         Ok(metadata.into_archived_run(run_dir, metadata_path))
+    }
+
+    pub fn load_run(&self, run_id: &str) -> io::Result<Option<ArchivedRun>> {
+        let run_dir = self.history_root.join(run_id);
+        let metadata_path = run_dir.join(ARCHIVE_METADATA_FILE_NAME);
+        if !metadata_path.is_file() {
+            return Ok(None);
+        }
+
+        let metadata_json = fs::read_to_string(&metadata_path)?;
+        let metadata: StoredArchivedRun = serde_json::from_str(&metadata_json)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+        Ok(Some(metadata.into_archived_run(run_dir, metadata_path)))
     }
 
     pub fn recent_runs(&self) -> io::Result<Vec<ArchivedRun>> {
@@ -169,6 +192,7 @@ impl HistoryStore {
                     metadata_path,
                     entry,
                     archived_source_wav_path: None,
+                    parent_run_id: None,
                     prompt_profile: None,
                     supporting_context_text: None,
                     ocr_text: None,
@@ -186,6 +210,8 @@ struct StoredArchivedRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     archived_source_wav_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     supporting_context_text: Option<String>,
@@ -202,6 +228,7 @@ impl StoredArchivedRun {
             metadata_path,
             entry: self.entry,
             archived_source_wav_path: self.archived_source_wav_path,
+            parent_run_id: self.parent_run_id,
             prompt_profile: self.prompt_profile,
             supporting_context_text: self.supporting_context_text,
             ocr_text: self.ocr_text,
@@ -288,6 +315,7 @@ mod history_store_tests {
         assert!(archived.run_dir.is_dir());
         assert!(archived.metadata_path.is_file());
         assert_eq!(archived.entry, request.entry);
+        assert_eq!(archived.parent_run_id, None);
         assert_eq!(
             archived.prompt_profile.as_deref(),
             Some("ordinary-dictation")
@@ -364,6 +392,35 @@ mod history_store_tests {
         assert_eq!(archived.ocr_text.as_deref(), Some("ocr fallback text"));
         assert!(archived.entry.cleanup.is_some());
         assert!(archived.entry.insertion.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn history_store_load_run_round_trips_parent_linkage() {
+        let root = temp_root("load-run");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_wav_path = root.join("source.wav");
+        std::fs::write(&source_wav_path, b"pepper-x-audio").unwrap();
+        let store = HistoryStore::open(&root).expect("history store should open");
+
+        let parent = store
+            .archive_run(&ArchiveWriteRequest::new(transcript_entry(
+                &source_wav_path,
+            )))
+            .expect("parent archive write should succeed");
+        let child = store
+            .archive_run(
+                &ArchiveWriteRequest::new(transcript_entry(&source_wav_path))
+                    .with_parent_run_id(parent.run_id.clone()),
+            )
+            .expect("child archive write should succeed");
+        let reloaded_child = store
+            .load_run(&child.run_id)
+            .expect("history store should load a specific run")
+            .expect("child run should exist");
+
+        assert_eq!(reloaded_child.run_id, child.run_id);
+        assert_eq!(reloaded_child.parent_run_id, Some(parent.run_id));
         let _ = std::fs::remove_dir_all(root);
     }
 }

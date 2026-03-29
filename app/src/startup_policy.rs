@@ -39,7 +39,7 @@ mod tests {
         let previous = std::env::var_os("GIO_LAUNCHED_DESKTOP_FILE");
         std::env::set_var(
             "GIO_LAUNCHED_DESKTOP_FILE",
-            "/usr/share/applications/pepper-x-autostart.desktop",
+            "/etc/xdg/autostart/pepper-x-autostart.desktop",
         );
 
         assert_eq!(startup_launch_policy(), StartupLaunchPolicy::Background);

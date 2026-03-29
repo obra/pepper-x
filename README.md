@@ -212,3 +212,84 @@ That helper verifies three things together on a real GNOME Wayland session:
 - the archived raw transcript remains distinct from the cleaned transcript
 - the cleanup CLI stdout matches the archived cleaned transcript
 - the focused Text Editor buffer contains the cleaned transcript after the app insertion path runs
+
+## Loop 6 Archived Reruns
+
+Loop 6 adds archived-run reruns without mutating the original run:
+
+- rerun one archived recording by run ID
+- keep the parent run intact
+- archive the rerun as a new child linked by `parent_run_id`
+- override the cleanup prompt profile now, and optionally override ASR and cleanup models when more than one supported model is installed
+
+The headless rerun entrypoint is:
+
+```sh
+PEPPERX_PARAKEET_MODEL_DIR=/path/to/parakeet \
+PEPPERX_CLEANUP_MODEL_PATH=/path/to/model.gguf \
+cargo run -p pepper-x-app -- --rerun-archived-run <run-id> \
+  --cleanup-prompt-profile literal-dictation
+```
+
+If additional supported models are installed, you can also pass `--asr-model <model-id>` and `--cleanup-model <model-id>`.
+
+To run the rerun smoke against a caller-owned state root:
+
+```sh
+export PEPPERX_STATE_ROOT="$(mktemp -d)"
+PEPPERX_PARAKEET_MODEL_DIR=/path/to/parakeet \
+PEPPERX_CLEANUP_MODEL_PATH=/path/to/model.gguf \
+tests/smoke/test_rerun_pipeline.sh
+```
+
+That smoke proves the rerun uses the archived parent WAV, archives a new child run, preserves the parent metadata, and records the rerun prompt override on the child.
+
+## Diagnostics Surface
+
+Pepper X now exposes a dedicated Diagnostics page in the GTK shell. It is a first-pass runtime surface, not a generic log blob.
+
+Current diagnostics coverage:
+
+- selected ASR model, cleanup model, and cleanup prompt profile
+- model cache root plus per-model install paths and readiness
+- extension connectivity, modifier-capture support, and service version
+- latest-run ASR and cleanup timings
+- latest-run insertion backend, insertion target, OCR usage, and failure reasons
+
+The history browser remains the place to inspect one archived run or one parent/rerun comparison in detail. The Diagnostics page is the current-session overview.
+
+## Package Install Verification
+
+Pepper X still ships as an unsandboxed native-app beta. Package verification is script-first at this stage:
+
+```sh
+python3 -m pytest packaging/tests -q
+tests/smoke/test_packaging_install.sh
+./scripts/verify-extension-install.sh
+```
+
+Those checks cover:
+
+- Debian and RPM runtime dependency metadata
+- packaged binary, helper, desktop, and autostart asset coverage
+- desktop/autostart metadata consistency
+- packaged GNOME extension asset validation through the same extension install checker used for dev installs
+
+## Startup, Upgrade, and Uninstall Verification
+
+Pepper X distinguishes two packaged launch modes:
+
+- interactive launch from the desktop entry opens the normal UI
+- session autostart keeps the runtime alive without forcing the window open
+
+Use the release checklist and verification helpers when producing beta artifacts:
+
+```sh
+./scripts/verify-upgrade-ubuntu.sh <old.deb> <new.deb>
+./scripts/verify-upgrade-fedora.sh <old.rpm> <new.rpm>
+./scripts/verify-uninstall-cleanup.sh
+```
+
+The release-process checklist lives in:
+
+- `docs/release/pepper-x-v1.md`

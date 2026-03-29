@@ -1,5 +1,6 @@
 use adw::prelude::*;
 use gtk::gio;
+use pepper_x_app::startup_policy::StartupLaunchPolicy;
 
 use crate::window::MainWindow;
 
@@ -38,5 +39,40 @@ impl BackgroundController {
             quit_app.quit();
         });
         app.add_action(&quit);
+    }
+}
+
+pub fn should_present_initial_window(
+    startup_launch_policy: StartupLaunchPolicy,
+    skipped_initial_background_activation: bool,
+) -> bool {
+    match startup_launch_policy {
+        StartupLaunchPolicy::Interactive => true,
+        StartupLaunchPolicy::Background => skipped_initial_background_activation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_interactive_launch_presents_the_initial_window() {
+        assert!(should_present_initial_window(
+            StartupLaunchPolicy::Interactive,
+            false
+        ));
+    }
+
+    #[test]
+    fn background_autostart_skips_only_the_first_initial_window() {
+        assert!(!should_present_initial_window(
+            StartupLaunchPolicy::Background,
+            false
+        ));
+        assert!(should_present_initial_window(
+            StartupLaunchPolicy::Background,
+            true
+        ));
     }
 }

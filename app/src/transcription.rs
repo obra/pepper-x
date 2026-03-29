@@ -8,7 +8,7 @@ use std::time::Duration;
 use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
 use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 use pepperx_corrections::{learn_correction, CorrectionStore};
-use pepperx_models::{catalog_model, default_cache_root, model_readiness};
+use pepperx_models::{catalog_model, default_cache_root, model_readiness, ModelKind};
 use pepperx_platform_gnome::atspi::{
     insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
     FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME, UINPUT_TEXT_BACKEND_NAME,
@@ -28,6 +28,7 @@ const FRIENDLY_TARGET_APPLICATION_ID: &str = "org.gnome.TextEditor";
 const DEFAULT_UINPUT_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-uinput-helper";
 const UINPUT_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
 const UINPUT_HELPER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const DISABLE_CONTEXT_CAPTURE_ENV: &str = "PEPPERX_DISABLE_CONTEXT_CAPTURE";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct UinputInsertRequest {
@@ -41,6 +42,14 @@ struct UinputInsertResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedRunRerunRequest {
+    pub run_id: String,
+    pub asr_model_id: Option<String>,
+    pub cleanup_model_id: Option<String>,
+    pub cleanup_prompt_profile: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum TranscriptionRunError {
     UnknownAsrModel(String),
@@ -49,6 +58,8 @@ pub enum TranscriptionRunError {
         install_path: PathBuf,
         missing_files: Vec<String>,
     },
+    ArchivedRunNotFound(String),
+    ArchivedRunMissingSourceWav(String),
     TranscriptLog(std::io::Error),
     Asr(TranscriptionError),
     FriendlyInsert(FriendlyInsertRunError),
@@ -88,6 +99,13 @@ impl std::fmt::Display for TranscriptionRunError {
                 "Pepper X ASR model {model_id} is not ready at {}: missing {}",
                 install_path.display(),
                 missing_files.join(", ")
+            ),
+            Self::ArchivedRunNotFound(run_id) => {
+                write!(f, "Pepper X archived run was not found: {run_id}")
+            }
+            Self::ArchivedRunMissingSourceWav(run_id) => write!(
+                f,
+                "Pepper X archived run is missing its source WAV: {run_id}"
             ),
             Self::TranscriptLog(error) => {
                 write!(f, "failed to write Pepper X transcript log: {error}")
@@ -349,10 +367,131 @@ fn configured_uinput_helper_socket_path() -> Result<PathBuf, FriendlyInsertRunEr
 }
 
 fn transcribe_wav_result(wav_path: &Path) -> Result<TranscriptionResult, TranscriptionRunError> {
-    let model_dir = configured_model_dir()?;
     let settings = AppSettings::load_or_default();
-    let request = TranscriptionRequest::new(wav_path, &model_dir, settings.preferred_asr_model);
+    transcribe_wav_result_with_model_id(wav_path, &settings.preferred_asr_model)
+}
+
+fn transcribe_wav_result_with_model_id(
+    wav_path: &Path,
+    model_id: &str,
+) -> Result<TranscriptionResult, TranscriptionRunError> {
+    let model_dir = configured_model_dir_for_model_id(model_id)?;
+    let request = TranscriptionRequest::new(wav_path, &model_dir, model_id);
     Ok(transcribe_wav(&request)?)
+}
+
+pub fn rerun_archived_run_to_log(
+    request: ArchivedRunRerunRequest,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let cache_root = default_cache_root();
+    let cleanup_cache_root = cache_root.clone();
+    let explicit_asr_model = request.asr_model_id.is_some();
+    let explicit_cleanup_model = request.cleanup_model_id.is_some();
+    rerun_archived_run_with(
+        request,
+        move |wav_path, model_id| {
+            let model_dir = if explicit_asr_model {
+                configured_requested_model_dir_for_model_id_with(model_id, &cache_root)?
+            } else {
+                configured_model_dir_for_model_id(model_id)?
+            };
+            let request = TranscriptionRequest::new(wav_path, &model_dir, model_id);
+            Ok(transcribe_wav(&request)?)
+        },
+        move |cleanup_model_id, request| {
+            let request = CleanupRequest {
+                model_path: if explicit_cleanup_model {
+                    configured_requested_cleanup_model_path_for_model_id_with(
+                        cleanup_model_id,
+                        &cleanup_cache_root,
+                    )?
+                } else {
+                    configured_cleanup_model_path_for_model_id(
+                        cleanup_model_id,
+                        &cleanup_cache_root,
+                    )?
+                },
+                ..request
+            };
+            run_cleanup(&request)
+        },
+    )
+}
+
+fn rerun_archived_run_with<T, C>(
+    request: ArchivedRunRerunRequest,
+    transcribe: T,
+    cleanup: C,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    T: FnOnce(&Path, &str) -> Result<TranscriptionResult, TranscriptionRunError>,
+    C: FnOnce(&str, CleanupRequest) -> Result<CleanupResult, CleanupError>,
+{
+    let store = HistoryStore::open(state_root())?;
+    let original_run = store
+        .load_run(&request.run_id)?
+        .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
+    let archived_source_wav_path =
+        original_run
+            .archived_source_wav_path
+            .clone()
+            .ok_or_else(|| {
+                TranscriptionRunError::ArchivedRunMissingSourceWav(original_run.run_id.clone())
+            })?;
+    let asr_model_id = request
+        .asr_model_id
+        .clone()
+        .unwrap_or_else(|| original_run.entry.model_name.clone());
+    let result = transcribe(&archived_source_wav_path, &asr_model_id)?;
+    let mut entry = transcript_entry_from_result(result);
+    let cleanup_model_id = request.cleanup_model_id.clone().or_else(|| {
+        original_run
+            .entry
+            .cleanup
+            .as_ref()
+            .map(|cleanup| cleanup.model_name.clone())
+    });
+    let prompt_profile = request
+        .cleanup_prompt_profile
+        .clone()
+        .or_else(|| original_run.prompt_profile.clone());
+    let supporting_context = SupportingContext {
+        supporting_context_text: original_run.supporting_context_text.clone(),
+        ocr_text: original_run.ocr_text.clone(),
+        used_ocr: original_run
+            .entry
+            .cleanup
+            .as_ref()
+            .map(|cleanup| cleanup.used_ocr)
+            .unwrap_or(false),
+    };
+
+    if let Some(cleanup_model_id) = cleanup_model_id.as_deref() {
+        let cleanup_request = CleanupRequest {
+            transcript_text: entry.transcript_text.clone(),
+            model_path: PathBuf::new(),
+            supporting_context_text: original_run.supporting_context_text.clone(),
+            ocr_text: original_run.ocr_text.clone(),
+            correction_memory_text: load_correction_store().prompt_memory_text(),
+            prompt_profile: prompt_profile
+                .clone()
+                .unwrap_or_else(|| AppSettings::load_or_default().cleanup_prompt_profile),
+        };
+        record_cleanup(&mut entry, &supporting_context, |transcript_text| {
+            let request = CleanupRequest {
+                transcript_text: transcript_text.into(),
+                ..cleanup_request
+            };
+            cleanup(cleanup_model_id, request)
+        });
+    }
+
+    archive_transcript_entry_with_request(
+        entry,
+        prompt_profile,
+        Some(&supporting_context),
+        Some(original_run.run_id),
+    )
 }
 
 pub(crate) fn archive_transcription_result(
@@ -389,7 +528,7 @@ where
 {
     let mut entry = transcript_entry_from_result(result);
     record_cleanup(&mut entry, &supporting_context, cleanup);
-    archive_transcript_entry_with_request(entry, prompt_profile, Some(&supporting_context))
+    archive_transcript_entry_with_request(entry, prompt_profile, Some(&supporting_context), None)
 }
 
 pub(crate) fn archive_transcription_result_with_friendly_insert<F>(
@@ -420,8 +559,12 @@ where
     record_cleanup(&mut entry, &supporting_context, cleanup);
     let insert_text = entry.display_text().to_string();
     let insert_error = record_friendly_insert(&mut entry, &insert_text, insert).err();
-    let entry =
-        archive_transcript_entry_with_request(entry, prompt_profile, Some(&supporting_context))?;
+    let entry = archive_transcript_entry_with_request(
+        entry,
+        prompt_profile,
+        Some(&supporting_context),
+        None,
+    )?;
 
     match insert_error {
         Some(error) => Err(TranscriptionRunError::FriendlyInsert(error)),
@@ -442,16 +585,20 @@ fn transcript_entry_from_result(result: TranscriptionResult) -> TranscriptEntry 
 fn archive_transcript_entry(
     entry: TranscriptEntry,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
-    archive_transcript_entry_with_request(entry, None, None)
+    archive_transcript_entry_with_request(entry, None, None, None)
 }
 
 fn archive_transcript_entry_with_request(
     entry: TranscriptEntry,
     prompt_profile: Option<String>,
     supporting_context: Option<&SupportingContext>,
+    parent_run_id: Option<String>,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
     let store = HistoryStore::open(state_root())?;
     let mut request = ArchiveWriteRequest::new(entry.clone());
+    if let Some(parent_run_id) = parent_run_id {
+        request = request.with_parent_run_id(parent_run_id);
+    }
     if let Some(prompt_profile) = prompt_profile {
         request = request.with_prompt_profile(prompt_profile);
     }
@@ -499,7 +646,7 @@ fn configured_model_dir() -> Result<PathBuf, TranscriptionRunError> {
     }
 
     let settings = AppSettings::load_or_default();
-    configured_model_dir_with(&settings, &default_cache_root())
+    configured_model_dir_for_model_id_with(&settings.preferred_asr_model, &default_cache_root())
 }
 
 #[cfg(test)]
@@ -509,16 +656,67 @@ fn configured_cleanup_model_path() -> Result<PathBuf, CleanupError> {
     }
 
     let settings = AppSettings::load_or_default();
-    configured_cleanup_model_path_with(&settings, &default_cache_root())
+    configured_cleanup_model_path_for_model_id_with(
+        &settings.preferred_cleanup_model,
+        &default_cache_root(),
+    )
+}
+
+fn configured_model_dir_for_model_id(model_id: &str) -> Result<PathBuf, TranscriptionRunError> {
+    resolve_model_dir_for_model_id_with(model_id, &default_cache_root(), true)
+}
+
+fn configured_cleanup_model_path_for_model_id(
+    model_id: &str,
+    cache_root: &Path,
+) -> Result<PathBuf, CleanupError> {
+    resolve_cleanup_model_path_for_model_id_with(model_id, cache_root, true)
+}
+
+fn configured_requested_model_dir_for_model_id_with(
+    model_id: &str,
+    cache_root: &Path,
+) -> Result<PathBuf, TranscriptionRunError> {
+    resolve_model_dir_for_model_id_with(model_id, cache_root, false)
+}
+
+fn configured_requested_cleanup_model_path_for_model_id_with(
+    model_id: &str,
+    cache_root: &Path,
+) -> Result<PathBuf, CleanupError> {
+    resolve_cleanup_model_path_for_model_id_with(model_id, cache_root, false)
 }
 
 fn configured_model_dir_with(
     settings: &AppSettings,
     cache_root: &Path,
 ) -> Result<PathBuf, TranscriptionRunError> {
-    let model = catalog_model(&settings.preferred_asr_model).ok_or_else(|| {
-        TranscriptionRunError::UnknownAsrModel(settings.preferred_asr_model.clone())
-    })?;
+    configured_model_dir_for_model_id_with(&settings.preferred_asr_model, cache_root)
+}
+
+fn configured_model_dir_for_model_id_with(
+    model_id: &str,
+    cache_root: &Path,
+) -> Result<PathBuf, TranscriptionRunError> {
+    resolve_model_dir_for_model_id_with(model_id, cache_root, true)
+}
+
+fn resolve_model_dir_for_model_id_with(
+    model_id: &str,
+    cache_root: &Path,
+    allow_env_override: bool,
+) -> Result<PathBuf, TranscriptionRunError> {
+    if allow_env_override {
+        if let Some(model_dir) = nonempty_env_path("PEPPERX_PARAKEET_MODEL_DIR") {
+            return Ok(model_dir);
+        }
+    }
+
+    let model = catalog_model(model_id)
+        .ok_or_else(|| TranscriptionRunError::UnknownAsrModel(model_id.into()))?;
+    if model.kind != ModelKind::Asr {
+        return Err(TranscriptionRunError::UnknownAsrModel(model_id.into()));
+    }
     let readiness = model_readiness(model, cache_root);
     if readiness.is_ready {
         Ok(readiness.install_path)
@@ -535,12 +733,32 @@ fn configured_cleanup_model_path_with(
     settings: &AppSettings,
     cache_root: &Path,
 ) -> Result<PathBuf, CleanupError> {
-    if let Some(model_path) = nonempty_env_path("PEPPERX_CLEANUP_MODEL_PATH") {
-        return Ok(model_path);
+    configured_cleanup_model_path_for_model_id(&settings.preferred_cleanup_model, cache_root)
+}
+
+fn configured_cleanup_model_path_for_model_id_with(
+    model_id: &str,
+    cache_root: &Path,
+) -> Result<PathBuf, CleanupError> {
+    resolve_cleanup_model_path_for_model_id_with(model_id, cache_root, true)
+}
+
+fn resolve_cleanup_model_path_for_model_id_with(
+    model_id: &str,
+    cache_root: &Path,
+    allow_env_override: bool,
+) -> Result<PathBuf, CleanupError> {
+    if allow_env_override {
+        if let Some(model_path) = nonempty_env_path("PEPPERX_CLEANUP_MODEL_PATH") {
+            return Ok(model_path);
+        }
     }
 
-    let model = catalog_model(&settings.preferred_cleanup_model)
-        .ok_or_else(|| CleanupError::UnsupportedModel(settings.preferred_cleanup_model.clone()))?;
+    let model =
+        catalog_model(model_id).ok_or_else(|| CleanupError::UnsupportedModel(model_id.into()))?;
+    if model.kind != ModelKind::Cleanup {
+        return Err(CleanupError::UnsupportedModel(model_id.into()));
+    }
     let readiness = model_readiness(model, cache_root);
     if readiness.is_ready {
         Ok(readiness.install_path)
@@ -589,6 +807,10 @@ fn cleanup_diagnostics_from_error(
 }
 
 fn capture_cleanup_context() -> SupportingContext {
+    if context_capture_is_disabled() {
+        return SupportingContext::default();
+    }
+
     match capture_supporting_context() {
         Ok(context) => context,
         Err(error) => {
@@ -596,6 +818,13 @@ fn capture_cleanup_context() -> SupportingContext {
             SupportingContext::default()
         }
     }
+}
+
+fn context_capture_is_disabled() -> bool {
+    matches!(
+        std::env::var(DISABLE_CONTEXT_CAPTURE_ENV).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 fn load_correction_store() -> CorrectionStore {
@@ -694,12 +923,37 @@ fn insertion_diagnostics_from_error(error: &FriendlyInsertRunError) -> Insertion
 #[cfg(test)]
 mod app_shell {
     use super::*;
-    use crate::history_store::HistoryStore;
+    use crate::history_store::{ArchiveWriteRequest, HistoryStore};
     use crate::settings::AppSettings;
     use crate::transcript_log::{env_lock, TranscriptLog};
     use pepperx_cleanup::cleanup::{CleanupError, CleanupResult};
     use pepperx_corrections::CorrectionStore;
+    use pepperx_models::catalog_model;
     use pepperx_platform_gnome::context::SupportingContext;
+
+    fn materialize_ready_model(cache_root: &Path, model_id: &str) -> PathBuf {
+        let model = catalog_model(model_id).expect("model should exist in catalog");
+        let install_path = cache_root.join(model.install_path);
+        match model.install_layout {
+            pepperx_models::InstallLayout::Directory => {
+                std::fs::create_dir_all(&install_path).unwrap();
+                for required_file in model.required_files {
+                    std::fs::write(install_path.join(required_file), b"pepper-x-model").unwrap();
+                }
+            }
+            pepperx_models::InstallLayout::File => {
+                if let Some(parent) = install_path.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                let file_bytes: &[u8] = match model.kind {
+                    pepperx_models::ModelKind::Cleanup => b"GGUFpepper-x-model",
+                    pepperx_models::ModelKind::Asr => b"pepper-x-model",
+                };
+                std::fs::write(&install_path, file_bytes).unwrap();
+            }
+        }
+        install_path
+    }
 
     #[test]
     fn transcription_run_rejects_empty_model_dir_override() {
@@ -784,6 +1038,135 @@ mod app_shell {
         }
         let _ = std::fs::remove_file(override_path);
         let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn rerun_explicit_asr_model_ignores_env_override_path() {
+        let _guard = env_lock().lock().unwrap();
+        let cache_root = std::env::temp_dir().join(format!(
+            "pepper-x-rerun-asr-explicit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let override_path = cache_root.join("override-model-dir");
+        let previous_model_dir = std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR");
+        std::fs::create_dir_all(&override_path).unwrap();
+        std::env::set_var("PEPPERX_PARAKEET_MODEL_DIR", &override_path);
+        let expected_path = materialize_ready_model(&cache_root, "nemo-parakeet-tdt-0.6b-v2-int8");
+
+        let configured_path = configured_requested_model_dir_for_model_id_with(
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            &cache_root,
+        )
+        .expect("explicit rerun ASR model should resolve from the catalog cache");
+
+        assert_eq!(configured_path, expected_path);
+        match previous_model_dir {
+            Some(previous_model_dir) => {
+                std::env::set_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir)
+            }
+            None => std::env::remove_var("PEPPERX_PARAKEET_MODEL_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn rerun_explicit_cleanup_model_ignores_env_override_path() {
+        let _guard = env_lock().lock().unwrap();
+        let cache_root = std::env::temp_dir().join(format!(
+            "pepper-x-rerun-cleanup-explicit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let override_path = cache_root.join("override-model.gguf");
+        let previous_cleanup_model = std::env::var_os("PEPPERX_CLEANUP_MODEL_PATH");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::write(&override_path, b"override-model").unwrap();
+        std::env::set_var("PEPPERX_CLEANUP_MODEL_PATH", &override_path);
+        let expected_path = materialize_ready_model(&cache_root, "qwen2.5-3b-instruct-q4_k_m.gguf");
+
+        let configured_path = configured_requested_cleanup_model_path_for_model_id_with(
+            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            &cache_root,
+        )
+        .expect("explicit rerun cleanup model should resolve from the catalog cache");
+
+        assert_eq!(configured_path, expected_path);
+        match previous_cleanup_model {
+            Some(previous_cleanup_model) => {
+                std::env::set_var("PEPPERX_CLEANUP_MODEL_PATH", previous_cleanup_model)
+            }
+            None => std::env::remove_var("PEPPERX_CLEANUP_MODEL_PATH"),
+        }
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn rerun_explicit_asr_model_rejects_cleanup_model_ids() {
+        let cache_root = std::env::temp_dir().join(format!(
+            "pepper-x-rerun-asr-kind-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let error = configured_requested_model_dir_for_model_id_with(
+            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            &cache_root,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TranscriptionRunError::UnknownAsrModel(model_id)
+                if model_id == "qwen2.5-3b-instruct-q4_k_m.gguf"
+        ));
+    }
+
+    #[test]
+    fn rerun_explicit_cleanup_model_rejects_asr_model_ids() {
+        let cache_root = std::env::temp_dir().join(format!(
+            "pepper-x-rerun-cleanup-kind-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let error = configured_requested_cleanup_model_path_for_model_id_with(
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            &cache_root,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CleanupError::UnsupportedModel("nemo-parakeet-tdt-0.6b-v2-int8".into())
+        );
+    }
+
+    #[test]
+    fn cleanup_context_capture_can_be_explicitly_disabled_for_headless_runs() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var_os(DISABLE_CONTEXT_CAPTURE_ENV);
+        std::env::set_var(DISABLE_CONTEXT_CAPTURE_ENV, "1");
+
+        assert!(context_capture_is_disabled());
+        assert_eq!(capture_cleanup_context(), SupportingContext::default());
+
+        match previous {
+            Some(previous) => std::env::set_var(DISABLE_CONTEXT_CAPTURE_ENV, previous),
+            None => std::env::remove_var(DISABLE_CONTEXT_CAPTURE_ENV),
+        }
     }
 
     #[test]
@@ -2135,6 +2518,136 @@ mod app_shell {
         .expect("archive cleanup plus insert entry");
 
         assert_eq!(entry.learning, None);
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn rerun_archived_run_uses_archived_wav_and_override_models_and_prompt() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-rerun-archived-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let source_wav_path = state_root.join("source.wav");
+        std::fs::write(&source_wav_path, b"pepper-x-rerun-audio").unwrap();
+
+        let mut original_entry = TranscriptEntry::new(
+            &source_wav_path,
+            "hello from pepper x",
+            "sherpa-onnx",
+            MODEL_NAME,
+            Duration::from_millis(42),
+        );
+        original_entry.cleanup = Some(CleanupDiagnostics::succeeded(
+            "llama.cpp",
+            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "Hello from Pepper X.",
+            Duration::from_millis(19),
+        ));
+
+        let original_run = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .archive_run(
+                &ArchiveWriteRequest::new(original_entry)
+                    .with_prompt_profile("ordinary-dictation")
+                    .with_supporting_context("line before\nline after")
+                    .with_ocr_text("ocr fallback text"),
+            )
+            .expect("archive original run");
+        let mut observed_asr = None;
+        let mut observed_cleanup_model = None;
+        let mut observed_cleanup_request = None;
+
+        let entry = rerun_archived_run_with(
+            ArchivedRunRerunRequest {
+                run_id: original_run.run_id.clone(),
+                asr_model_id: Some("nemo-parakeet-tdt-1.1b".into()),
+                cleanup_model_id: Some("qwen2.5-1.5b".into()),
+                cleanup_prompt_profile: Some("literal-dictation".into()),
+            },
+            |wav_path: &Path, model_id: &str| {
+                observed_asr = Some((wav_path.to_path_buf(), model_id.to_string()));
+                Ok(TranscriptionResult {
+                    wav_path: wav_path.to_path_buf(),
+                    transcript_text: "hello from pepper ex".into(),
+                    backend_name: "sherpa-onnx".into(),
+                    model_name: model_id.into(),
+                    elapsed_ms: 11,
+                })
+            },
+            |cleanup_model_id: &str, request: CleanupRequest| {
+                observed_cleanup_model = Some(cleanup_model_id.to_string());
+                observed_cleanup_request = Some(request.clone());
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: cleanup_model_id.into(),
+                    cleaned_text: "Hello from Pepper Ex.".into(),
+                    elapsed_ms: 9,
+                    used_ocr: true,
+                })
+            },
+        )
+        .expect("rerun archived run");
+        let archived_runs = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .recent_runs()
+            .expect("load archived runs");
+        let rerun = archived_runs
+            .into_iter()
+            .next()
+            .expect("rerun should be archived");
+        let cleanup_request = observed_cleanup_request.expect("cleanup request should be recorded");
+
+        assert_eq!(
+            observed_asr,
+            Some((
+                original_run
+                    .archived_source_wav_path
+                    .clone()
+                    .expect("archived source wav path"),
+                "nemo-parakeet-tdt-1.1b".into()
+            ))
+        );
+        assert_eq!(observed_cleanup_model.as_deref(), Some("qwen2.5-1.5b"));
+        assert_eq!(cleanup_request.prompt_profile, "literal-dictation");
+        assert_eq!(
+            cleanup_request.supporting_context_text.as_deref(),
+            Some("line before\nline after")
+        );
+        assert_eq!(
+            cleanup_request.ocr_text.as_deref(),
+            Some("ocr fallback text")
+        );
+        assert_eq!(entry.display_text(), "Hello from Pepper Ex.");
+        assert_eq!(
+            rerun.parent_run_id.as_deref(),
+            Some(original_run.run_id.as_str())
+        );
+        assert_eq!(rerun.prompt_profile.as_deref(), Some("literal-dictation"));
+        assert_eq!(rerun.entry.model_name, "nemo-parakeet-tdt-1.1b");
+        assert_eq!(
+            rerun
+                .entry
+                .cleanup
+                .as_ref()
+                .map(|cleanup| cleanup.model_name.as_str()),
+            Some("qwen2.5-1.5b")
+        );
 
         match previous_state_root {
             Some(previous_state_root) => {

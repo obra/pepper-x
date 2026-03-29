@@ -29,6 +29,8 @@ if [[ ! -d "${PEPPERX_STATE_ROOT}" || ! -w "${PEPPERX_STATE_ROOT}" ]]; then
     exit 1
 fi
 
+export PEPPERX_DISABLE_CONTEXT_CAPTURE="${PEPPERX_DISABLE_CONTEXT_CAPTURE:-1}"
+
 fixture_path="${repo_root}/tests/fixtures/loop1-hello.wav"
 log_path="${PEPPERX_STATE_ROOT}/transcript-log.jsonl"
 
@@ -36,6 +38,7 @@ cleanup_output="$(
     PEPPERX_PARAKEET_MODEL_DIR="${PEPPERX_PARAKEET_MODEL_DIR}" \
     PEPPERX_CLEANUP_MODEL_PATH="${PEPPERX_CLEANUP_MODEL_PATH}" \
     PEPPERX_STATE_ROOT="${PEPPERX_STATE_ROOT}" \
+    PEPPERX_DISABLE_CONTEXT_CAPTURE="${PEPPERX_DISABLE_CONTEXT_CAPTURE}" \
     cargo run -p pepper-x-app --quiet -- --transcribe-wav-and-cleanup "${fixture_path}"
 )"
 

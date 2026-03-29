@@ -11,8 +11,9 @@ use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::AppSettings;
 use crate::transcript_log::TranscriptEntry;
 use crate::transcription::{
-    transcribe_wav_and_cleanup_and_insert_friendly_to_log, transcribe_wav_and_cleanup_to_log,
-    transcribe_wav_to_log, TranscriptionRunError,
+    rerun_archived_run_to_log, transcribe_wav_and_cleanup_and_insert_friendly_to_log,
+    transcribe_wav_and_cleanup_to_log, transcribe_wav_to_log, ArchivedRunRerunRequest,
+    TranscriptionRunError,
 };
 
 #[derive(Debug)]
@@ -62,15 +63,37 @@ impl std::fmt::Display for CliRunError {
 pub enum StartupMode {
     Gui,
     ListModels,
-    BootstrapModel { model_id: String },
-    SetDefaultAsrModel { model_id: String },
-    SetDefaultCleanupModel { model_id: String },
-    SetCleanupPromptProfile { profile: String },
+    BootstrapModel {
+        model_id: String,
+    },
+    SetDefaultAsrModel {
+        model_id: String,
+    },
+    SetDefaultCleanupModel {
+        model_id: String,
+    },
+    SetCleanupPromptProfile {
+        profile: String,
+    },
     RecordAndTranscribe,
-    TranscribeWav { wav_path: PathBuf },
-    TranscribeWavAndCleanup { wav_path: PathBuf },
-    TranscribeWavAndInsertFriendly { wav_path: PathBuf },
-    TranscribeWavAndCleanupAndInsertFriendly { wav_path: PathBuf },
+    RerunArchivedRun {
+        run_id: String,
+        asr_model_id: Option<String>,
+        cleanup_model_id: Option<String>,
+        cleanup_prompt_profile: Option<String>,
+    },
+    TranscribeWav {
+        wav_path: PathBuf,
+    },
+    TranscribeWavAndCleanup {
+        wav_path: PathBuf,
+    },
+    TranscribeWavAndInsertFriendly {
+        wav_path: PathBuf,
+    },
+    TranscribeWavAndCleanupAndInsertFriendly {
+        wav_path: PathBuf,
+    },
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<StartupMode, String>
@@ -138,6 +161,50 @@ where
             None => Ok(StartupMode::RecordAndTranscribe),
             Some(_) => Err("--record-and-transcribe does not accept positional arguments".into()),
         },
+        Some(flag) if flag == OsStr::new("--rerun-archived-run") => {
+            let Some(run_id) = args.next() else {
+                return Err("--rerun-archived-run requires a run id".into());
+            };
+            let mut asr_model_id = None;
+            let mut cleanup_model_id = None;
+            let mut cleanup_prompt_profile = None;
+
+            while let Some(flag) = args.next() {
+                match flag.as_os_str() {
+                    flag if flag == OsStr::new("--asr-model") => {
+                        let Some(model_id) = args.next() else {
+                            return Err("--asr-model requires a model id".into());
+                        };
+                        asr_model_id = Some(model_id.to_string_lossy().into_owned());
+                    }
+                    flag if flag == OsStr::new("--cleanup-model") => {
+                        let Some(model_id) = args.next() else {
+                            return Err("--cleanup-model requires a model id".into());
+                        };
+                        cleanup_model_id = Some(model_id.to_string_lossy().into_owned());
+                    }
+                    flag if flag == OsStr::new("--cleanup-prompt-profile") => {
+                        let Some(profile) = args.next() else {
+                            return Err("--cleanup-prompt-profile requires a profile name".into());
+                        };
+                        cleanup_prompt_profile = Some(profile.to_string_lossy().into_owned());
+                    }
+                    other => {
+                        return Err(format!(
+                            "unknown Pepper X rerun argument: {}",
+                            PathBuf::from(other).display()
+                        ));
+                    }
+                }
+            }
+
+            Ok(StartupMode::RerunArchivedRun {
+                run_id: run_id.to_string_lossy().into_owned(),
+                asr_model_id,
+                cleanup_model_id,
+                cleanup_prompt_profile,
+            })
+        }
         Some(flag) if flag == OsStr::new("--transcribe-wav-and-cleanup") => {
             match (args.next(), args.next()) {
                 (Some(wav_path), None) => Ok(StartupMode::TranscribeWavAndCleanup {
@@ -235,6 +302,7 @@ pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, CliRunE
         other_mode => run_with(
             other_mode,
             || record_and_transcribe(settings.preferred_microphone.clone(), wait_for_stop_signal),
+            rerun_archived_run_to_log,
             transcribe_wav_to_log,
             transcribe_wav_and_cleanup_to_log,
             crate::transcription::transcribe_wav_and_insert_friendly_to_log,
@@ -244,9 +312,10 @@ pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, CliRunE
     }
 }
 
-pub fn run_with<R, F, G, H, I>(
+pub fn run_with<R, Q, F, G, H, I>(
     startup_mode: StartupMode,
     record_and_transcribe: R,
+    rerun_archived_run: Q,
     transcribe: F,
     transcribe_and_cleanup: G,
     transcribe_and_insert_friendly: H,
@@ -254,6 +323,7 @@ pub fn run_with<R, F, G, H, I>(
 ) -> Result<Option<TranscriptEntry>, TranscriptionRunError>
 where
     R: FnOnce() -> Result<TranscriptEntry, TranscriptionRunError>,
+    Q: FnOnce(ArchivedRunRerunRequest) -> Result<TranscriptEntry, TranscriptionRunError>,
     F: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
     G: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
     H: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
@@ -267,6 +337,18 @@ where
         StartupMode::SetDefaultCleanupModel { .. } => Ok(None),
         StartupMode::SetCleanupPromptProfile { .. } => Ok(None),
         StartupMode::RecordAndTranscribe => record_and_transcribe().map(Some),
+        StartupMode::RerunArchivedRun {
+            run_id,
+            asr_model_id,
+            cleanup_model_id,
+            cleanup_prompt_profile,
+        } => rerun_archived_run(ArchivedRunRerunRequest {
+            run_id,
+            asr_model_id,
+            cleanup_model_id,
+            cleanup_prompt_profile,
+        })
+        .map(Some),
         StartupMode::TranscribeWav { wav_path } => transcribe(&wav_path).map(Some),
         StartupMode::TranscribeWavAndCleanup { wav_path } => {
             transcribe_and_cleanup(&wav_path).map(Some)
@@ -403,6 +485,32 @@ mod cli_mode {
     }
 
     #[test]
+    fn rerun_cli_mode_parses_archived_run_with_optional_overrides() {
+        let command = parse_args([
+            "pepper-x".to_string(),
+            "--rerun-archived-run".to_string(),
+            "run-123".to_string(),
+            "--asr-model".to_string(),
+            "nemo-parakeet-tdt-1.1b".to_string(),
+            "--cleanup-model".to_string(),
+            "qwen2.5-1.5b".to_string(),
+            "--cleanup-prompt-profile".to_string(),
+            "literal-dictation".to_string(),
+        ])
+        .expect("rerun mode should parse");
+
+        assert_eq!(
+            command,
+            StartupMode::RerunArchivedRun {
+                run_id: "run-123".into(),
+                asr_model_id: Some("nemo-parakeet-tdt-1.1b".into()),
+                cleanup_model_id: Some("qwen2.5-1.5b".into()),
+                cleanup_prompt_profile: Some("literal-dictation".into()),
+            }
+        );
+    }
+
+    #[test]
     fn model_status_cli_mode_parses_list_models() {
         let command = parse_args(["pepper-x".to_string(), "--list-models".to_string()]).unwrap();
 
@@ -476,6 +584,7 @@ mod cli_mode {
             |_| unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
+            |_| unreachable!(),
         )
         .expect("live recording mode should succeed");
 
@@ -489,6 +598,49 @@ mod cli_mode {
         let error = wait_for_stop_signal_from(&mut closed_stdin).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn rerun_cli_mode_runs_archived_run_without_gui() {
+        let wav_path = PathBuf::from("/tmp/rerun.wav");
+        let expected = TranscriptEntry::new(
+            &wav_path,
+            "hello from rerun pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-1.1b",
+            Duration::from_millis(41),
+        );
+        let mut observed_request = None;
+
+        let result = run_with(
+            StartupMode::RerunArchivedRun {
+                run_id: "run-123".into(),
+                asr_model_id: Some("nemo-parakeet-tdt-1.1b".into()),
+                cleanup_model_id: Some("qwen2.5-1.5b".into()),
+                cleanup_prompt_profile: Some("literal-dictation".into()),
+            },
+            || unreachable!(),
+            |request| {
+                observed_request = Some(request);
+                Ok(expected.clone())
+            },
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |_| unreachable!(),
+        )
+        .expect("rerun mode should succeed");
+
+        assert_eq!(
+            observed_request,
+            Some(ArchivedRunRerunRequest {
+                run_id: "run-123".into(),
+                asr_model_id: Some("nemo-parakeet-tdt-1.1b".into()),
+                cleanup_model_id: Some("qwen2.5-1.5b".into()),
+                cleanup_prompt_profile: Some("literal-dictation".into()),
+            })
+        );
+        assert_eq!(result, Some(expected));
     }
 
     #[test]
@@ -618,6 +770,7 @@ mod cli_mode {
             |_| unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
+            |_| unreachable!(),
             |path: &std::path::Path| {
                 observed_path = Some(path.to_path_buf());
                 Ok(expected.clone())
@@ -667,6 +820,7 @@ mod cli_mode {
                 wav_path: wav_path.clone(),
             },
             || unreachable!(),
+            |_| unreachable!(),
             |path: &std::path::Path| {
                 observed_path = Some(path.to_path_buf());
                 Ok(expected.clone())
@@ -705,6 +859,7 @@ mod cli_mode {
             },
             || unreachable!(),
             |_| unreachable!(),
+            |_| unreachable!(),
             |path: &std::path::Path| {
                 observed_path = Some(path.to_path_buf());
                 Ok(expected.clone())
@@ -737,6 +892,7 @@ mod cli_mode {
             || unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
+            |_| unreachable!(),
             |path: &std::path::Path| {
                 observed_path = Some(path.to_path_buf());
                 Ok(expected.clone())
@@ -754,6 +910,7 @@ mod cli_mode {
         let result = run_with(
             StartupMode::Gui,
             || unreachable!(),
+            |_| unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),

@@ -9,8 +9,8 @@ use crate::transcript_log::state_root;
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
 pub const DEFAULT_CLEANUP_PROMPT_PROFILE: &str = "ordinary-dictation";
-#[allow(dead_code)]
 pub const LAUNCH_AT_LOGIN_DESKTOP_FILE_NAME: &str = "pepper-x-autostart.desktop";
+pub const LAUNCH_AT_LOGIN_DESKTOP_FILE_PATH: &str = "/etc/xdg/autostart/pepper-x-autostart.desktop";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -92,6 +92,10 @@ fn settings_path() -> PathBuf {
 
 pub fn corrections_store_path() -> PathBuf {
     state_root().join("corrections")
+}
+
+pub fn launch_at_login_desktop_file_path() -> &'static std::path::Path {
+    std::path::Path::new(LAUNCH_AT_LOGIN_DESKTOP_FILE_PATH)
 }
 
 #[cfg(test)]
@@ -227,5 +231,17 @@ mod tests {
         assert_eq!(restored.preferred_microphone, expected.preferred_microphone);
         set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
         let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn settings_launch_at_login_points_at_the_packaged_autostart_desktop_file() {
+        assert_eq!(
+            launch_at_login_desktop_file_path(),
+            std::path::Path::new("/etc/xdg/autostart/pepper-x-autostart.desktop")
+        );
+        assert_eq!(
+            LAUNCH_AT_LOGIN_DESKTOP_FILE_NAME,
+            "pepper-x-autostart.desktop"
+        );
     }
 }

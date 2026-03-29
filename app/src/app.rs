@@ -1,5 +1,5 @@
 use adw::prelude::*;
-use pepper_x_app::startup_policy::{startup_launch_policy, StartupLaunchPolicy};
+use pepper_x_app::startup_policy::startup_launch_policy;
 use pepperx_models::{default_cache_root, model_inventory};
 use pepperx_platform_gnome::{
     atspi::ModifierCaptureHandle,
@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-use crate::background::BackgroundController;
+use crate::background::{should_present_initial_window, BackgroundController};
 use crate::history_store::{ArchivedRun, HistoryStore};
 use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::AppSettings;
@@ -37,27 +37,34 @@ pub fn run() {
     let settings = AppSettings::load_or_default();
     let app = build_application();
     let cache_root = default_cache_root();
-    let inventory = model_inventory(&cache_root);
-    let history_runs = load_history_runs().unwrap_or_else(|error| {
-        eprintln!("[Pepper X] failed to load transcript history: {error}");
-        Vec::new()
-    });
     let (command_sender, command_receiver) = mpsc::channel();
     let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))
         .expect("failed to start GNOME IPC service");
-    let _modifier_capture = start_modifier_capture(service_handle.service());
-    let capabilities = service_handle.service().current_capabilities();
-    let window = MainWindow::new_with_history_and_settings(
+    let service = service_handle.service();
+    let _modifier_capture = start_modifier_capture(service.clone());
+    let diagnostics_cache_root = cache_root.clone();
+    let settings_cache_root = cache_root.clone();
+    let diagnostics_service = service.clone();
+    let window = MainWindow::new_with_providers(
         &app,
-        history_runs.clone(),
-        settings_summary_text(&settings, &cache_root, &inventory),
-        diagnostics_summary_text(
-            &settings,
-            &cache_root,
-            &inventory,
-            history_runs.first(),
-            &capabilities,
-        ),
+        load_history_runs_or_empty,
+        move || {
+            let settings = AppSettings::load_or_default();
+            let inventory = model_inventory(&settings_cache_root);
+            settings_summary_text(&settings, &settings_cache_root, &inventory)
+        },
+        move || {
+            let settings = AppSettings::load_or_default();
+            let inventory = model_inventory(&diagnostics_cache_root);
+            let history_runs = load_history_runs_or_empty();
+            diagnostics_summary_text(
+                &settings,
+                &diagnostics_cache_root,
+                &inventory,
+                history_runs.first(),
+                &diagnostics_service.current_capabilities(),
+            )
+        },
     );
 
     let startup_launch_policy = startup_launch_policy();
@@ -72,9 +79,10 @@ pub fn run() {
         let controller = BackgroundController::new();
 
         controller.install(app, &window);
-        if matches!(startup_launch_policy, StartupLaunchPolicy::Background)
-            && !skipped_initial_activation.replace(true)
-        {
+        if !should_present_initial_window(
+            startup_launch_policy,
+            skipped_initial_activation.replace(true),
+        ) {
             return;
         }
         window.present_settings();
@@ -100,6 +108,13 @@ pub fn load_history_runs() -> io::Result<Vec<ArchivedRun>> {
 
 pub fn load_history_entries() -> io::Result<Vec<TranscriptEntry>> {
     HistoryStore::open(state_root())?.recent_entries()
+}
+
+fn load_history_runs_or_empty() -> Vec<ArchivedRun> {
+    load_history_runs().unwrap_or_else(|error| {
+        eprintln!("[Pepper X] failed to load transcript history: {error}");
+        Vec::new()
+    })
 }
 
 fn build_live_runtime(settings: &AppSettings) -> std::sync::Arc<LiveRuntimeHandle> {

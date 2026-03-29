@@ -93,6 +93,10 @@ impl PepperXService {
             .modifier_only_supported = supported;
     }
 
+    pub fn current_capabilities(&self) -> Capabilities {
+        self.capabilities()
+    }
+
     pub fn start_modifier_only_recording(&self) {
         match self.start_session(TriggerSource::ModifierOnly) {
             Ok(()) => eprintln!("[Pepper X] modifier-only start"),

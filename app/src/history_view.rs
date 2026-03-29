@@ -31,7 +31,7 @@ impl HistoryBrowserModel {
     }
 
     pub(crate) fn selected_details_text(&self) -> Option<String> {
-        self.selected_run().map(history_run_details_text)
+        self.selected_sections().map(history_sections_text)
     }
 
     pub(crate) fn select_run(&mut self, run_id: &str) -> bool {
@@ -52,6 +52,36 @@ impl HistoryBrowserModel {
 
     fn selected_run(&self) -> Option<&ArchivedRun> {
         self.runs.get(self.selected_index)
+    }
+
+    fn selected_sections(&self) -> Option<HistoryRunSections> {
+        let selected_run = self.selected_run()?;
+        match self.comparison_runs_for_selected() {
+            Some((original_run, rerun)) => {
+                Some(history_run_comparison_sections(original_run, rerun))
+            }
+            None => Some(history_run_sections(selected_run)),
+        }
+    }
+
+    fn comparison_runs_for_selected(&self) -> Option<(&ArchivedRun, &ArchivedRun)> {
+        let selected_run = self.selected_run()?;
+        if let Some(parent_run_id) = selected_run.parent_run_id.as_deref() {
+            let parent_run = self.runs.iter().find(|run| run.run_id == parent_run_id)?;
+            return Some((parent_run, selected_run));
+        }
+
+        let rerun = self
+            .runs
+            .iter()
+            .filter(|run| run.parent_run_id.as_deref() == Some(selected_run.run_id.as_str()))
+            .max_by(|left, right| {
+                left.archived_at_ms
+                    .cmp(&right.archived_at_ms)
+                    .then_with(|| left.run_id.cmp(&right.run_id))
+            })?;
+
+        Some((selected_run, rerun))
     }
 }
 
@@ -76,8 +106,8 @@ pub(crate) fn build_history_browser(runs: &[ArchivedRun]) -> gtk::Paned {
     let raw_label = detail_label("No archived runs yet.");
     let cleaned_label = detail_label("No cleanup transcript for this run.");
     let metadata_label = detail_label("Select an archived run to inspect its metadata.");
-    if let Some(run) = model.borrow().selected_run() {
-        set_detail_sections(&raw_label, &cleaned_label, &metadata_label, run);
+    if let Some(sections) = model.borrow().selected_sections() {
+        set_detail_sections(&raw_label, &cleaned_label, &metadata_label, &sections);
     }
 
     let details_box = gtk::Box::new(Orientation::Vertical, 18);
@@ -117,8 +147,8 @@ pub(crate) fn build_history_browser(runs: &[ArchivedRun]) -> gtk::Paned {
             if !model.select_index(index) {
                 return;
             }
-            if let Some(run) = model.selected_run() {
-                set_detail_sections(&raw_label, &cleaned_label, &metadata_label, run);
+            if let Some(sections) = model.selected_sections() {
+                set_detail_sections(&raw_label, &cleaned_label, &metadata_label, &sections);
             }
         });
     }
@@ -136,7 +166,10 @@ pub(crate) fn build_history_browser(runs: &[ArchivedRun]) -> gtk::Paned {
 }
 
 pub(crate) fn history_run_details_text(run: &ArchivedRun) -> String {
-    let sections = history_run_sections(run);
+    history_sections_text(history_run_sections(run))
+}
+
+fn history_sections_text(sections: HistoryRunSections) -> String {
     let mut details = format!("Raw transcript:\n{}", sections.raw_text);
     if let Some(cleaned_text) = sections.cleaned_text {
         details.push_str(&format!("\n\nCleaned transcript:\n{cleaned_text}"));
@@ -207,6 +240,135 @@ fn history_run_sections(run: &ArchivedRun) -> HistoryRunSections {
     }
 }
 
+fn history_run_comparison_sections(
+    original_run: &ArchivedRun,
+    rerun: &ArchivedRun,
+) -> HistoryRunSections {
+    let original_cleaned_text = original_run
+        .entry
+        .cleanup
+        .as_ref()
+        .and_then(|cleanup| cleanup.cleaned_text())
+        .unwrap_or("No cleanup transcript for this run.");
+    let rerun_cleaned_text = rerun
+        .entry
+        .cleanup
+        .as_ref()
+        .and_then(|cleanup| cleanup.cleaned_text())
+        .unwrap_or("No cleanup transcript for this run.");
+
+    HistoryRunSections {
+        raw_text: format!(
+            "Original raw transcript:\n{}\n\nRerun raw transcript:\n{}",
+            original_run.entry.transcript_text, rerun.entry.transcript_text
+        ),
+        cleaned_text: Some(format!(
+            "Original cleaned transcript:\n{}\n\nRerun cleaned transcript:\n{}",
+            original_cleaned_text, rerun_cleaned_text
+        )),
+        metadata_text: comparison_metadata_lines(original_run, rerun).join("\n"),
+    }
+}
+
+fn comparison_metadata_lines(original_run: &ArchivedRun, rerun: &ArchivedRun) -> Vec<String> {
+    let original_cleanup_model = original_run
+        .entry
+        .cleanup
+        .as_ref()
+        .map(|cleanup| cleanup.model_name.as_str())
+        .unwrap_or("none");
+    let rerun_cleanup_model = rerun
+        .entry
+        .cleanup
+        .as_ref()
+        .map(|cleanup| cleanup.model_name.as_str())
+        .unwrap_or("none");
+    let original_cleanup_failure = original_run
+        .entry
+        .cleanup
+        .as_ref()
+        .and_then(|cleanup| cleanup.failure_reason.as_deref());
+    let rerun_cleanup_failure = rerun
+        .entry
+        .cleanup
+        .as_ref()
+        .and_then(|cleanup| cleanup.failure_reason.as_deref());
+    let original_insertion_failure = original_run
+        .entry
+        .insertion
+        .as_ref()
+        .and_then(|insertion| insertion.failure_reason.as_deref());
+    let rerun_insertion_failure = rerun
+        .entry
+        .insertion
+        .as_ref()
+        .and_then(|insertion| insertion.failure_reason.as_deref());
+    let original_prompt_profile = original_run.prompt_profile.as_deref().unwrap_or("none");
+    let rerun_prompt_profile = rerun.prompt_profile.as_deref().unwrap_or("none");
+
+    let mut lines = vec![
+        format!("Original run ID: {}", original_run.run_id),
+        format!("Rerun run ID: {}", rerun.run_id),
+        format!(
+            "ASR model: {} -> {}",
+            original_run.entry.model_name, rerun.entry.model_name
+        ),
+        format!(
+            "Cleanup model: {} -> {}",
+            original_cleanup_model, rerun_cleanup_model
+        ),
+        format!(
+            "Cleanup prompt profile: {} -> {}",
+            original_prompt_profile, rerun_prompt_profile
+        ),
+        format!(
+            "Original OCR used: {}",
+            original_run
+                .entry
+                .cleanup
+                .as_ref()
+                .map(|cleanup| cleanup.used_ocr)
+                .unwrap_or(false)
+        ),
+        format!(
+            "Rerun OCR used: {}",
+            rerun
+                .entry
+                .cleanup
+                .as_ref()
+                .map(|cleanup| cleanup.used_ocr)
+                .unwrap_or(false)
+        ),
+    ];
+
+    if let Some(reason) = original_cleanup_failure {
+        lines.push(format!("Original cleanup failure: {reason}"));
+    }
+    if let Some(reason) = rerun_cleanup_failure {
+        lines.push(format!("Rerun cleanup failure: {reason}"));
+    }
+    if let Some(reason) = original_insertion_failure {
+        lines.push(format!("Original insertion failure: {reason}"));
+    }
+    if let Some(reason) = rerun_insertion_failure {
+        lines.push(format!("Rerun insertion failure: {reason}"));
+    }
+    if let Some(text) = original_run.supporting_context_text.as_deref() {
+        lines.push(format!("Original supporting context: {text}"));
+    }
+    if let Some(text) = rerun.supporting_context_text.as_deref() {
+        lines.push(format!("Rerun supporting context: {text}"));
+    }
+    if let Some(text) = original_run.ocr_text.as_deref() {
+        lines.push(format!("Original OCR text: {text}"));
+    }
+    if let Some(text) = rerun.ocr_text.as_deref() {
+        lines.push(format!("Rerun OCR text: {text}"));
+    }
+
+    lines
+}
+
 fn sort_runs_newest_first(runs: &mut [ArchivedRun]) {
     runs.sort_by(|left, right| {
         right
@@ -268,9 +430,8 @@ fn set_detail_sections(
     raw_label: &gtk::Label,
     cleaned_label: &gtk::Label,
     metadata_label: &gtk::Label,
-    run: &ArchivedRun,
+    sections: &HistoryRunSections,
 ) {
-    let sections = history_run_sections(run);
     raw_label.set_label(&sections.raw_text);
     cleaned_label.set_label(
         sections
@@ -325,6 +486,7 @@ mod history_view_tests {
             archived_source_wav_path: Some(PathBuf::from(format!(
                 "/tmp/history/{run_id}/source.wav"
             ))),
+            parent_run_id: None,
             prompt_profile: Some("ordinary-dictation".into()),
             supporting_context_text: None,
             ocr_text: None,
@@ -405,5 +567,124 @@ mod history_view_tests {
             .selected_details_text()
             .expect("selected details text")
             .contains("older transcript"));
+    }
+
+    #[test]
+    fn history_view_selected_rerun_compares_against_parent() {
+        let parent = archived_run(
+            "run-parent",
+            10,
+            "hello from pepper x",
+            Some("Hello from Pepper X."),
+            "atspi-editable-text",
+        );
+        let mut rerun = archived_run(
+            "run-rerun",
+            20,
+            "hello from pepper ex",
+            Some("Hello from Pepper Ex."),
+            "clipboard-paste",
+        );
+        rerun.parent_run_id = Some(parent.run_id.clone());
+        rerun.prompt_profile = Some("literal-dictation".into());
+        rerun.entry.model_name = "nemo-parakeet-tdt-1.1b".into();
+        rerun.entry.cleanup.as_mut().expect("cleanup").model_name = "qwen2.5-1.5b".into();
+
+        let model = HistoryBrowserModel::new(vec![parent, rerun]);
+        let details = model
+            .selected_details_text()
+            .expect("selected details text");
+
+        assert!(details.contains("Original raw transcript:\nhello from pepper x"));
+        assert!(details.contains("Rerun raw transcript:\nhello from pepper ex"));
+        assert!(
+            details.contains("ASR model: nemo-parakeet-tdt-0.6b-v2-int8 -> nemo-parakeet-tdt-1.1b")
+        );
+        assert!(details.contains("Cleanup prompt profile: ordinary-dictation -> literal-dictation"));
+    }
+
+    #[test]
+    fn history_view_selected_parent_compares_against_newest_rerun() {
+        let parent = archived_run(
+            "run-parent",
+            10,
+            "hello from pepper x",
+            Some("Hello from Pepper X."),
+            "atspi-editable-text",
+        );
+        let mut older_rerun = archived_run(
+            "run-rerun-older",
+            20,
+            "older rerun raw",
+            Some("Older rerun cleaned."),
+            "clipboard-paste",
+        );
+        older_rerun.parent_run_id = Some(parent.run_id.clone());
+        let mut newer_rerun = archived_run(
+            "run-rerun-newer",
+            30,
+            "newer rerun raw",
+            Some("Newer rerun cleaned."),
+            "clipboard-paste",
+        );
+        newer_rerun.parent_run_id = Some(parent.run_id.clone());
+
+        let mut model = HistoryBrowserModel::new(vec![parent, older_rerun, newer_rerun]);
+        assert!(model.select_run("run-parent"));
+        let details = model
+            .selected_details_text()
+            .expect("selected details text");
+
+        assert!(details.contains("Original raw transcript:\nhello from pepper x"));
+        assert!(details.contains("Rerun raw transcript:\nnewer rerun raw"));
+    }
+
+    #[test]
+    fn history_view_rerun_comparison_keeps_per_run_diagnostics_visible() {
+        let mut parent = archived_run(
+            "run-parent",
+            10,
+            "hello from pepper x",
+            Some("Hello from Pepper X."),
+            "atspi-editable-text",
+        );
+        parent.supporting_context_text = Some("line before".into());
+        parent.ocr_text = Some("ocr parent".into());
+        parent.entry.cleanup.as_mut().expect("cleanup").used_ocr = true;
+
+        let mut rerun = archived_run(
+            "run-rerun",
+            20,
+            "hello from pepper ex",
+            None,
+            "clipboard-paste",
+        );
+        rerun.parent_run_id = Some(parent.run_id.clone());
+        rerun.prompt_profile = Some("literal-dictation".into());
+        rerun.supporting_context_text = Some("line after".into());
+        rerun.ocr_text = Some("ocr rerun".into());
+        rerun.entry.cleanup = Some(CleanupDiagnostics::failed(
+            "llama.cpp",
+            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "cleanup timed out",
+        ));
+        rerun.entry.insertion = Some(InsertionDiagnostics::failed(
+            "uinput-text",
+            "xterm",
+            "paste backend was unavailable",
+        ));
+
+        let model = HistoryBrowserModel::new(vec![parent, rerun]);
+        let details = model
+            .selected_details_text()
+            .expect("selected details text");
+
+        assert!(details.contains("Original OCR used: true"));
+        assert!(details.contains("Original supporting context: line before"));
+        assert!(details.contains("Original OCR text: ocr parent"));
+        assert!(details.contains("Rerun cleanup failure: cleanup timed out"));
+        assert!(details.contains("Rerun insertion failure: paste backend was unavailable"));
+        assert!(details.contains("Rerun supporting context: line after"));
+        assert!(details.contains("Rerun OCR text: ocr rerun"));
     }
 }
