@@ -7,16 +7,19 @@ use std::time::Duration;
 
 use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
 use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
+use pepperx_models::{catalog_model, default_cache_root, model_readiness};
 use pepperx_platform_gnome::atspi::{
     insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
     FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME, UINPUT_TEXT_BACKEND_NAME,
 };
 
 use crate::history_store::{ArchiveWriteRequest, HistoryStore};
+use crate::settings::AppSettings;
 use crate::transcript_log::{
     nonempty_env_path, state_root, CleanupDiagnostics, InsertionDiagnostics, TranscriptEntry,
 };
 
+#[cfg(test)]
 const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
 const FRIENDLY_TARGET_APPLICATION_ID: &str = "org.gnome.TextEditor";
 const DEFAULT_UINPUT_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-uinput-helper";
@@ -37,7 +40,12 @@ struct UinputInsertResponse {
 
 #[derive(Debug)]
 pub enum TranscriptionRunError {
-    MissingModelDir,
+    UnknownAsrModel(String),
+    UnreadyAsrModel {
+        model_id: String,
+        install_path: PathBuf,
+        missing_files: Vec<String>,
+    },
     TranscriptLog(std::io::Error),
     Asr(TranscriptionError),
     FriendlyInsert(FriendlyInsertRunError),
@@ -65,12 +73,19 @@ impl From<FriendlyInsertRunError> for TranscriptionRunError {
 impl std::fmt::Display for TranscriptionRunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingModelDir => {
-                write!(
-                    f,
-                    "PEPPERX_PARAKEET_MODEL_DIR must point at a Parakeet model bundle"
-                )
+            Self::UnknownAsrModel(model_id) => {
+                write!(f, "Pepper X ASR model is not supported: {model_id}")
             }
+            Self::UnreadyAsrModel {
+                model_id,
+                install_path,
+                missing_files,
+            } => write!(
+                f,
+                "Pepper X ASR model {model_id} is not ready at {}: missing {}",
+                install_path.display(),
+                missing_files.join(", ")
+            ),
             Self::TranscriptLog(error) => {
                 write!(f, "failed to write Pepper X transcript log: {error}")
             }
@@ -101,15 +116,23 @@ pub fn transcribe_recorded_wav_to_log(
 pub fn transcribe_wav_and_cleanup_to_log(
     wav_path: &Path,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let settings = AppSettings::load_or_default();
+    let prompt_profile = settings.cleanup_prompt_profile.clone();
+    let cache_root = default_cache_root();
     let result = transcribe_wav_result(wav_path)?;
-    archive_transcription_result_with_cleanup(result, |transcript_text| {
-        let model_path = configured_cleanup_model_path()?;
-        run_cleanup(&CleanupRequest {
-            transcript_text: transcript_text.into(),
-            model_path,
-            ocr_text: None,
-        })
-    })
+    archive_transcription_result_with_cleanup(
+        result,
+        Some(prompt_profile.clone()),
+        move |transcript_text| {
+            let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
+            run_cleanup(&CleanupRequest {
+                transcript_text: transcript_text.into(),
+                model_path,
+                ocr_text: None,
+                prompt_profile: prompt_profile.clone(),
+            })
+        },
+    )
 }
 
 pub fn transcribe_wav_and_insert_friendly_to_log(
@@ -135,15 +158,20 @@ pub fn transcribe_wav_and_insert_friendly_to_log(
 pub fn transcribe_wav_and_cleanup_and_insert_friendly_to_log(
     wav_path: &Path,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let settings = AppSettings::load_or_default();
+    let prompt_profile = settings.cleanup_prompt_profile.clone();
+    let cache_root = default_cache_root();
     let result = transcribe_wav_result(wav_path)?;
     archive_transcription_result_with_cleanup_and_friendly_insert(
         result,
-        |transcript_text| {
-            let model_path = configured_cleanup_model_path()?;
+        Some(prompt_profile.clone()),
+        move |transcript_text| {
+            let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
             run_cleanup(&CleanupRequest {
                 transcript_text: transcript_text.into(),
                 model_path,
                 ocr_text: None,
+                prompt_profile: prompt_profile.clone(),
             })
         },
         |transcript_text| {
@@ -309,7 +337,8 @@ fn configured_uinput_helper_socket_path() -> Result<PathBuf, FriendlyInsertRunEr
 
 fn transcribe_wav_result(wav_path: &Path) -> Result<TranscriptionResult, TranscriptionRunError> {
     let model_dir = configured_model_dir()?;
-    let request = TranscriptionRequest::new(wav_path, &model_dir, MODEL_NAME);
+    let settings = AppSettings::load_or_default();
+    let request = TranscriptionRequest::new(wav_path, &model_dir, settings.preferred_asr_model);
     Ok(transcribe_wav(&request)?)
 }
 
@@ -321,16 +350,18 @@ pub(crate) fn archive_transcription_result(
 
 fn archive_transcription_result_with_cleanup<F>(
     result: TranscriptionResult,
+    prompt_profile: Option<String>,
     cleanup: F,
 ) -> Result<TranscriptEntry, TranscriptionRunError>
 where
     F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
 {
-    archive_transcription_result_with_cleanup_context(result, false, cleanup)
+    archive_transcription_result_with_cleanup_context(result, prompt_profile, false, cleanup)
 }
 
 fn archive_transcription_result_with_cleanup_context<F>(
     result: TranscriptionResult,
+    prompt_profile: Option<String>,
     used_ocr_context: bool,
     cleanup: F,
 ) -> Result<TranscriptEntry, TranscriptionRunError>
@@ -339,7 +370,7 @@ where
 {
     let mut entry = transcript_entry_from_result(result);
     record_cleanup(&mut entry, used_ocr_context, cleanup);
-    archive_transcript_entry(entry)
+    archive_transcript_entry_with_request(entry, prompt_profile)
 }
 
 pub(crate) fn archive_transcription_result_with_friendly_insert<F>(
@@ -357,6 +388,7 @@ where
 
 fn archive_transcription_result_with_cleanup_and_friendly_insert<C, I>(
     result: TranscriptionResult,
+    prompt_profile: Option<String>,
     cleanup: C,
     insert: I,
 ) -> Result<TranscriptEntry, TranscriptionRunError>
@@ -368,7 +400,7 @@ where
     record_cleanup(&mut entry, false, cleanup);
     let insert_text = entry.display_text().to_string();
     let insert_error = record_friendly_insert(&mut entry, &insert_text, insert).err();
-    let entry = archive_transcript_entry(entry)?;
+    let entry = archive_transcript_entry_with_request(entry, prompt_profile)?;
 
     match insert_error {
         Some(error) => Err(TranscriptionRunError::FriendlyInsert(error)),
@@ -389,8 +421,21 @@ fn transcript_entry_from_result(result: TranscriptionResult) -> TranscriptEntry 
 fn archive_transcript_entry(
     entry: TranscriptEntry,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
+    archive_transcript_entry_with_request(entry, None)
+}
+
+fn archive_transcript_entry_with_request(
+    entry: TranscriptEntry,
+    prompt_profile: Option<String>,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
     let store = HistoryStore::open(state_root())?;
-    store.archive_run(&ArchiveWriteRequest::new(entry.clone()))?;
+    let request = match prompt_profile {
+        Some(prompt_profile) => {
+            ArchiveWriteRequest::new(entry.clone()).with_prompt_profile(prompt_profile)
+        }
+        None => ArchiveWriteRequest::new(entry.clone()),
+    };
+    store.archive_run(&request)?;
     Ok(entry)
 }
 
@@ -421,11 +466,55 @@ fn describe_asr_error(error: &TranscriptionError) -> String {
 }
 
 fn configured_model_dir() -> Result<PathBuf, TranscriptionRunError> {
-    nonempty_env_path("PEPPERX_PARAKEET_MODEL_DIR").ok_or(TranscriptionRunError::MissingModelDir)
+    if let Some(model_dir) = nonempty_env_path("PEPPERX_PARAKEET_MODEL_DIR") {
+        return Ok(model_dir);
+    }
+
+    let settings = AppSettings::load_or_default();
+    configured_model_dir_with(&settings, &default_cache_root())
 }
 
+#[cfg(test)]
 fn configured_cleanup_model_path() -> Result<PathBuf, CleanupError> {
-    nonempty_env_path("PEPPERX_CLEANUP_MODEL_PATH").ok_or(CleanupError::MissingModelConfiguration)
+    if let Some(model_path) = nonempty_env_path("PEPPERX_CLEANUP_MODEL_PATH") {
+        return Ok(model_path);
+    }
+
+    let settings = AppSettings::load_or_default();
+    configured_cleanup_model_path_with(&settings, &default_cache_root())
+}
+
+fn configured_model_dir_with(
+    settings: &AppSettings,
+    cache_root: &Path,
+) -> Result<PathBuf, TranscriptionRunError> {
+    let model = catalog_model(&settings.preferred_asr_model).ok_or_else(|| {
+        TranscriptionRunError::UnknownAsrModel(settings.preferred_asr_model.clone())
+    })?;
+    let readiness = model_readiness(model, cache_root);
+    if readiness.is_ready {
+        Ok(readiness.install_path)
+    } else {
+        Err(TranscriptionRunError::UnreadyAsrModel {
+            model_id: model.id.into(),
+            install_path: readiness.install_path,
+            missing_files: readiness.missing_files,
+        })
+    }
+}
+
+fn configured_cleanup_model_path_with(
+    settings: &AppSettings,
+    cache_root: &Path,
+) -> Result<PathBuf, CleanupError> {
+    let model = catalog_model(&settings.preferred_cleanup_model)
+        .ok_or_else(|| CleanupError::UnsupportedModel(settings.preferred_cleanup_model.clone()))?;
+    let readiness = model_readiness(model, cache_root);
+    if readiness.is_ready {
+        Ok(readiness.install_path)
+    } else {
+        Err(CleanupError::MissingModelPath(readiness.install_path))
+    }
 }
 
 fn record_cleanup<F>(entry: &mut TranscriptEntry, used_ocr_context: bool, cleanup: F)
@@ -526,6 +615,7 @@ fn insertion_diagnostics_from_error(error: &FriendlyInsertRunError) -> Insertion
 #[cfg(test)]
 mod app_shell {
     use super::*;
+    use crate::settings::AppSettings;
     use crate::transcript_log::{env_lock, TranscriptLog};
     use pepperx_cleanup::cleanup::{CleanupError, CleanupResult};
 
@@ -536,13 +626,41 @@ mod app_shell {
 
         let error = configured_model_dir().unwrap_err();
 
-        assert!(matches!(error, TranscriptionRunError::MissingModelDir));
+        assert!(matches!(
+            error,
+            TranscriptionRunError::UnreadyAsrModel { model_id, .. }
+                if model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
+        ));
         match previous_model_dir {
             Some(previous_model_dir) => {
                 std::env::set_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir)
             }
             None => std::env::remove_var("PEPPERX_PARAKEET_MODEL_DIR"),
         }
+    }
+
+    #[test]
+    fn model_status_transcription_rejects_unready_selected_asr_model() {
+        let settings = AppSettings {
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+            ..AppSettings::default()
+        };
+        let cache_root = std::env::temp_dir().join(format!(
+            "pepper-x-model-status-unready-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let error = configured_model_dir_with(&settings, &cache_root).unwrap_err();
+
+        assert!(matches!(
+            error,
+            TranscriptionRunError::UnreadyAsrModel { model_id, .. }
+                if model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
+        ));
     }
 
     #[test]
@@ -635,6 +753,7 @@ mod app_shell {
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
+            Some("ordinary-dictation".into()),
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
@@ -691,6 +810,7 @@ mod app_shell {
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
+            Some("ordinary-dictation".into()),
             |_| {
                 Err(CleanupError::MissingModelPath(PathBuf::from(
                     "/tmp/missing.gguf",
@@ -744,16 +864,20 @@ mod app_shell {
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
+            Some("ordinary-dictation".into()),
             |transcript_text| {
                 let model_path = configured_cleanup_model_path()?;
                 run_cleanup(&CleanupRequest {
                     transcript_text: transcript_text.into(),
                     model_path,
                     ocr_text: None,
+                    prompt_profile: "ordinary-dictation".into(),
                 })
             },
         )
         .expect("archive raw-only fallback entry");
+        let expected_model_path =
+            default_cache_root().join("cleanup/qwen2.5-3b-instruct-q4_k_m.gguf");
 
         assert_eq!(entry.transcript_text, "hello from pepper x");
         assert_eq!(entry.display_text(), "hello from pepper x");
@@ -761,8 +885,11 @@ mod app_shell {
             entry.cleanup,
             Some(CleanupDiagnostics::failed(
                 "llama.cpp",
-                "unknown",
-                "cleanup model path is not configured",
+                "qwen2.5-3b-instruct-q4_k_m.gguf",
+                format!(
+                    "cleanup model path does not exist: {}",
+                    expected_model_path.display()
+                ),
             ))
         );
 
@@ -804,6 +931,7 @@ mod app_shell {
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
+            Some("ordinary-dictation".into()),
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
@@ -861,6 +989,7 @@ mod app_shell {
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
+            Some("ordinary-dictation".into()),
             true,
             |_| {
                 Err(CleanupError::MissingModelPath(PathBuf::from(
@@ -1347,6 +1476,7 @@ mod app_shell {
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
+            Some("ordinary-dictation".into()),
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
@@ -1428,6 +1558,7 @@ mod app_shell {
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
+            Some("ordinary-dictation".into()),
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),

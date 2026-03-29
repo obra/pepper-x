@@ -5,6 +5,7 @@ pub use cleanup::{cleanup_prompt, run_cleanup, CleanupError, CleanupRequest, Cle
 #[cfg(test)]
 mod cleanup_runtime {
     use super::{cleanup_prompt, run_cleanup, CleanupError, CleanupRequest};
+    use crate::cleanup::ORDINARY_DICTATION_PROMPT_PROFILE;
     use std::path::PathBuf;
 
     #[test]
@@ -13,6 +14,7 @@ mod cleanup_runtime {
             transcript_text: "hello from pepper x".into(),
             model_path: PathBuf::from("/tmp/pepper-x-missing.gguf"),
             ocr_text: None,
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         })
         .unwrap_err();
 
@@ -28,6 +30,7 @@ mod cleanup_runtime {
             transcript_text: "hello from pepper x".into(),
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             ocr_text: None,
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         };
 
         assert_eq!(cleanup_prompt(&request), cleanup_prompt(&request));
@@ -39,6 +42,7 @@ mod cleanup_runtime {
             transcript_text: "hello from pepper x".into(),
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             ocr_text: None,
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         });
 
         assert!(!prompt.contains("Optional OCR context:"));
@@ -51,6 +55,7 @@ mod cleanup_runtime {
             transcript_text: "hello from pepper x".into(),
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             ocr_text: Some(oversized_ocr.clone()),
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         });
 
         let bounded_ocr = "A".repeat(512);
@@ -71,6 +76,7 @@ mod cleanup_runtime {
             transcript_text: "hello from pepper x".into(),
             model_path,
             ocr_text: None,
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         })
         .expect("real cleanup run should succeed");
 

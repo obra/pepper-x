@@ -2,9 +2,17 @@ mod cache;
 mod catalog;
 mod download;
 
-pub use cache::{default_cache_root, model_install_dir, model_readiness, ModelReadiness};
-pub use catalog::{supported_models, CatalogModel, InstallLayout, ModelKind};
-pub use download::{download_support, DownloadSupport};
+pub use cache::{
+    default_cache_root, model_install_dir, model_readiness, ModelInventoryEntry, ModelReadiness,
+};
+pub use catalog::{
+    catalog_model, default_model, supported_models, CatalogModel, DownloadArtifact,
+    DownloadArtifactKind, InstallLayout, ModelKind,
+};
+pub use download::{
+    bootstrap_model, bootstrap_model_with_fetch, download_support, model_inventory, BootstrapError,
+    DownloadSupport,
+};
 
 #[cfg(test)]
 mod tests {

@@ -33,11 +33,13 @@ impl ArchiveWriteRequest {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_supporting_context(mut self, supporting_context_text: impl Into<String>) -> Self {
         self.supporting_context_text = Some(supporting_context_text.into());
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_ocr_text(mut self, ocr_text: impl Into<String>) -> Self {
         self.ocr_text = Some(ocr_text.into());
         self

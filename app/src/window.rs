@@ -1,8 +1,12 @@
 use adw::prelude::*;
 use gtk::{Align, Orientation};
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 
+use pepperx_models::{ModelInventoryEntry, ModelKind};
+
+use crate::settings::AppSettings;
 use crate::transcript_log::TranscriptEntry;
 
 const SETTINGS_PAGE_NAME: &str = "settings";
@@ -11,6 +15,7 @@ const HISTORY_PAGE_NAME: &str = "history";
 #[derive(Clone)]
 pub struct MainWindow {
     app: adw::Application,
+    settings_summary: Rc<String>,
     history_summary: Rc<String>,
     state: Rc<RefCell<Option<WindowState>>>,
 }
@@ -23,12 +28,17 @@ struct WindowState {
 impl MainWindow {
     #[cfg(test)]
     pub fn new(app: &adw::Application) -> Self {
-        Self::new_with_history(app, Vec::new())
+        Self::new_with_history_and_settings(app, Vec::new(), default_settings_summary())
     }
 
-    pub fn new_with_history(app: &adw::Application, history_entries: Vec<TranscriptEntry>) -> Self {
+    pub fn new_with_history_and_settings(
+        app: &adw::Application,
+        history_entries: Vec<TranscriptEntry>,
+        settings_summary: String,
+    ) -> Self {
         Self {
             app: app.clone(),
+            settings_summary: Rc::new(settings_summary),
             history_summary: Rc::new(history_summary_text(&history_entries)),
             state: Rc::new(RefCell::new(None)),
         }
@@ -67,10 +77,7 @@ impl MainWindow {
             .transition_type(gtk::StackTransitionType::Crossfade)
             .build();
         stack.add_titled(
-            &build_page(
-                "Settings",
-                "Pepper X shell settings and GNOME integration controls live here.",
-            ),
+            &build_page("Settings", self.settings_summary.as_str()),
             Some(SETTINGS_PAGE_NAME),
             "Settings",
         );
@@ -101,6 +108,40 @@ impl MainWindow {
 
         *self.state.borrow_mut() = Some(WindowState { window, stack });
     }
+}
+
+pub(crate) fn settings_summary_text(
+    settings: &AppSettings,
+    cache_root: &Path,
+    inventory: &[ModelInventoryEntry],
+) -> String {
+    let mut lines = vec![
+        format!("Model cache: {}", cache_root.display()),
+        format!("Default ASR model: {}", settings.preferred_asr_model),
+        format!(
+            "Default cleanup model: {}",
+            settings.preferred_cleanup_model
+        ),
+        format!(
+            "Cleanup prompt profile: {}",
+            settings.cleanup_prompt_profile
+        ),
+    ];
+
+    for entry in inventory {
+        let kind_label = match entry.kind {
+            ModelKind::Asr => "ASR",
+            ModelKind::Cleanup => "Cleanup",
+        };
+        let status = if entry.readiness.is_ready {
+            "ready".to_string()
+        } else {
+            format!("missing {}", entry.readiness.missing_files.join(", "))
+        };
+        lines.push(format!("{kind_label} model {}: {status}", entry.id));
+    }
+
+    lines.join("\n")
 }
 
 pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
@@ -163,6 +204,11 @@ pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
     }
 }
 
+#[cfg(test)]
+fn default_settings_summary() -> String {
+    String::from("Pepper X shell settings and GNOME integration controls live here.")
+}
+
 fn build_page(title: &str, description: &str) -> gtk::Box {
     let container = gtk::Box::new(Orientation::Vertical, 12);
     container.set_margin_top(24);
@@ -190,8 +236,55 @@ fn build_page(title: &str, description: &str) -> gtk::Box {
 #[cfg(test)]
 mod app_shell {
     use super::*;
+    use crate::settings::AppSettings;
     use crate::transcript_log::InsertionDiagnostics;
+    use pepperx_models::{ModelInventoryEntry, ModelKind, ModelReadiness};
+    use std::path::PathBuf;
     use std::time::Duration;
+
+    #[test]
+    fn model_status_settings_summary_shows_cache_root_and_selected_models() {
+        let settings = AppSettings {
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+            preferred_cleanup_model: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            cleanup_prompt_profile: "ordinary-dictation".into(),
+            ..AppSettings::default()
+        };
+        let cache_root = PathBuf::from("/tmp/pepper-x-models");
+        let summary = settings_summary_text(
+            &settings,
+            &cache_root,
+            &[
+                ModelInventoryEntry {
+                    id: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+                    kind: ModelKind::Asr,
+                    readiness: ModelReadiness {
+                        install_path: cache_root.join("asr/nemo-parakeet-tdt-0.6b-v2-int8"),
+                        is_ready: true,
+                        missing_files: Vec::new(),
+                    },
+                },
+                ModelInventoryEntry {
+                    id: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    kind: ModelKind::Cleanup,
+                    readiness: ModelReadiness {
+                        install_path: cache_root.join("cleanup/qwen2.5-3b-instruct-q4_k_m.gguf"),
+                        is_ready: false,
+                        missing_files: vec!["qwen2.5-3b-instruct-q4_k_m.gguf".into()],
+                    },
+                },
+            ],
+        );
+
+        assert!(summary.contains("Model cache: /tmp/pepper-x-models"));
+        assert!(summary.contains("Default ASR model: nemo-parakeet-tdt-0.6b-v2-int8"));
+        assert!(summary.contains("Default cleanup model: qwen2.5-3b-instruct-q4_k_m.gguf"));
+        assert!(summary.contains("Cleanup prompt profile: ordinary-dictation"));
+        assert!(summary.contains("ASR model nemo-parakeet-tdt-0.6b-v2-int8: ready"));
+        assert!(summary.contains(
+            "Cleanup model qwen2.5-3b-instruct-q4_k_m.gguf: missing qwen2.5-3b-instruct-q4_k_m.gguf"
+        ));
+    }
 
     #[test]
     fn app_shell_history_summary_shows_latest_friendly_insert_success() {

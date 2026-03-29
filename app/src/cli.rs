@@ -1,6 +1,10 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+use pepperx_models::{
+    bootstrap_model, catalog_model, default_cache_root, model_inventory, ModelInventoryEntry,
+    ModelKind,
+};
 use pepperx_session::TriggerSource;
 
 use crate::session_runtime::LiveRuntimeHandle;
@@ -11,9 +15,57 @@ use crate::transcription::{
     transcribe_wav_to_log, TranscriptionRunError,
 };
 
+#[derive(Debug)]
+pub enum CliRunError {
+    Transcription(TranscriptionRunError),
+    Io(std::io::Error),
+    InvalidModelSelection {
+        model_id: String,
+        expected_kind: ModelKind,
+    },
+    UnknownModel(String),
+}
+
+impl From<TranscriptionRunError> for CliRunError {
+    fn from(error: TranscriptionRunError) -> Self {
+        Self::Transcription(error)
+    }
+}
+
+impl From<std::io::Error> for CliRunError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl std::fmt::Display for CliRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transcription(error) => error.fmt(f),
+            Self::Io(error) => write!(f, "Pepper X model management failed: {error}"),
+            Self::InvalidModelSelection {
+                model_id,
+                expected_kind,
+            } => write!(
+                f,
+                "Pepper X model {model_id} is not a supported {} model",
+                model_kind_label(*expected_kind)
+            ),
+            Self::UnknownModel(model_id) => {
+                write!(f, "Pepper X model is not supported: {model_id}")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupMode {
     Gui,
+    ListModels,
+    BootstrapModel { model_id: String },
+    SetDefaultAsrModel { model_id: String },
+    SetDefaultCleanupModel { model_id: String },
+    SetCleanupPromptProfile { profile: String },
     RecordAndTranscribe,
     TranscribeWav { wav_path: PathBuf },
     TranscribeWavAndCleanup { wav_path: PathBuf },
@@ -31,6 +83,50 @@ where
 
     match args.next() {
         None => Ok(StartupMode::Gui),
+        Some(flag) if flag == OsStr::new("--list-models") => match args.next() {
+            None => Ok(StartupMode::ListModels),
+            Some(_) => Err("--list-models does not accept positional arguments".into()),
+        },
+        Some(flag) if flag == OsStr::new("--bootstrap-model") => match (args.next(), args.next()) {
+            (Some(model_id), None) => Ok(StartupMode::BootstrapModel {
+                model_id: model_id.to_string_lossy().into_owned(),
+            }),
+            (None, _) => Err("--bootstrap-model requires a model id".into()),
+            (Some(_), Some(_)) => Err("--bootstrap-model accepts exactly one model id".into()),
+        },
+        Some(flag) if flag == OsStr::new("--set-default-asr-model") => {
+            match (args.next(), args.next()) {
+                (Some(model_id), None) => Ok(StartupMode::SetDefaultAsrModel {
+                    model_id: model_id.to_string_lossy().into_owned(),
+                }),
+                (None, _) => Err("--set-default-asr-model requires a model id".into()),
+                (Some(_), Some(_)) => {
+                    Err("--set-default-asr-model accepts exactly one model id".into())
+                }
+            }
+        }
+        Some(flag) if flag == OsStr::new("--set-default-cleanup-model") => {
+            match (args.next(), args.next()) {
+                (Some(model_id), None) => Ok(StartupMode::SetDefaultCleanupModel {
+                    model_id: model_id.to_string_lossy().into_owned(),
+                }),
+                (None, _) => Err("--set-default-cleanup-model requires a model id".into()),
+                (Some(_), Some(_)) => {
+                    Err("--set-default-cleanup-model accepts exactly one model id".into())
+                }
+            }
+        }
+        Some(flag) if flag == OsStr::new("--set-cleanup-prompt-profile") => {
+            match (args.next(), args.next()) {
+                (Some(profile), None) => Ok(StartupMode::SetCleanupPromptProfile {
+                    profile: profile.to_string_lossy().into_owned(),
+                }),
+                (None, _) => Err("--set-cleanup-prompt-profile requires a profile name".into()),
+                (Some(_), Some(_)) => {
+                    Err("--set-cleanup-prompt-profile accepts exactly one profile name".into())
+                }
+            }
+        }
         Some(flag) if flag == OsStr::new("--transcribe-wav") => match (args.next(), args.next()) {
             (Some(wav_path), None) => Ok(StartupMode::TranscribeWav {
                 wav_path: PathBuf::from(wav_path),
@@ -87,17 +183,65 @@ where
     }
 }
 
-pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, TranscriptionRunError> {
+pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, CliRunError> {
     let settings = AppSettings::load_or_default();
 
-    run_with(
-        startup_mode,
-        || record_and_transcribe(settings.preferred_microphone.clone(), wait_for_stop_signal),
-        transcribe_wav_to_log,
-        transcribe_wav_and_cleanup_to_log,
-        crate::transcription::transcribe_wav_and_insert_friendly_to_log,
-        transcribe_wav_and_cleanup_and_insert_friendly_to_log,
-    )
+    match startup_mode {
+        StartupMode::ListModels => {
+            let cache_root = default_cache_root();
+            println!(
+                "{}",
+                format_model_status_report(&settings, &cache_root, &model_inventory(&cache_root))
+            );
+            Ok(None)
+        }
+        StartupMode::BootstrapModel { model_id } => {
+            let model = catalog_model(&model_id)
+                .ok_or_else(|| CliRunError::UnknownModel(model_id.clone()))?;
+            let cache_root = default_cache_root();
+            let readiness = bootstrap_model(model, &cache_root).map_err(|error| {
+                CliRunError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    error.to_string(),
+                ))
+            })?;
+            println!(
+                "Bootstrapped {} model {} into {}",
+                model_kind_label(model.kind),
+                model.id,
+                readiness.install_path.display()
+            );
+            Ok(None)
+        }
+        StartupMode::SetDefaultAsrModel { model_id } => {
+            update_default_model(model_id, ModelKind::Asr, |settings, model_id| {
+                settings.preferred_asr_model = model_id;
+            })?;
+            Ok(None)
+        }
+        StartupMode::SetDefaultCleanupModel { model_id } => {
+            update_default_model(model_id, ModelKind::Cleanup, |settings, model_id| {
+                settings.preferred_cleanup_model = model_id;
+            })?;
+            Ok(None)
+        }
+        StartupMode::SetCleanupPromptProfile { profile } => {
+            let mut settings = AppSettings::load_or_default();
+            settings.cleanup_prompt_profile = profile.clone();
+            settings.save()?;
+            println!("Updated Pepper X cleanup prompt profile to {profile}");
+            Ok(None)
+        }
+        other_mode => run_with(
+            other_mode,
+            || record_and_transcribe(settings.preferred_microphone.clone(), wait_for_stop_signal),
+            transcribe_wav_to_log,
+            transcribe_wav_and_cleanup_to_log,
+            crate::transcription::transcribe_wav_and_insert_friendly_to_log,
+            transcribe_wav_and_cleanup_and_insert_friendly_to_log,
+        )
+        .map_err(Into::into),
+    }
 }
 
 pub fn run_with<R, F, G, H, I>(
@@ -117,6 +261,11 @@ where
 {
     match startup_mode {
         StartupMode::Gui => Ok(None),
+        StartupMode::ListModels => Ok(None),
+        StartupMode::BootstrapModel { .. } => Ok(None),
+        StartupMode::SetDefaultAsrModel { .. } => Ok(None),
+        StartupMode::SetDefaultCleanupModel { .. } => Ok(None),
+        StartupMode::SetCleanupPromptProfile { .. } => Ok(None),
         StartupMode::RecordAndTranscribe => record_and_transcribe().map(Some),
         StartupMode::TranscribeWav { wav_path } => transcribe(&wav_path).map(Some),
         StartupMode::TranscribeWavAndCleanup { wav_path } => {
@@ -166,6 +315,77 @@ where
     Ok(())
 }
 
+fn update_default_model<F>(
+    model_id: String,
+    expected_kind: ModelKind,
+    update: F,
+) -> Result<(), CliRunError>
+where
+    F: FnOnce(&mut AppSettings, String),
+{
+    let model =
+        catalog_model(&model_id).ok_or_else(|| CliRunError::UnknownModel(model_id.clone()))?;
+    if model.kind != expected_kind {
+        return Err(CliRunError::InvalidModelSelection {
+            model_id,
+            expected_kind,
+        });
+    }
+
+    let mut settings = AppSettings::load_or_default();
+    update(&mut settings, model.id.into());
+    settings.save()?;
+    println!(
+        "Updated Pepper X default {} model to {}",
+        model_kind_label(expected_kind),
+        model.id
+    );
+    Ok(())
+}
+
+fn format_model_status_report(
+    settings: &AppSettings,
+    cache_root: &std::path::Path,
+    inventory: &[ModelInventoryEntry],
+) -> String {
+    let mut lines = vec![
+        format!("Model cache: {}", cache_root.display()),
+        format!("Default ASR model: {}", settings.preferred_asr_model),
+        format!(
+            "Default cleanup model: {}",
+            settings.preferred_cleanup_model
+        ),
+        format!(
+            "Cleanup prompt profile: {}",
+            settings.cleanup_prompt_profile
+        ),
+        String::from("Supported models:"),
+    ];
+
+    for entry in inventory {
+        let status = if entry.readiness.is_ready {
+            "ready".to_string()
+        } else {
+            format!("missing {}", entry.readiness.missing_files.join(", "))
+        };
+        lines.push(format!(
+            "- {} [{}] {}",
+            entry.id,
+            model_kind_label(entry.kind),
+            status
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn model_kind_label(kind: ModelKind) -> &'static str {
+    match kind {
+        ModelKind::Asr => "asr",
+        ModelKind::Cleanup => "cleanup",
+    }
+}
+
 #[cfg(test)]
 mod cli_mode {
     use super::*;
@@ -180,6 +400,47 @@ mod cli_mode {
         .expect("live recording mode should parse");
 
         assert_eq!(command, StartupMode::RecordAndTranscribe);
+    }
+
+    #[test]
+    fn model_status_cli_mode_parses_list_models() {
+        let command = parse_args(["pepper-x".to_string(), "--list-models".to_string()]).unwrap();
+
+        assert_eq!(command, StartupMode::ListModels);
+    }
+
+    #[test]
+    fn model_status_cli_mode_parses_bootstrap_model() {
+        let command = parse_args([
+            "pepper-x".to_string(),
+            "--bootstrap-model".to_string(),
+            "nemo-parakeet-tdt-0.6b-v2-int8".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            StartupMode::BootstrapModel {
+                model_id: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn model_status_cli_mode_parses_set_default_cleanup_model() {
+        let command = parse_args([
+            "pepper-x".to_string(),
+            "--set-default-cleanup-model".to_string(),
+            "qwen2.5-3b-instruct-q4_k_m.gguf".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            StartupMode::SetDefaultCleanupModel {
+                model_id: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            }
+        );
     }
 
     #[test]

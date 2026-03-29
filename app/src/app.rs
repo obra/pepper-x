@@ -1,4 +1,5 @@
 use adw::prelude::*;
+use pepperx_models::{default_cache_root, model_inventory};
 use pepperx_platform_gnome::{
     atspi::ModifierCaptureHandle,
     service::{AppCommand, PepperXService, ServiceHandle},
@@ -12,7 +13,7 @@ use crate::history_store::HistoryStore;
 use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::AppSettings;
 use crate::transcript_log::{state_root, TranscriptEntry};
-use crate::window::MainWindow;
+use crate::window::{settings_summary_text, MainWindow};
 
 pub const APPLICATION_ID: &str = "com.obra.PepperX";
 
@@ -32,12 +33,15 @@ pub fn run() {
 
     let settings = AppSettings::load_or_default();
     let app = build_application();
-    let window = MainWindow::new_with_history(
+    let cache_root = default_cache_root();
+    let inventory = model_inventory(&cache_root);
+    let window = MainWindow::new_with_history_and_settings(
         &app,
         load_history_entries().unwrap_or_else(|error| {
             eprintln!("[Pepper X] failed to load transcript history: {error}");
             Vec::new()
         }),
+        settings_summary_text(&settings, &cache_root, &inventory),
     );
     let (command_sender, command_receiver) = mpsc::channel();
     let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))

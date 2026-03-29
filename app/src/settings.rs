@@ -3,10 +3,12 @@ use std::io;
 use std::path::PathBuf;
 
 use pepperx_audio::SelectedMicrophone;
+use pepperx_models::{default_model, ModelKind};
 
 use crate::transcript_log::state_root;
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
+pub const DEFAULT_CLEANUP_PROMPT_PROFILE: &str = "ordinary-dictation";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -21,6 +23,9 @@ pub struct AppSettings {
     pub enable_gnome_extension_integration: bool,
     pub preferred_recording_trigger_mode: RecordingTriggerMode,
     pub preferred_microphone: Option<SelectedMicrophone>,
+    pub preferred_asr_model: String,
+    pub preferred_cleanup_model: String,
+    pub cleanup_prompt_profile: String,
 }
 
 impl Default for AppSettings {
@@ -30,6 +35,9 @@ impl Default for AppSettings {
             enable_gnome_extension_integration: true,
             preferred_recording_trigger_mode: RecordingTriggerMode::ModifierOnly,
             preferred_microphone: None,
+            preferred_asr_model: default_model(ModelKind::Asr).id.into(),
+            preferred_cleanup_model: default_model(ModelKind::Cleanup).id.into(),
+            cleanup_prompt_profile: DEFAULT_CLEANUP_PROMPT_PROFILE.into(),
         }
     }
 }
@@ -60,7 +68,6 @@ impl AppSettings {
         })
     }
 
-    #[cfg(test)]
     pub fn save(&self) -> io::Result<()> {
         let settings_path = settings_path();
         if let Some(parent) = settings_path.parent() {
@@ -130,6 +137,41 @@ mod tests {
     }
 
     #[test]
+    fn model_status_settings_round_trip_default_models_and_cleanup_prompt_profile() {
+        let settings = AppSettings {
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+            preferred_cleanup_model: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            cleanup_prompt_profile: "ordinary-dictation".into(),
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_value(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_value(json.clone()).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "launch_at_login": false,
+                "enable_gnome_extension_integration": true,
+                "preferred_recording_trigger_mode": "modifier-only",
+                "preferred_microphone": null,
+                "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v2-int8",
+                "preferred_cleanup_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "cleanup_prompt_profile": "ordinary-dictation"
+            })
+        );
+        assert_eq!(restored.preferred_asr_model, settings.preferred_asr_model);
+        assert_eq!(
+            restored.preferred_cleanup_model,
+            settings.preferred_cleanup_model
+        );
+        assert_eq!(
+            restored.cleanup_prompt_profile,
+            settings.cleanup_prompt_profile
+        );
+    }
+
+    #[test]
     fn settings_serialize_preferred_microphone_with_explicit_shape() {
         let settings = AppSettings {
             preferred_microphone: Some(SelectedMicrophone::new(
@@ -150,7 +192,10 @@ mod tests {
                 "preferred_microphone": {
                     "stable_id": "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
                     "display_name": "Blue Yeti"
-                }
+                },
+                "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v2-int8",
+                "preferred_cleanup_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "cleanup_prompt_profile": "ordinary-dictation"
             })
         );
     }

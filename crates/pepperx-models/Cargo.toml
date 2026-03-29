@@ -5,3 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
+bzip2 = "0.6"
+tar = "0.4"
+ureq = "2.12"

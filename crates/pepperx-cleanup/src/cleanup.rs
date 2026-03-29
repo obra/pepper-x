@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const CLEANUP_BACKEND_NAME: &str = "llama.cpp";
+pub const ORDINARY_DICTATION_PROMPT_PROFILE: &str = "ordinary-dictation";
 const CLEANUP_MAX_TOKENS: usize = 128;
 const CLEANUP_OUTPUT_LIMIT: usize = 512;
 const CLEANUP_OCR_CONTEXT_LIMIT: usize = 512;
@@ -15,6 +16,7 @@ pub struct CleanupRequest {
     pub transcript_text: String,
     pub model_path: PathBuf,
     pub ocr_text: Option<String>,
+    pub prompt_profile: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +31,7 @@ pub struct CleanupResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanupError {
     MissingModelConfiguration,
+    UnsupportedModel(String),
     MissingModelPath(PathBuf),
     EmptyTranscript,
     LoadModel {
@@ -55,9 +58,10 @@ impl CleanupError {
 
     pub fn model_name(&self) -> Option<String> {
         match self {
-            Self::MissingModelConfiguration | Self::MissingModelPath(_) | Self::EmptyTranscript => {
-                None
-            }
+            Self::MissingModelConfiguration
+            | Self::UnsupportedModel(_)
+            | Self::MissingModelPath(_)
+            | Self::EmptyTranscript => None,
             Self::LoadModel { model_path, .. } => model_name_from_path(model_path),
             Self::CreateSession { model_name, .. }
             | Self::AdvanceContext { model_name, .. }
@@ -72,6 +76,9 @@ impl fmt::Display for CleanupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingModelConfiguration => f.write_str("cleanup model path is not configured"),
+            Self::UnsupportedModel(model_id) => {
+                write!(f, "cleanup model is not supported: {model_id}")
+            }
             Self::MissingModelPath(model_path) => write!(
                 f,
                 "cleanup model path does not exist: {}",
@@ -108,12 +115,20 @@ impl fmt::Display for CleanupError {
 }
 
 pub fn cleanup_prompt(request: &CleanupRequest) -> String {
-    let mut prompt = String::from(
-        "You clean speech recognition transcripts.\n\
+    let mut prompt = match request.prompt_profile.as_str() {
+        ORDINARY_DICTATION_PROMPT_PROFILE => String::from(
+            "You clean speech recognition transcripts.\n\
 Return only the cleaned transcript on a single line.\n\
 Preserve wording and meaning.\n\
 Fix capitalization, punctuation, and obvious transcription artifacts.\n",
-    );
+        ),
+        _ => String::from(
+            "You clean speech recognition transcripts.\n\
+Return only the cleaned transcript on a single line.\n\
+Preserve wording and meaning.\n\
+Fix capitalization, punctuation, and obvious transcription artifacts.\n",
+        ),
+    };
 
     if let Some(ocr_text) = bounded_ocr_text(request.ocr_text.as_deref()) {
         prompt.push_str("Optional OCR context:\n");
