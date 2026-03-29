@@ -90,6 +90,12 @@ pub fn transcribe_wav_to_log(wav_path: &Path) -> Result<TranscriptEntry, Transcr
     archive_transcription_result(result)
 }
 
+pub fn transcribe_recorded_wav_to_log(
+    wav_path: &Path,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    transcribe_wav_to_log(wav_path)
+}
+
 pub fn transcribe_wav_and_cleanup_to_log(
     wav_path: &Path,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {

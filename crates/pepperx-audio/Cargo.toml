@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+hound = "3.5.1"
 serde = { version = "1.0.228", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

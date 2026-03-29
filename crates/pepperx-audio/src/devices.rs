@@ -276,6 +276,14 @@ fn microphone_from_pipewire_dict(
     microphone_from_pipewire_source(properties)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn stable_pipewire_microphone_id(
+    properties: &pw::spa::utils::dict::DictRef,
+) -> Result<Option<String>, DeviceEnumerationError> {
+    microphone_from_pipewire_dict(properties)
+        .map(|device| device.map(|device| device.stable_id().to_string()))
+}
+
 #[cfg(any(test, target_os = "linux"))]
 fn microphone_from_pipewire_source(
     properties: &impl PipeWirePropertySource,

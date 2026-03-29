@@ -1479,6 +1479,7 @@ dependencies = [
  "pepperx-cleanup",
  "pepperx-ipc",
  "pepperx-platform-gnome",
+ "pepperx-session",
  "serde",
  "serde_json",
 ]
@@ -1495,6 +1496,7 @@ dependencies = [
 name = "pepperx-audio"
 version = "0.1.0"
 dependencies = [
+ "hound",
  "pipewire",
  "serde",
  "serde_json",
