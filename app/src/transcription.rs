@@ -1,10 +1,17 @@
 use std::path::{Path, PathBuf};
 
 use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
+use pepperx_platform_gnome::atspi::{
+    insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
+    FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME,
+};
 
-use crate::transcript_log::{nonempty_env_path, state_root, TranscriptEntry, TranscriptLog};
+use crate::transcript_log::{
+    nonempty_env_path, state_root, InsertionDiagnostics, TranscriptEntry, TranscriptLog,
+};
 
 const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
+const FRIENDLY_TARGET_APPLICATION_ID: &str = "org.gnome.TextEditor";
 
 #[derive(Debug)]
 pub enum TranscriptionRunError {
@@ -47,22 +54,69 @@ impl std::fmt::Display for TranscriptionRunError {
 }
 
 pub fn transcribe_wav_to_log(wav_path: &Path) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let result = transcribe_wav_result(wav_path)?;
+    archive_transcription_result(result)
+}
+
+pub fn transcribe_wav_and_insert_friendly_to_log(
+    wav_path: &Path,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let result = transcribe_wav_result(wav_path)?;
+    archive_transcription_result_with_friendly_insert(result, |transcript_text| {
+        insert_text_into_friendly_target(
+            transcript_text,
+            &FriendlyInsertPolicy {
+                target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
+            },
+        )
+    })
+}
+
+fn transcribe_wav_result(wav_path: &Path) -> Result<TranscriptionResult, TranscriptionRunError> {
     let model_dir = configured_model_dir()?;
     let request = TranscriptionRequest::new(wav_path, &model_dir, MODEL_NAME);
-    let result = transcribe_wav(&request)?;
-    archive_transcription_result(result)
+    Ok(transcribe_wav(&request)?)
 }
 
 pub(crate) fn archive_transcription_result(
     result: TranscriptionResult,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
-    let entry = TranscriptEntry::new(
+    archive_transcript_entry(transcript_entry_from_result(result))
+}
+
+pub(crate) fn archive_transcription_result_with_friendly_insert<F>(
+    result: TranscriptionResult,
+    insert: F,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    F: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
+{
+    let mut entry = transcript_entry_from_result(result);
+    entry.insertion = Some(match insert(&entry.transcript_text) {
+        Ok(outcome) => InsertionDiagnostics::succeeded(
+            outcome.selection.backend_name,
+            outcome.target_application_name,
+        ),
+        Err(error) => {
+            InsertionDiagnostics::failed(FRIENDLY_INSERT_BACKEND_NAME, "unknown", error.to_string())
+        }
+    });
+    archive_transcript_entry(entry)
+}
+
+fn transcript_entry_from_result(result: TranscriptionResult) -> TranscriptEntry {
+    TranscriptEntry::new(
         result.wav_path,
         result.transcript_text,
         result.backend_name,
         result.model_name,
         std::time::Duration::from_millis(result.elapsed_ms),
-    );
+    )
+}
+
+fn archive_transcript_entry(
+    entry: TranscriptEntry,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
     let log = TranscriptLog::open(state_root())?;
     log.append(&entry)?;
     Ok(entry)
@@ -99,8 +153,9 @@ fn configured_model_dir() -> Result<PathBuf, TranscriptionRunError> {
 }
 
 #[cfg(test)]
-mod tests {
+mod app_shell {
     use super::*;
+    use crate::transcript_log::{env_lock, TranscriptLog};
 
     #[test]
     fn transcription_run_rejects_empty_model_dir_override() {
@@ -116,5 +171,115 @@ mod tests {
             }
             None => std::env::remove_var("PEPPERX_PARAKEET_MODEL_DIR"),
         }
+    }
+
+    #[test]
+    fn app_shell_archives_friendly_insert_success_diagnostics() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-friendly-insert-success-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_friendly_insert(
+            TranscriptionResult {
+                wav_path: state_root.join("loop2.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| {
+                Ok(FriendlyInsertOutcome {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: "atspi-editable-text",
+                        target_application_id: "org.gnome.TextEditor".into(),
+                    },
+                    target_application_name: "Text Editor".into(),
+                    caret_offset: 5,
+                    before_text: "hello from pepper x".into(),
+                    after_text: "hello from pepper x".into(),
+                })
+            },
+        )
+        .expect("archive entry");
+
+        assert_eq!(
+            entry.insertion,
+            Some(InsertionDiagnostics::succeeded(
+                "atspi-editable-text",
+                "Text Editor"
+            ))
+        );
+        assert_eq!(
+            TranscriptLog::open(&state_root)
+                .expect("open transcript log")
+                .recent_entries()
+                .expect("load entries"),
+            vec![entry.clone()]
+        );
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn app_shell_archives_friendly_insert_failure_diagnostics() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-friendly-insert-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_friendly_insert(
+            TranscriptionResult {
+                wav_path: state_root.join("loop2.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| Err(FriendlyInsertRunError::MissingFocusedTarget),
+        )
+        .expect("archive entry");
+
+        assert_eq!(
+            entry.insertion,
+            Some(InsertionDiagnostics::failed(
+                FRIENDLY_INSERT_BACKEND_NAME,
+                "unknown",
+                "friendly insertion could not find a focused target"
+            ))
+        );
+        assert_eq!(
+            TranscriptLog::open(&state_root)
+                .expect("open transcript log")
+                .recent_entries()
+                .expect("load entries"),
+            vec![entry.clone()]
+        );
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
     }
 }

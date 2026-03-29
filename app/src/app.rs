@@ -191,6 +191,7 @@ mod app_shell {
                     elapsed_ms: 42,
                 })
             },
+            |_| unreachable!(),
         )
         .unwrap();
 

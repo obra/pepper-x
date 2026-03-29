@@ -8,6 +8,7 @@ use crate::transcription::{transcribe_wav_to_log, TranscriptionRunError};
 pub enum StartupMode {
     Gui,
     TranscribeWav { wav_path: PathBuf },
+    TranscribeWavAndInsertFriendly { wav_path: PathBuf },
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<StartupMode, String>
@@ -27,6 +28,17 @@ where
             (None, _) => Err("--transcribe-wav requires a WAV path".into()),
             (Some(_), Some(_)) => Err("--transcribe-wav accepts exactly one WAV path".into()),
         },
+        Some(flag) if flag == OsStr::new("--transcribe-wav-and-insert-friendly") => {
+            match (args.next(), args.next()) {
+                (Some(wav_path), None) => Ok(StartupMode::TranscribeWavAndInsertFriendly {
+                    wav_path: PathBuf::from(wav_path),
+                }),
+                (None, _) => Err("--transcribe-wav-and-insert-friendly requires a WAV path".into()),
+                (Some(_), Some(_)) => {
+                    Err("--transcribe-wav-and-insert-friendly accepts exactly one WAV path".into())
+                }
+            }
+        }
         Some(flag) => Err(format!(
             "unknown Pepper X argument: {}",
             PathBuf::from(flag).display()
@@ -35,19 +47,28 @@ where
 }
 
 pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, TranscriptionRunError> {
-    run_with(startup_mode, transcribe_wav_to_log)
+    run_with(
+        startup_mode,
+        transcribe_wav_to_log,
+        crate::transcription::transcribe_wav_and_insert_friendly_to_log,
+    )
 }
 
-pub fn run_with<F>(
+pub fn run_with<F, G>(
     startup_mode: StartupMode,
     transcribe: F,
+    transcribe_and_insert_friendly: G,
 ) -> Result<Option<TranscriptEntry>, TranscriptionRunError>
 where
     F: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
+    G: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
 {
     match startup_mode {
         StartupMode::Gui => Ok(None),
         StartupMode::TranscribeWav { wav_path } => transcribe(&wav_path).map(Some),
+        StartupMode::TranscribeWavAndInsertFriendly { wav_path } => {
+            transcribe_and_insert_friendly(&wav_path).map(Some)
+        }
     }
 }
 
@@ -74,11 +95,42 @@ mod cli_mode {
     }
 
     #[test]
+    fn cli_mode_parses_transcribe_wav_and_insert_friendly_path() {
+        let command = parse_args([
+            "pepper-x".to_string(),
+            "--transcribe-wav-and-insert-friendly".to_string(),
+            "/tmp/loop1.wav".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            StartupMode::TranscribeWavAndInsertFriendly {
+                wav_path: PathBuf::from("/tmp/loop1.wav"),
+            }
+        );
+    }
+
+    #[test]
     fn cli_mode_rejects_missing_transcribe_wav_path() {
         let error =
             parse_args(["pepper-x".to_string(), "--transcribe-wav".to_string()]).unwrap_err();
 
         assert_eq!(error, "--transcribe-wav requires a WAV path");
+    }
+
+    #[test]
+    fn cli_mode_rejects_missing_friendly_insert_wav_path() {
+        let error = parse_args([
+            "pepper-x".to_string(),
+            "--transcribe-wav-and-insert-friendly".to_string(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "--transcribe-wav-and-insert-friendly requires a WAV path"
+        );
     }
 
     #[test]
@@ -108,6 +160,35 @@ mod cli_mode {
                 observed_path = Some(path.to_path_buf());
                 Ok(expected.clone())
             },
+            |_| unreachable!(),
+        )
+        .unwrap();
+
+        assert_eq!(observed_path, Some(wav_path));
+        assert_eq!(result, Some(expected));
+    }
+
+    #[test]
+    fn cli_mode_runs_transcribe_wav_and_insert_friendly_without_gui() {
+        let wav_path = PathBuf::from("/tmp/loop1.wav");
+        let expected = TranscriptEntry::new(
+            &wav_path,
+            "hello from pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            Duration::from_millis(37),
+        );
+        let mut observed_path = None;
+
+        let result = run_with(
+            StartupMode::TranscribeWavAndInsertFriendly {
+                wav_path: wav_path.clone(),
+            },
+            |_| unreachable!(),
+            |path: &std::path::Path| {
+                observed_path = Some(path.to_path_buf());
+                Ok(expected.clone())
+            },
         )
         .unwrap();
 
@@ -117,7 +198,7 @@ mod cli_mode {
 
     #[test]
     fn cli_mode_keeps_gui_startup_mode_outside_runner() {
-        let result = run_with(StartupMode::Gui, |_| unreachable!()).unwrap();
+        let result = run_with(StartupMode::Gui, |_| unreachable!(), |_| unreachable!()).unwrap();
 
         assert_eq!(result, None);
     }

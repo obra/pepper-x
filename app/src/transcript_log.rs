@@ -14,6 +14,8 @@ pub struct TranscriptEntry {
     pub backend_name: String,
     pub model_name: String,
     pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insertion: Option<InsertionDiagnostics>,
 }
 
 impl TranscriptEntry {
@@ -30,6 +32,43 @@ impl TranscriptEntry {
             backend_name: backend_name.into(),
             model_name: model_name.into(),
             elapsed_ms: elapsed.as_millis() as u64,
+            insertion: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsertionDiagnostics {
+    pub backend_name: String,
+    pub target_application_name: String,
+    pub succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+impl InsertionDiagnostics {
+    pub fn succeeded(
+        backend_name: impl Into<String>,
+        target_application_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend_name: backend_name.into(),
+            target_application_name: target_application_name.into(),
+            succeeded: true,
+            failure_reason: None,
+        }
+    }
+
+    pub fn failed(
+        backend_name: impl Into<String>,
+        target_application_name: impl Into<String>,
+        failure_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend_name: backend_name.into(),
+            target_application_name: target_application_name.into(),
+            succeeded: false,
+            failure_reason: Some(failure_reason.into()),
         }
     }
 }
@@ -147,13 +186,17 @@ mod tests {
     fn transcript_log_append_and_reload_preserve_entry_fields() {
         let root = temp_root();
         let log = TranscriptLog::open(&root).expect("open log");
-        let expected = TranscriptEntry::new(
+        let mut expected = TranscriptEntry::new(
             "/tmp/loop1/sample.wav",
             "hello from pepper x",
             "sherpa-onnx",
             "nemo-parakeet-tdt-0.6b-v2-int8",
             Duration::from_millis(1234),
         );
+        expected.insertion = Some(InsertionDiagnostics::succeeded(
+            "atspi-editable-text",
+            "Text Editor",
+        ));
 
         log.append(&expected).expect("append entry");
 
@@ -194,13 +237,18 @@ mod tests {
     fn transcript_log_uses_jsonl_storage() {
         let root = temp_root();
         let log = TranscriptLog::open(&root).expect("open log");
-        let expected = TranscriptEntry::new(
+        let mut expected = TranscriptEntry::new(
             "sample.wav",
             "sample",
             "backend",
             "model",
             Duration::from_millis(42),
         );
+        expected.insertion = Some(InsertionDiagnostics::failed(
+            "atspi-editable-text",
+            "Calculator",
+            "friendly insertion target is not editable",
+        ));
 
         log.append(&expected).expect("append entry");
 
@@ -210,6 +258,8 @@ mod tests {
         assert!(raw.contains("\"transcript_text\":\"sample\""));
         assert!(raw.contains("\"backend_name\":\"backend\""));
         assert!(raw.contains("\"model_name\":\"model\""));
+        assert!(raw.contains("\"target_application_name\":\"Calculator\""));
+        assert!(raw.contains("\"failure_reason\":\"friendly insertion target is not editable\""));
     }
 
     #[test]
@@ -254,6 +304,33 @@ mod tests {
         let entries = log.recent_entries().expect("load entries");
 
         assert_eq!(entries, vec![expected]);
+    }
+
+    #[test]
+    fn transcript_log_keeps_loop1_entries_without_insertion_diagnostics() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(
+                br#"{"source_wav_path":"legacy.wav","transcript_text":"legacy","backend_name":"backend","model_name":"model","elapsed_ms":11}"#,
+            )
+            .expect("append legacy entry");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(b"\n")
+            .expect("append newline");
+
+        let entries = log.recent_entries().expect("load entries");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].transcript_text, "legacy");
+        assert_eq!(entries[0].insertion, None);
     }
 
     #[test]

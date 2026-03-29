@@ -105,7 +105,7 @@ impl MainWindow {
 
 pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
     if let Some(latest) = entries.first() {
-        format!(
+        let mut summary = format!(
             "Latest transcript:\n{}\n\nSource WAV: {}\nBackend: {}\nModel: {}\nElapsed: {} ms\nArchived entries: {}",
             latest.transcript_text,
             latest.source_wav_path.display(),
@@ -113,9 +113,31 @@ pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
             latest.model_name,
             latest.elapsed_ms,
             entries.len()
-        )
+        );
+
+        if let Some(insertion) = latest.insertion.as_ref() {
+            let insertion_summary = if insertion.succeeded {
+                format!(
+                    "\nFriendly insertion: inserted into {} via {}",
+                    insertion.target_application_name, insertion.backend_name
+                )
+            } else {
+                format!(
+                    "\nFriendly insertion: failed in {} via {}\nReason: {}",
+                    insertion.target_application_name,
+                    insertion.backend_name,
+                    insertion
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("unknown failure")
+                )
+            };
+            summary.push_str(&insertion_summary);
+        }
+
+        summary
     } else {
-        "No dictation runs yet. Run `pepper-x --transcribe-wav <path>` to archive a transcript."
+        "No dictation runs yet. Run `pepper-x --transcribe-wav <path>` or `pepper-x --transcribe-wav-and-insert-friendly <path>` to archive a transcript."
             .to_string()
     }
 }
@@ -142,4 +164,54 @@ fn build_page(title: &str, description: &str) -> gtk::Box {
     container.append(&title_label);
     container.append(&description_label);
     container
+}
+
+#[cfg(test)]
+mod app_shell {
+    use super::*;
+    use crate::transcript_log::InsertionDiagnostics;
+    use std::time::Duration;
+
+    #[test]
+    fn app_shell_history_summary_shows_latest_friendly_insert_success() {
+        let mut entry = TranscriptEntry::new(
+            "/tmp/loop2.wav",
+            "hello from pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            Duration::from_millis(84),
+        );
+        entry.insertion = Some(InsertionDiagnostics::succeeded(
+            "atspi-editable-text",
+            "Text Editor",
+        ));
+
+        let summary = history_summary_text(&[entry]);
+
+        assert!(summary
+            .contains("Friendly insertion: inserted into Text Editor via atspi-editable-text"));
+    }
+
+    #[test]
+    fn app_shell_history_summary_shows_latest_friendly_insert_failure_reason() {
+        let mut entry = TranscriptEntry::new(
+            "/tmp/loop2.wav",
+            "hello from pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            Duration::from_millis(84),
+        );
+        entry.insertion = Some(InsertionDiagnostics::failed(
+            "atspi-editable-text",
+            "Calculator",
+            "friendly insertion target is not editable",
+        ));
+
+        let summary = history_summary_text(&[entry]);
+
+        assert!(
+            summary.contains("Friendly insertion: failed in Calculator via atspi-editable-text")
+        );
+        assert!(summary.contains("Reason: friendly insertion target is not editable"));
+    }
 }
