@@ -42,6 +42,16 @@ impl HistoryBrowserModel {
         true
     }
 
+    pub(crate) fn rerunnable_run_id(&self) -> Option<&str> {
+        let selected_run = self.selected_run()?;
+        Some(
+            selected_run
+                .parent_run_id
+                .as_deref()
+                .unwrap_or(selected_run.run_id.as_str()),
+        )
+    }
+
     fn select_index(&mut self, index: usize) -> bool {
         if index >= self.runs.len() {
             return false;
@@ -92,7 +102,10 @@ struct HistoryRunSections {
     metadata_text: String,
 }
 
-pub(crate) fn build_history_browser(runs: &[ArchivedRun]) -> gtk::Paned {
+pub(crate) fn build_history_browser(
+    runs: &[ArchivedRun],
+    rerun_archived_run: Option<Rc<dyn Fn(String)>>,
+) -> gtk::Paned {
     let model = Rc::new(RefCell::new(HistoryBrowserModel::new(runs.to_vec())));
 
     let list_box = gtk::ListBox::builder()
@@ -115,6 +128,21 @@ pub(crate) fn build_history_browser(runs: &[ArchivedRun]) -> gtk::Paned {
     details_box.set_margin_bottom(18);
     details_box.set_margin_start(18);
     details_box.set_margin_end(18);
+    if let Some(rerun_archived_run) = rerun_archived_run {
+        let rerun_button = gtk::Button::with_label("Rerun With Current Defaults");
+        rerun_button.set_halign(Align::Start);
+        rerun_button.set_sensitive(model.borrow().rerunnable_run_id().is_some());
+        {
+            let model = model.clone();
+            rerun_button.connect_clicked(move |_| {
+                let Some(run_id) = model.borrow().rerunnable_run_id().map(str::to_string) else {
+                    return;
+                };
+                rerun_archived_run(run_id);
+            });
+        }
+        details_box.append(&rerun_button);
+    }
     details_box.append(&section_label("Raw Transcript"));
     details_box.append(&raw_label);
     details_box.append(&section_label("Cleaned Transcript"));
@@ -637,6 +665,31 @@ mod history_view_tests {
 
         assert!(details.contains("Original raw transcript:\nhello from pepper x"));
         assert!(details.contains("Rerun raw transcript:\nnewer rerun raw"));
+    }
+
+    #[test]
+    fn history_view_rerun_action_targets_the_logical_parent_run() {
+        let parent = archived_run(
+            "run-parent",
+            10,
+            "hello from pepper x",
+            Some("Hello from Pepper X."),
+            "atspi-editable-text",
+        );
+        let mut rerun = archived_run(
+            "run-rerun",
+            20,
+            "hello from pepper ex",
+            Some("Hello from Pepper Ex."),
+            "clipboard-paste",
+        );
+        rerun.parent_run_id = Some(parent.run_id.clone());
+
+        let mut model = HistoryBrowserModel::new(vec![parent, rerun]);
+        assert_eq!(model.rerunnable_run_id(), Some("run-parent"));
+
+        assert!(model.select_run("run-rerun"));
+        assert_eq!(model.rerunnable_run_id(), Some("run-parent"));
     }
 
     #[test]

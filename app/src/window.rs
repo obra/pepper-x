@@ -32,6 +32,7 @@ struct WindowContentSnapshot {
 pub struct MainWindow {
     app: adw::Application,
     content_providers: Rc<WindowContentProviders>,
+    rerun_archived_run: Option<Rc<dyn Fn(String)>>,
     state: Rc<RefCell<Option<WindowState>>>,
 }
 
@@ -109,8 +110,27 @@ impl MainWindow {
                 settings_summary: Rc::new(settings_summary),
                 diagnostics_summary: Rc::new(diagnostics_summary),
             }),
+            rerun_archived_run: None,
             state: Rc::new(RefCell::new(None)),
         }
+    }
+
+    pub(crate) fn new_with_providers_and_rerun<H, S, D>(
+        app: &adw::Application,
+        history_runs: H,
+        settings_summary: S,
+        diagnostics_summary: D,
+        rerun_archived_run: Option<Rc<dyn Fn(String)>>,
+    ) -> Self
+    where
+        H: Fn() -> Vec<ArchivedRun> + 'static,
+        S: Fn() -> String + 'static,
+        D: Fn() -> String + 'static,
+    {
+        let mut window =
+            Self::new_with_providers(app, history_runs, settings_summary, diagnostics_summary);
+        window.rerun_archived_run = rerun_archived_run;
+        window
     }
 
     #[cfg(test)]
@@ -157,7 +177,10 @@ impl MainWindow {
         let history_container = gtk::Box::new(Orientation::Vertical, 0);
         history_container.set_hexpand(true);
         history_container.set_vexpand(true);
-        history_container.append(&build_history_browser(&snapshot.history_runs));
+        history_container.append(&build_history_browser(
+            &snapshot.history_runs,
+            self.rerun_archived_run.clone(),
+        ));
         stack.add_titled(&history_container, Some(HISTORY_PAGE_NAME), "History");
         let (diagnostics_page, diagnostics_label) =
             build_page("Diagnostics", snapshot.diagnostics_summary.as_str());
@@ -210,7 +233,11 @@ impl MainWindow {
         state
             .diagnostics_label
             .set_label(&snapshot.diagnostics_summary);
-        replace_history_browser(&state.history_container, &snapshot.history_runs);
+        replace_history_browser(
+            &state.history_container,
+            &snapshot.history_runs,
+            self.rerun_archived_run.clone(),
+        );
     }
 }
 
@@ -428,11 +455,15 @@ fn build_page(title: &str, description: &str) -> (gtk::Box, gtk::Label) {
     (container, description_label)
 }
 
-fn replace_history_browser(container: &gtk::Box, runs: &[ArchivedRun]) {
+fn replace_history_browser(
+    container: &gtk::Box,
+    runs: &[ArchivedRun],
+    rerun_archived_run: Option<Rc<dyn Fn(String)>>,
+) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
-    container.append(&build_history_browser(runs));
+    container.append(&build_history_browser(runs, rerun_archived_run));
 }
 
 #[cfg(test)]

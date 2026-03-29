@@ -5,7 +5,7 @@ use pepperx_platform_gnome::{
     atspi::ModifierCaptureHandle,
     service::{AppCommand, PepperXService, ServiceHandle},
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
@@ -16,6 +16,7 @@ use crate::history_store::{ArchivedRun, HistoryStore};
 use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::AppSettings;
 use crate::transcript_log::{state_root, TranscriptEntry};
+use crate::transcription::{rerun_archived_run_to_log, ArchivedRunRerunRequest};
 use crate::window::{diagnostics_summary_text, settings_summary_text, MainWindow};
 
 pub const APPLICATION_ID: &str = "com.obra.PepperX";
@@ -45,7 +46,9 @@ pub fn run() {
     let diagnostics_cache_root = cache_root.clone();
     let settings_cache_root = cache_root.clone();
     let diagnostics_service = service.clone();
-    let window = MainWindow::new_with_providers(
+    let rerun_window = Rc::new(RefCell::new(None::<MainWindow>));
+    let rerun_window_handle = rerun_window.clone();
+    let window = MainWindow::new_with_providers_and_rerun(
         &app,
         load_history_runs_or_empty,
         move || {
@@ -65,7 +68,26 @@ pub fn run() {
                 &diagnostics_service.current_capabilities(),
             )
         },
+        Some(Rc::new(move |run_id| {
+            let settings = AppSettings::load_or_default();
+            let request = ArchivedRunRerunRequest {
+                run_id,
+                asr_model_id: Some(settings.preferred_asr_model.clone()),
+                cleanup_model_id: Some(settings.preferred_cleanup_model.clone()),
+                cleanup_prompt_profile: Some(settings.cleanup_prompt_profile.clone()),
+            };
+
+            match rerun_archived_run_to_log(request) {
+                Ok(_) => {
+                    if let Some(window) = rerun_window_handle.borrow().as_ref() {
+                        window.present_history();
+                    }
+                }
+                Err(error) => eprintln!("[Pepper X] failed to rerun archived run: {error}"),
+            }
+        })),
     );
+    *rerun_window.borrow_mut() = Some(window.clone());
 
     let startup_launch_policy = startup_launch_policy();
     let skipped_initial_activation = Rc::new(Cell::new(false));
