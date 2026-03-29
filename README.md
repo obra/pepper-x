@@ -142,3 +142,35 @@ Use the accessible-target smoke helper inside a live GNOME 48+ Wayland session:
 ```
 
 For the browser smoke, focus a normal textarea or contenteditable field in Firefox before running the helper.
+
+## Loop 4 Fallback-Backed Insertion
+
+Loop 4 keeps the loop-3 text-oriented path first, but declares the full fallback order Pepper X now uses for insertion:
+
+1. semantic `EditableText` insertion
+2. AT-SPI string injection
+3. clipboard-mediated paste
+4. Pepper X-owned `uinput` text injection
+
+The declared loop-4 target classes are:
+
+- `text-editor`
+- `browser-textarea`
+- `terminal`
+- `hostile`
+
+Current boundaries:
+
+- `terminal` targets only use AT-SPI string injection when the focused surface plausibly accepts text
+- clipboard mediation preserves and restores clipboard ownership instead of treating paste as destructive
+- the `uinput` path is a last fallback, never the default
+- the helper is Pepper X-owned and text-only, installed at `/usr/libexec/pepper-x/pepperx-uinput-helper`
+- Pepper X still does not claim secure-field support or universal coverage across arbitrary Linux apps
+
+Use the terminal smoke helper inside a live GNOME 48+ Wayland session:
+
+```sh
+./scripts/smoke-insert-terminal.sh
+```
+
+Run that helper inside the live GNOME session, or export that session's `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, and `XDG_SESSION_TYPE=wayland` first. As with the accessible-target smokes, SSH into the VM is not an authoritative AT-SPI insertion surface.

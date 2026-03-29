@@ -25,6 +25,24 @@ Pepper X must insert final text into the currently focused application with a ba
 - explicit about which target classes require fallback behavior
 - honest about where privileged input injection is still necessary
 
+## Current Loop-4 Status
+
+Loop 4 implements the declared fallback order in the live codebase:
+
+1. semantic accessibility insertion
+2. AT-SPI string injection
+3. clipboard-assisted paste
+4. privileged `uinput` fallback
+
+The declared target classes are:
+
+- `text-editor`
+- `browser-textarea`
+- `terminal`
+- `hostile`
+
+Pepper X includes live-session smoke helpers for the semantic and terminal paths, but those helpers still need to be run from a real GNOME Wayland session. SSH into a guest is not an authoritative AT-SPI client, so hostile-target claims should still be treated as fallback-heavy rather than universal.
+
 ## Non-Goals
 
 - universal zero-fallback insertion across every Linux app
@@ -134,6 +152,14 @@ Implementation shape:
 - persistent virtual device, inspired by `ydotoold`
 - narrow local IPC to the main app
 - strict responsibility: text injection only
+
+Current implementation details:
+
+- helper binary: `pepperx-uinput-helper`
+- default install path: `/usr/libexec/pepper-x/pepperx-uinput-helper`
+- default socket path: `$XDG_RUNTIME_DIR/pepper-x/uinput-helper.sock`
+- request protocol: JSON with text only, not generic key remapping
+- current keystroke map: explicit US-layout subset, so this fallback is intentionally narrow
 
 Pepper X should not depend on `ydotool` directly. The useful lesson is the persistent daemon architecture, not the dependency.
 
@@ -250,36 +276,20 @@ Pepper X should refuse insertion or require an explicit fallback decision when:
 
 The insertion subsystem must prefer a clear failure over corrupting user input.
 
-## Recommended Spikes
+## Current Verification Posture
 
-Before locking the implementation plan for insertion, Pepper X should spike these in order:
+Pepper X now has automated coverage for:
 
-1. semantic insertion with `AtspiEditableText` on GNOME 48+
-2. AT-SPI string injection against terminal targets
-3. clipboard preservation and restore behavior under Wayland
-4. minimal `uinput` daemon for hard fallback targets
+- target classification and backend selection
+- terminal string-injection routing
+- clipboard preservation and restore behavior
+- transcript diagnostics for the full fallback chain
+- the Pepper X-owned `uinput` helper build and text-only IPC contract
 
-The terminal spike set should include:
+Pepper X still needs real in-session GNOME smoke execution to make strong claims about:
 
-- Ghostty
-- xterm
-- GNOME Text Editor
-- a Qt text editor
-- LibreOffice Writer
-- a browser text area
-- a Wine target
+- individual terminal emulators such as Ghostty and `xterm`
+- hostile targets such as Wine
+- broader Qt and custom-rendered app behavior
 
-## Proposed Planning Change
-
-The future insertion implementation plan should explicitly model insertion as a multi-backend subsystem rather than a single mechanism.
-
-The plan should have separate tasks for:
-
-- target inspection and routing
-- semantic accessibility insertion
-- string injection
-- clipboard fallback
-- privileged `uinput` fallback
-- diagnostics and smoke matrix
-
-That is the minimum honest shape for reliable text insertion on GNOME Wayland.
+That is the honest boundary for loop 4 on GNOME Wayland today.
