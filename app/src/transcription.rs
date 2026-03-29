@@ -318,8 +318,19 @@ fn archive_transcription_result_with_cleanup<F>(
 where
     F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
 {
+    archive_transcription_result_with_cleanup_context(result, false, cleanup)
+}
+
+fn archive_transcription_result_with_cleanup_context<F>(
+    result: TranscriptionResult,
+    used_ocr_context: bool,
+    cleanup: F,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
+{
     let mut entry = transcript_entry_from_result(result);
-    record_cleanup(&mut entry, cleanup);
+    record_cleanup(&mut entry, used_ocr_context, cleanup);
     archive_transcript_entry(entry)
 }
 
@@ -346,7 +357,7 @@ where
     I: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
 {
     let mut entry = transcript_entry_from_result(result);
-    record_cleanup(&mut entry, cleanup);
+    record_cleanup(&mut entry, false, cleanup);
     let insert_text = entry.display_text().to_string();
     let insert_error = record_friendly_insert(&mut entry, &insert_text, insert).err();
     let entry = archive_transcript_entry(entry)?;
@@ -409,13 +420,13 @@ fn configured_cleanup_model_path() -> Result<PathBuf, CleanupError> {
     nonempty_env_path("PEPPERX_CLEANUP_MODEL_PATH").ok_or(CleanupError::MissingModelConfiguration)
 }
 
-fn record_cleanup<F>(entry: &mut TranscriptEntry, cleanup: F)
+fn record_cleanup<F>(entry: &mut TranscriptEntry, used_ocr_context: bool, cleanup: F)
 where
     F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
 {
     entry.cleanup = Some(match cleanup(&entry.transcript_text) {
         Ok(result) => cleanup_diagnostics_from_result(result),
-        Err(error) => cleanup_diagnostics_from_error(&error),
+        Err(error) => cleanup_diagnostics_from_error(&error, used_ocr_context),
     });
 }
 
@@ -430,7 +441,10 @@ fn cleanup_diagnostics_from_result(result: CleanupResult) -> CleanupDiagnostics 
     diagnostics
 }
 
-fn cleanup_diagnostics_from_error(error: &CleanupError) -> CleanupDiagnostics {
+fn cleanup_diagnostics_from_error(
+    error: &CleanupError,
+    used_ocr_context: bool,
+) -> CleanupDiagnostics {
     let mut diagnostics = CleanupDiagnostics::failed(
         error.backend_name(),
         error
@@ -438,7 +452,7 @@ fn cleanup_diagnostics_from_error(error: &CleanupError) -> CleanupDiagnostics {
             .unwrap_or_else(|| String::from("unknown")),
         error.to_string(),
     );
-    diagnostics.used_ocr = false;
+    diagnostics.used_ocr = used_ocr_context;
     diagnostics
 }
 
@@ -750,6 +764,117 @@ mod app_shell {
             }
             None => std::env::remove_var("PEPPERX_CLEANUP_MODEL_PATH"),
         }
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_ocr_runtime_archives_used_ocr_flag_from_cleanup_result() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-ocr-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_cleanup(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: true,
+                })
+            },
+        )
+        .expect("archive cleanup entry");
+
+        assert_eq!(
+            entry.cleanup,
+            Some(CleanupDiagnostics {
+                backend_name: "llama.cpp".into(),
+                model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                cleaned_text: Some("Hello from Pepper X.".into()),
+                elapsed_ms: 19,
+                used_ocr: true,
+                succeeded: true,
+                failure_reason: None,
+            })
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_ocr_runtime_archives_used_ocr_flag_on_cleanup_failure() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-ocr-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_cleanup_context(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            true,
+            |_| {
+                Err(CleanupError::MissingModelPath(PathBuf::from(
+                    "/tmp/missing.gguf",
+                )))
+            },
+        )
+        .expect("archive cleanup failure entry");
+
+        assert_eq!(
+            entry.cleanup,
+            Some(CleanupDiagnostics {
+                backend_name: "llama.cpp".into(),
+                model_name: "unknown".into(),
+                cleaned_text: None,
+                elapsed_ms: 0,
+                used_ocr: true,
+                succeeded: false,
+                failure_reason: Some("cleanup model path does not exist: /tmp/missing.gguf".into()),
+            })
+        );
+
         match previous_state_root {
             Some(previous_state_root) => {
                 std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)

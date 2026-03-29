@@ -1,8 +1,6 @@
 pub mod cleanup;
 
-pub use cleanup::{
-    cleanup_prompt, run_cleanup, CleanupError, CleanupRequest, CleanupResult,
-};
+pub use cleanup::{cleanup_prompt, run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 
 #[cfg(test)]
 mod cleanup_runtime {
@@ -33,6 +31,33 @@ mod cleanup_runtime {
         };
 
         assert_eq!(cleanup_prompt(&request), cleanup_prompt(&request));
+    }
+
+    #[test]
+    fn cleanup_ocr_prompt_omits_context_when_absent() {
+        let prompt = cleanup_prompt(&CleanupRequest {
+            transcript_text: "hello from pepper x".into(),
+            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
+            ocr_text: None,
+        });
+
+        assert!(!prompt.contains("Optional OCR context:"));
+    }
+
+    #[test]
+    fn cleanup_ocr_prompt_bounds_context_when_present() {
+        let oversized_ocr = "A".repeat(640);
+        let prompt = cleanup_prompt(&CleanupRequest {
+            transcript_text: "hello from pepper x".into(),
+            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
+            ocr_text: Some(oversized_ocr.clone()),
+        });
+
+        let bounded_ocr = "A".repeat(512);
+
+        assert!(prompt.contains("Optional OCR context:\n"));
+        assert!(prompt.contains(&bounded_ocr));
+        assert!(!prompt.contains(&oversized_ocr));
     }
 
     #[test]

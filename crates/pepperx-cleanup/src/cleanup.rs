@@ -1,5 +1,5 @@
-use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
 use llama_cpp::standard_sampler::StandardSampler;
+use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -7,6 +7,7 @@ use std::time::Instant;
 const CLEANUP_BACKEND_NAME: &str = "llama.cpp";
 const CLEANUP_MAX_TOKENS: usize = 128;
 const CLEANUP_OUTPUT_LIMIT: usize = 512;
+const CLEANUP_OCR_CONTEXT_LIMIT: usize = 512;
 const CLEANUP_SESSION_CTX: u32 = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,10 +31,21 @@ pub enum CleanupError {
     MissingModelConfiguration,
     MissingModelPath(PathBuf),
     EmptyTranscript,
-    LoadModel { model_path: PathBuf, message: String },
-    CreateSession { model_name: String, message: String },
-    AdvanceContext { model_name: String, message: String },
-    EmptyCompletion { model_name: String },
+    LoadModel {
+        model_path: PathBuf,
+        message: String,
+    },
+    CreateSession {
+        model_name: String,
+        message: String,
+    },
+    AdvanceContext {
+        model_name: String,
+        message: String,
+    },
+    EmptyCompletion {
+        model_name: String,
+    },
 }
 
 impl CleanupError {
@@ -59,25 +71,32 @@ impl std::error::Error for CleanupError {}
 impl fmt::Display for CleanupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingModelConfiguration => {
-                f.write_str("cleanup model path is not configured")
-            }
+            Self::MissingModelConfiguration => f.write_str("cleanup model path is not configured"),
             Self::MissingModelPath(model_path) => write!(
                 f,
                 "cleanup model path does not exist: {}",
                 model_path.display()
             ),
             Self::EmptyTranscript => f.write_str("cleanup transcript is empty"),
-            Self::LoadModel { model_path, message } => write!(
+            Self::LoadModel {
+                model_path,
+                message,
+            } => write!(
                 f,
                 "failed to load cleanup model {}: {message}",
                 model_path.display()
             ),
-            Self::CreateSession { model_name, message } => write!(
+            Self::CreateSession {
+                model_name,
+                message,
+            } => write!(
                 f,
                 "failed to create cleanup session for {model_name}: {message}"
             ),
-            Self::AdvanceContext { model_name, message } => write!(
+            Self::AdvanceContext {
+                model_name,
+                message,
+            } => write!(
                 f,
                 "failed to prepare cleanup context for {model_name}: {message}"
             ),
@@ -96,9 +115,9 @@ Preserve wording and meaning.\n\
 Fix capitalization, punctuation, and obvious transcription artifacts.\n",
     );
 
-    if let Some(ocr_text) = request.ocr_text.as_deref().filter(|text| !text.trim().is_empty()) {
+    if let Some(ocr_text) = bounded_ocr_text(request.ocr_text.as_deref()) {
         prompt.push_str("Optional OCR context:\n");
-        prompt.push_str(ocr_text.trim());
+        prompt.push_str(&ocr_text);
         prompt.push_str("\n");
     }
 
@@ -121,8 +140,8 @@ pub fn run_cleanup(request: &CleanupRequest) -> Result<CleanupResult, CleanupErr
         return Err(CleanupError::MissingModelPath(request.model_path.clone()));
     }
 
-    let model_name = model_name_from_path(&request.model_path)
-        .unwrap_or_else(|| String::from("unknown"));
+    let model_name =
+        model_name_from_path(&request.model_path).unwrap_or_else(|| String::from("unknown"));
     let start = Instant::now();
     let model = LlamaModel::load_from_file(&request.model_path, LlamaParams::default()).map_err(
         |error| CleanupError::LoadModel {
@@ -136,12 +155,13 @@ pub fn run_cleanup(request: &CleanupRequest) -> Result<CleanupResult, CleanupErr
         session_params.n_ctx = CLEANUP_SESSION_CTX;
     }
 
-    let mut session = model
-        .create_session(session_params)
-        .map_err(|error| CleanupError::CreateSession {
-            model_name: model_name.clone(),
-            message: error.to_string(),
-        })?;
+    let mut session =
+        model
+            .create_session(session_params)
+            .map_err(|error| CleanupError::CreateSession {
+                model_name: model_name.clone(),
+                message: error.to_string(),
+            })?;
     session
         .advance_context(cleanup_prompt(request))
         .map_err(|error| CleanupError::AdvanceContext {
@@ -176,12 +196,17 @@ pub fn run_cleanup(request: &CleanupRequest) -> Result<CleanupResult, CleanupErr
         model_name,
         cleaned_text,
         elapsed_ms: start.elapsed().as_millis() as u64,
-        used_ocr: request
-            .ocr_text
-            .as_deref()
-            .map(|text| !text.trim().is_empty())
-            .unwrap_or(false),
+        used_ocr: bounded_ocr_text(request.ocr_text.as_deref()).is_some(),
     })
+}
+
+fn bounded_ocr_text(ocr_text: Option<&str>) -> Option<String> {
+    let trimmed = ocr_text?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed.chars().take(CLEANUP_OCR_CONTEXT_LIMIT).collect())
 }
 
 fn model_name_from_path(model_path: &Path) -> Option<String> {
