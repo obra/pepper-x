@@ -4,7 +4,10 @@ pub struct LearnedCorrection {
     pub replacement: String,
 }
 
-pub fn learn_correction(source: impl Into<String>, replacement: impl Into<String>) -> LearnedCorrection {
+pub fn learn_correction(
+    source: impl Into<String>,
+    replacement: impl Into<String>,
+) -> LearnedCorrection {
     LearnedCorrection {
         source: source.into(),
         replacement: replacement.into(),

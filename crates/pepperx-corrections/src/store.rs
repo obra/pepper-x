@@ -48,8 +48,8 @@ impl CorrectionStore {
         }
 
         let data = fs::read_to_string(&store_path)?;
-        let data: CorrectionStoreData =
-            serde_json::from_str(&data).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let data: CorrectionStoreData = serde_json::from_str(&data)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
         Ok(Self {
             root,
@@ -122,7 +122,8 @@ impl CorrectionStore {
             preferred_transcriptions: self.preferred_transcriptions.clone(),
             replacement_rules: self.replacement_rules.clone(),
         };
-        let json = serde_json::to_string_pretty(&data).expect("correction store data should serialize");
+        let json =
+            serde_json::to_string_pretty(&data).expect("correction store data should serialize");
 
         fs::write(store_path, json)
     }

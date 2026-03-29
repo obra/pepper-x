@@ -88,6 +88,10 @@ fn settings_path() -> PathBuf {
     state_root().join(SETTINGS_FILE_NAME)
 }
 
+pub fn corrections_store_path() -> PathBuf {
+    state_root().join("corrections")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
