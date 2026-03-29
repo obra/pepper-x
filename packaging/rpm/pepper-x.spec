@@ -7,6 +7,11 @@ URL:            https://github.com/obra/pepper-x
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      x86_64
+Requires:       at-spi2-core
+Requires:       gtk4
+Requires:       libadwaita
+Requires:       pipewire
+Requires:       tesseract
 
 %description
 Pepper X is an unsandboxed GTK4/libadwaita desktop shell for local dictation on GNOME Wayland.
