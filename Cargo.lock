@@ -1147,6 +1147,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "pepperx-asr",
+ "pepperx-cleanup",
  "pepperx-ipc",
  "pepperx-platform-gnome",
  "serde",
@@ -1160,6 +1161,10 @@ dependencies = [
  "hound",
  "sherpa-onnx",
 ]
+
+[[package]]
+name = "pepperx-cleanup"
+version = "0.1.0"
 
 [[package]]
 name = "pepperx-ipc"

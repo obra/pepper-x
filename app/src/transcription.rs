@@ -6,6 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
+use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 use pepperx_platform_gnome::atspi::{
     insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
     FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME, UINPUT_TEXT_BACKEND_NAME,
@@ -17,9 +18,6 @@ use crate::transcript_log::{
 };
 
 const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
-const CLEANUP_BACKEND_NAME: &str = "llama.cpp";
-const CLEANUP_MODEL_NAME: &str = "unconfigured";
-const CLEANUP_UNAVAILABLE_REASON: &str = "Pepper X cleanup backend is not configured yet";
 const FRIENDLY_TARGET_APPLICATION_ID: &str = "org.gnome.TextEditor";
 const DEFAULT_UINPUT_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-uinput-helper";
 const UINPUT_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
@@ -86,13 +84,14 @@ pub fn transcribe_wav_and_cleanup_to_log(
     wav_path: &Path,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
     let result = transcribe_wav_result(wav_path)?;
-    let mut entry = transcript_entry_from_result(result);
-    entry.cleanup = Some(CleanupDiagnostics::failed(
-        CLEANUP_BACKEND_NAME,
-        CLEANUP_MODEL_NAME,
-        CLEANUP_UNAVAILABLE_REASON,
-    ));
-    archive_transcript_entry(entry)
+    archive_transcription_result_with_cleanup(result, |transcript_text| {
+        let model_path = configured_cleanup_model_path()?;
+        run_cleanup(&CleanupRequest {
+            transcript_text: transcript_text.into(),
+            model_path,
+            ocr_text: None,
+        })
+    })
 }
 
 pub fn transcribe_wav_and_insert_friendly_to_log(
@@ -276,6 +275,30 @@ pub(crate) fn archive_transcription_result(
     archive_transcript_entry(transcript_entry_from_result(result))
 }
 
+fn archive_transcription_result_with_cleanup<F>(
+    result: TranscriptionResult,
+    cleanup: F,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
+{
+    let mut entry = transcript_entry_from_result(result);
+    entry.cleanup = Some(match cleanup(&entry.transcript_text) {
+        Ok(result) => {
+            let mut diagnostics = CleanupDiagnostics::succeeded(
+                result.backend_name,
+                result.model_name,
+                result.cleaned_text,
+                Duration::from_millis(result.elapsed_ms),
+            );
+            diagnostics.used_ocr = result.used_ocr;
+            diagnostics
+        }
+        Err(error) => cleanup_diagnostics_from_error(&error),
+    });
+    archive_transcript_entry(entry)
+}
+
 pub(crate) fn archive_transcription_result_with_friendly_insert<F>(
     result: TranscriptionResult,
     insert: F,
@@ -370,10 +393,27 @@ fn configured_model_dir() -> Result<PathBuf, TranscriptionRunError> {
     nonempty_env_path("PEPPERX_PARAKEET_MODEL_DIR").ok_or(TranscriptionRunError::MissingModelDir)
 }
 
+fn configured_cleanup_model_path() -> Result<PathBuf, CleanupError> {
+    nonempty_env_path("PEPPERX_CLEANUP_MODEL_PATH").ok_or(CleanupError::MissingModelConfiguration)
+}
+
+fn cleanup_diagnostics_from_error(error: &CleanupError) -> CleanupDiagnostics {
+    let mut diagnostics = CleanupDiagnostics::failed(
+        error.backend_name(),
+        error
+            .model_name()
+            .unwrap_or_else(|| String::from("unknown")),
+        error.to_string(),
+    );
+    diagnostics.used_ocr = false;
+    diagnostics
+}
+
 #[cfg(test)]
 mod app_shell {
     use super::*;
     use crate::transcript_log::{env_lock, TranscriptLog};
+    use pepperx_cleanup::cleanup::{CleanupError, CleanupResult};
 
     #[test]
     fn transcription_run_rejects_empty_model_dir_override() {
@@ -456,6 +496,67 @@ mod app_shell {
             None => std::env::remove_var("PEPPERX_STATE_ROOT"),
         }
         let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_runtime_archives_cleaned_text_separately_from_raw_transcript() {
+        let entry = archive_transcription_result_with_cleanup(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+        )
+        .expect("archive cleanup entry");
+
+        assert_eq!(entry.transcript_text, "hello from pepper x");
+        assert_eq!(entry.display_text(), "Hello from Pepper X.");
+        assert_eq!(
+            entry.cleanup,
+            Some(CleanupDiagnostics::succeeded(
+                "llama.cpp",
+                "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "Hello from Pepper X.",
+                Duration::from_millis(19),
+            ))
+        );
+    }
+
+    #[test]
+    fn cleanup_runtime_falls_back_to_raw_transcript_when_model_is_unavailable() {
+        let entry = archive_transcription_result_with_cleanup(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| Err(CleanupError::MissingModelPath(PathBuf::from("/tmp/missing.gguf"))),
+        )
+        .expect("archive raw-only fallback entry");
+
+        assert_eq!(entry.transcript_text, "hello from pepper x");
+        assert_eq!(entry.display_text(), "hello from pepper x");
+        assert_eq!(
+            entry.cleanup,
+            Some(CleanupDiagnostics::failed(
+                "llama.cpp",
+                "unknown",
+                "cleanup model path does not exist: /tmp/missing.gguf",
+            ))
+        );
     }
 
     #[test]
