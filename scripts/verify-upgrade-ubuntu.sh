@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+
 usage() {
     echo "usage: $0 OLD.deb NEW.deb" >&2
     exit 2
@@ -118,6 +120,11 @@ required_paths=(
     "usr/bin/pepper-x"
     "usr/share/applications/com.obra.PepperX.desktop"
     "etc/xdg/autostart/pepper-x-autostart.desktop"
+    "usr/share/gnome-shell/extensions/pepperx@obra/metadata.json"
+    "usr/share/gnome-shell/extensions/pepperx@obra/extension.js"
+    "usr/share/gnome-shell/extensions/pepperx@obra/ipc.js"
+    "usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js"
+    "usr/share/gnome-shell/extensions/pepperx@obra/README.md"
 )
 
 tmpdir="$(mktemp -d)"
@@ -134,6 +141,7 @@ assert_package_version "$root" "$admindir" "$old_name" "$old_version"
 for path in "${required_paths[@]}"; do
     assert_exists "$root/$path"
 done
+"${script_dir}/verify-extension-install.sh" "$root"
 
 install_package "$root" "$admindir" "$new_pkg"
 assert_package_status "$root" "$admindir" "$new_name" "install ok installed"
@@ -142,6 +150,7 @@ assert_package_version "$root" "$admindir" "$new_name" "$new_version"
 for path in "${required_paths[@]}"; do
     assert_exists "$root/$path"
 done
+"${script_dir}/verify-extension-install.sh" "$root"
 
 remove_package "$root" "$admindir" "$new_name"
 

@@ -69,7 +69,12 @@ verify_deb_uninstall() {
     for path in \
         usr/bin/pepper-x \
         usr/share/applications/com.obra.PepperX.desktop \
-        etc/xdg/autostart/pepper-x-autostart.desktop
+        etc/xdg/autostart/pepper-x-autostart.desktop \
+        usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
+        usr/share/gnome-shell/extensions/pepperx@obra/extension.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/ipc.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/README.md
     do
         assert_exists "$root/$path"
     done
@@ -80,7 +85,12 @@ verify_deb_uninstall() {
     for path in \
         usr/bin/pepper-x \
         usr/share/applications/com.obra.PepperX.desktop \
-        etc/xdg/autostart/pepper-x-autostart.desktop
+        etc/xdg/autostart/pepper-x-autostart.desktop \
+        usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
+        usr/share/gnome-shell/extensions/pepperx@obra/extension.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/ipc.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/README.md
     do
         assert_missing "$root/$path"
     done
@@ -105,7 +115,12 @@ verify_rpm_uninstall() {
     for path in \
         usr/bin/pepper-x \
         usr/share/applications/com.obra.PepperX.desktop \
-        etc/xdg/autostart/pepper-x-autostart.desktop
+        etc/xdg/autostart/pepper-x-autostart.desktop \
+        usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
+        usr/share/gnome-shell/extensions/pepperx@obra/extension.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/ipc.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/README.md
     do
         assert_exists "$root/$path"
     done
@@ -116,7 +131,12 @@ verify_rpm_uninstall() {
     for path in \
         usr/bin/pepper-x \
         usr/share/applications/com.obra.PepperX.desktop \
-        etc/xdg/autostart/pepper-x-autostart.desktop
+        etc/xdg/autostart/pepper-x-autostart.desktop \
+        usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
+        usr/share/gnome-shell/extensions/pepperx@obra/extension.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/ipc.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js \
+        usr/share/gnome-shell/extensions/pepperx@obra/README.md
     do
         assert_missing "$root/$path"
     done
@@ -137,7 +157,12 @@ verify_host_is_clean() {
 
     for path in \
         /usr/share/applications/com.obra.PepperX.desktop \
-        /etc/xdg/autostart/pepper-x-autostart.desktop
+        /etc/xdg/autostart/pepper-x-autostart.desktop \
+        /usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
+        /usr/share/gnome-shell/extensions/pepperx@obra/extension.js \
+        /usr/share/gnome-shell/extensions/pepperx@obra/ipc.js \
+        /usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js \
+        /usr/share/gnome-shell/extensions/pepperx@obra/README.md
     do
         assert_missing "$path"
     done

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-extension_root="${repo_root}/gnome-extension"
+extension_root="${PEPPERX_EXTENSION_ROOT:-${repo_root}/gnome-extension}"
 extension_uuid="pepperx@obra"
 install_root="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/${extension_uuid}"
 

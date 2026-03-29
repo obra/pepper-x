@@ -1,0 +1,5 @@
+gnome-extension/metadata.json /usr/share/gnome-shell/extensions/pepperx@obra/
+gnome-extension/extension.js /usr/share/gnome-shell/extensions/pepperx@obra/
+gnome-extension/ipc.js /usr/share/gnome-shell/extensions/pepperx@obra/
+gnome-extension/keybindings.js /usr/share/gnome-shell/extensions/pepperx@obra/
+gnome-extension/README.md /usr/share/gnome-shell/extensions/pepperx@obra/

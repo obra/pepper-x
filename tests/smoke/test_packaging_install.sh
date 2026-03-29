@@ -58,13 +58,58 @@ def required_payload_paths(root: pathlib.Path) -> list[pathlib.Path]:
         root / "usr/bin/pepper-x",
         root / "usr/share/applications/com.obra.PepperX.desktop",
         root / "etc/xdg/autostart/pepper-x-autostart.desktop",
+        root / "usr/share/gnome-shell/extensions/pepperx@obra/metadata.json",
+        root / "usr/share/gnome-shell/extensions/pepperx@obra/extension.js",
+        root / "usr/share/gnome-shell/extensions/pepperx@obra/ipc.js",
+        root / "usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js",
+        root / "usr/share/gnome-shell/extensions/pepperx@obra/README.md",
     ]
 
 
 def ensure_payload(root: pathlib.Path) -> None:
     for path in required_payload_paths(root):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("fixture\n", encoding="utf-8")
+        relative = path.relative_to(root).as_posix()
+        if relative.endswith("metadata.json"):
+            path.write_text(
+                """{
+  "uuid": "pepperx@obra",
+  "name": "Pepper X",
+  "description": "Thin GNOME Shell bridge for the Pepper X app-first shell.",
+  "shell-version": ["48"],
+  "url": "https://github.com/obra/pepper-x"
+}
+""",
+                encoding="utf-8",
+            )
+        elif relative.endswith("extension.js"):
+            path.write_text(
+                "import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';\n"
+                "export default class PepperXExtension extends Extension {\n"
+                "    enable() {}\n"
+                "    disable() {}\n"
+                "    showSettings() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+        elif relative.endswith("ipc.js"):
+            path.write_text(
+                "export function createPepperXClient() { return null; }\n"
+                "export const SERVICE_NAME = 'com.obra.PepperX.Service';\n",
+                encoding="utf-8",
+            )
+        elif relative.endswith("keybindings.js"):
+            path.write_text(
+                "export class KeybindingRegistry {\n"
+                "    registerCleanup() {}\n"
+                "    clear() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+        elif relative.endswith("README.md"):
+            path.write_text("# Pepper X GNOME Shell Extension\n", encoding="utf-8")
+        else:
+            path.write_text("fixture\n", encoding="utf-8")
 
 
 def clear_payload(root: pathlib.Path) -> None:
@@ -310,7 +355,7 @@ for fragment in required_fragments:
         raise SystemExit(f"missing lifecycle command fragment: {fragment}")
 PY
 
-if find "$workdir/tmp" -type f | grep -Eq '(usr/bin/pepper-x|com.obra.PepperX.desktop|pepper-x-autostart.desktop)'; then
+if find "$workdir/tmp" -type f | grep -Eq '(usr/bin/pepper-x|com.obra.PepperX.desktop|pepper-x-autostart.desktop|pepperx@obra/(metadata.json|extension.js|ipc.js|keybindings.js|README.md))'; then
     echo "packaging lifecycle smoke left packaged files behind in the temp root" >&2
     exit 1
 fi

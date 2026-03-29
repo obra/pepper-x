@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+
 usage() {
     echo "usage: $0 OLD.rpm NEW.rpm" >&2
     exit 2
@@ -113,6 +115,11 @@ required_paths=(
     "usr/bin/pepper-x"
     "usr/share/applications/com.obra.PepperX.desktop"
     "etc/xdg/autostart/pepper-x-autostart.desktop"
+    "usr/share/gnome-shell/extensions/pepperx@obra/metadata.json"
+    "usr/share/gnome-shell/extensions/pepperx@obra/extension.js"
+    "usr/share/gnome-shell/extensions/pepperx@obra/ipc.js"
+    "usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js"
+    "usr/share/gnome-shell/extensions/pepperx@obra/README.md"
 )
 
 root="$tmpdir/root"
@@ -126,6 +133,7 @@ assert_package_version "$root" "$dbpath" "$old_name" "$old_version"
 for path in "${required_paths[@]}"; do
     assert_exists "$root/$path"
 done
+"${script_dir}/verify-extension-install.sh" "$root"
 
 upgrade_package "$root" "$dbpath" "$new_pkg"
 assert_package_installed "$root" "$dbpath" "$new_name"
@@ -134,6 +142,7 @@ assert_package_version "$root" "$dbpath" "$new_name" "$new_version"
 for path in "${required_paths[@]}"; do
     assert_exists "$root/$path"
 done
+"${script_dir}/verify-extension-install.sh" "$root"
 
 remove_package "$root" "$dbpath" "$new_name"
 assert_package_missing "$root" "$dbpath" "$new_name"
