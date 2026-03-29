@@ -71,6 +71,33 @@ mod tests {
     }
 
     #[test]
+    fn correction_store_appends_auditable_history_entries() {
+        let root = temp_root("append-only-history");
+        let mut store = CorrectionStore::new(root.clone());
+        store.set_preferred_transcription("one", "One");
+        store.persist().unwrap();
+
+        store.add_replacement_rule("two", "Two");
+        store.persist().unwrap();
+
+        let store_path = root.join("corrections.jsonl");
+        let contents = std::fs::read_to_string(&store_path).unwrap();
+        let entries: Vec<_> = contents.lines().collect();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].contains("\"preferred_transcription\""));
+        assert!(entries[1].contains("\"replacement_rule\""));
+
+        let reloaded = CorrectionStore::load(root).unwrap();
+        let prompt_memory = reloaded
+            .prompt_memory_text()
+            .expect("prompt memory should be present");
+
+        assert!(prompt_memory.contains("- raw: one"));
+        assert!(prompt_memory.contains("- two => Two"));
+    }
+
+    #[test]
     fn learning_accepts_successful_inserted_phrase_normalization() {
         let learned = learn_correction("hello from pepper x", "Hello from Pepper X.", true);
 

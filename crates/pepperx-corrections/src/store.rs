@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 
-const STORE_FILE_NAME: &str = "corrections.json";
+const STORE_FILE_NAME: &str = "corrections.jsonl";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferredTranscription {
@@ -23,12 +25,20 @@ pub struct CorrectionStore {
     root: PathBuf,
     preferred_transcriptions: BTreeMap<String, String>,
     replacement_rules: BTreeMap<String, String>,
+    pending_events: Vec<CorrectionEvent>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct CorrectionStoreData {
-    preferred_transcriptions: BTreeMap<String, String>,
-    replacement_rules: BTreeMap<String, String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CorrectionEvent {
+    PreferredTranscription {
+        source: String,
+        replacement: String,
+    },
+    ReplacementRule {
+        source: String,
+        replacement: String,
+    },
 }
 
 impl CorrectionStore {
@@ -48,14 +58,15 @@ impl CorrectionStore {
         }
 
         let data = fs::read_to_string(&store_path)?;
-        let data: CorrectionStoreData = serde_json::from_str(&data)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut store = Self::new(root);
 
-        Ok(Self {
-            root,
-            preferred_transcriptions: data.preferred_transcriptions,
-            replacement_rules: data.replacement_rules,
-        })
+        for line in data.lines().filter(|line| !line.trim().is_empty()) {
+            let event: CorrectionEvent = serde_json::from_str(line)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            store.apply_event_to_state(&event);
+        }
+
+        Ok(store)
     }
 
     pub fn set_preferred_transcription(
@@ -63,8 +74,12 @@ impl CorrectionStore {
         source: impl Into<String>,
         replacement: impl Into<String>,
     ) {
-        self.preferred_transcriptions
-            .insert(source.into(), replacement.into());
+        let source = source.into();
+        let replacement = replacement.into();
+        self.apply_event(CorrectionEvent::PreferredTranscription {
+            source,
+            replacement,
+        });
     }
 
     pub fn add_replacement_rule(
@@ -72,8 +87,12 @@ impl CorrectionStore {
         source: impl Into<String>,
         replacement: impl Into<String>,
     ) {
-        self.replacement_rules
-            .insert(source.into(), replacement.into());
+        let source = source.into();
+        let replacement = replacement.into();
+        self.apply_event(CorrectionEvent::ReplacementRule {
+            source,
+            replacement,
+        });
     }
 
     pub fn prompt_memory_text(&self) -> Option<String> {
@@ -104,16 +123,49 @@ impl CorrectionStore {
         Some(lines.join("\n"))
     }
 
-    pub fn persist(&self) -> io::Result<()> {
+    pub fn persist(&mut self) -> io::Result<()> {
+        if self.pending_events.is_empty() {
+            return Ok(());
+        }
+
         fs::create_dir_all(&self.root)?;
         let store_path = self.root.join(STORE_FILE_NAME);
-        let data = CorrectionStoreData {
-            preferred_transcriptions: self.preferred_transcriptions.clone(),
-            replacement_rules: self.replacement_rules.clone(),
-        };
-        let json =
-            serde_json::to_string_pretty(&data).expect("correction store data should serialize");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(store_path)?;
 
-        fs::write(store_path, json)
+        for event in &self.pending_events {
+            let json =
+                serde_json::to_string(event).expect("correction store event should serialize");
+            writeln!(file, "{json}")?;
+        }
+
+        self.pending_events.clear();
+        Ok(())
+    }
+
+    fn apply_event(&mut self, event: CorrectionEvent) {
+        self.apply_event_to_state(&event);
+        self.pending_events.push(event);
+    }
+
+    fn apply_event_to_state(&mut self, event: &CorrectionEvent) {
+        match event {
+            CorrectionEvent::PreferredTranscription {
+                source,
+                replacement,
+            } => {
+                self.preferred_transcriptions
+                    .insert(source.clone(), replacement.clone());
+            }
+            CorrectionEvent::ReplacementRule {
+                source,
+                replacement,
+            } => {
+                self.replacement_rules
+                    .insert(source.clone(), replacement.clone());
+            }
+        }
     }
 }
