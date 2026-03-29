@@ -316,12 +316,12 @@ fn stable_pipewire_id(
     properties: &impl PipeWirePropertySource,
     node_name: Option<&str>,
 ) -> Result<String, DeviceEnumerationError> {
-    if let Some(object_path) = properties.property_string("object.path") {
-        return Ok(format!("pipewire:object.path={object_path}"));
-    }
-
     if let Some(node_name) = node_name {
         return Ok(format!("pipewire:node.name={node_name}"));
+    }
+
+    if let Some(object_path) = properties.property_string("object.path") {
+        return Ok(format!("pipewire:object.path={object_path}"));
     }
 
     Err(DeviceEnumerationError::new(
@@ -481,6 +481,26 @@ mod tests {
             "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo"
         );
         assert_eq!(second.stable_id(), first.stable_id());
+    }
+
+    #[test]
+    fn pipewire_node_ids_prefer_node_name_for_target_selection() {
+        let microphone = microphone_from_pipewire_node(&[
+            (
+                "object.path",
+                "alsa:acp:Blue_Microphones_Yeti_Stereo_Microphone-00:analog-input-mic",
+            ),
+            ("node.name", "alsa_input.usb-blue-yeti-00.analog-stereo"),
+            ("node.description", "Blue Yeti"),
+            ("media.class", "Audio/Source"),
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            microphone.stable_id(),
+            "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo"
+        );
     }
 
     #[test]
