@@ -96,7 +96,8 @@ where
         Ok(outcome) => InsertionDiagnostics::succeeded(
             outcome.selection.backend_name,
             outcome.target_application_name,
-        ),
+        )
+        .with_target_class(outcome.target_class),
         Err(error) => {
             InsertionDiagnostics::failed(FRIENDLY_INSERT_BACKEND_NAME, "unknown", error.to_string())
         }
@@ -202,6 +203,7 @@ mod app_shell {
                         target_application_id: "org.gnome.TextEditor".into(),
                     },
                     target_application_name: "Text Editor".into(),
+                    target_class: "text-editor".into(),
                     caret_offset: 5,
                     before_text: "hello from pepper x".into(),
                     after_text: "hello from pepper x".into(),
@@ -212,10 +214,10 @@ mod app_shell {
 
         assert_eq!(
             entry.insertion,
-            Some(InsertionDiagnostics::succeeded(
-                "atspi-editable-text",
-                "Text Editor"
-            ))
+            Some(
+                InsertionDiagnostics::succeeded("atspi-editable-text", "Text Editor")
+                    .with_target_class("text-editor")
+            )
         );
         assert_eq!(
             TranscriptLog::open(&state_root)

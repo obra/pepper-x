@@ -39,6 +39,7 @@ pub struct FriendlyInsertSelection {
 pub struct FriendlyInsertOutcome {
     pub selection: FriendlyInsertSelection,
     pub target_application_name: String,
+    pub target_class: String,
     pub caret_offset: i32,
     pub before_text: String,
     pub after_text: String,
@@ -141,6 +142,16 @@ fn friendly_insert_target_class_from_application_id(
         | "vivaldi"
         | "com.vivaldi.Vivaldi" => FriendlyInsertTargetClass::BrowserTextarea,
         _ => FriendlyInsertTargetClass::Unsupported,
+    }
+}
+
+fn friendly_insert_target_class_name(
+    target_class: FriendlyInsertTargetClass,
+) -> Option<&'static str> {
+    match target_class {
+        FriendlyInsertTargetClass::TextEditor => Some("text-editor"),
+        FriendlyInsertTargetClass::BrowserTextarea => Some("browser-textarea"),
+        FriendlyInsertTargetClass::Unsupported => None,
     }
 }
 
@@ -392,6 +403,7 @@ pub fn insert_text_into_friendly_target(
     Ok(FriendlyInsertOutcome {
         selection: target.selection,
         target_application_name: target.application_name,
+        target_class: target.target_class.into(),
         caret_offset: target.caret_offset,
         before_text: target.before_text,
         after_text,
@@ -409,6 +421,7 @@ fn control_bit(keysym: u32) -> Option<u8> {
 struct FocusedFriendlyTarget {
     selection: FriendlyInsertSelection,
     application_name: String,
+    target_class: &'static str,
     text: OwnedGObject<ffi::AtspiText>,
     editable_text: OwnedGObject<ffi::AtspiEditableText>,
     before_text: String,
@@ -473,6 +486,12 @@ fn focused_friendly_target(
         supports_editable_text: editable_text.is_some(),
         supports_caret: caret_offset >= 0,
     };
+    let target_class = friendly_insert_target_class_name(
+        friendly_insert_target_class_from_application_id(&target.application_id),
+    )
+    .ok_or_else(|| {
+        FriendlyInsertRunError::Access("friendly insertion target class is unsupported".into())
+    })?;
     let selection = select_friendly_insert_backend(&target, policy)
         .map_err(FriendlyInsertRunError::UnsupportedTarget)?;
     let text = text.ok_or_else(|| {
@@ -488,6 +507,7 @@ fn focused_friendly_target(
     Ok(FocusedFriendlyTarget {
         selection,
         application_name,
+        target_class,
         text,
         editable_text,
         before_text,
@@ -1167,6 +1187,7 @@ mod accessible_insert_live {
             !outcome.target_application_name.is_empty(),
             "friendly insertion should report the target application name"
         );
+        assert!(!outcome.target_class.is_empty());
         assert_eq!(
             outcome.after_text,
             apply_insert_at_char_offset(

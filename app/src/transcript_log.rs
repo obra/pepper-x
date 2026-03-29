@@ -41,6 +41,8 @@ impl TranscriptEntry {
 pub struct InsertionDiagnostics {
     pub backend_name: String,
     pub target_application_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_class: Option<String>,
     pub succeeded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
@@ -54,6 +56,7 @@ impl InsertionDiagnostics {
         Self {
             backend_name: backend_name.into(),
             target_application_name: target_application_name.into(),
+            target_class: None,
             succeeded: true,
             failure_reason: None,
         }
@@ -67,9 +70,15 @@ impl InsertionDiagnostics {
         Self {
             backend_name: backend_name.into(),
             target_application_name: target_application_name.into(),
+            target_class: None,
             succeeded: false,
             failure_reason: Some(failure_reason.into()),
         }
+    }
+
+    pub fn with_target_class(mut self, target_class: impl Into<String>) -> Self {
+        self.target_class = Some(target_class.into());
+        self
     }
 }
 
@@ -193,10 +202,10 @@ mod tests {
             "nemo-parakeet-tdt-0.6b-v2-int8",
             Duration::from_millis(1234),
         );
-        expected.insertion = Some(InsertionDiagnostics::succeeded(
-            "atspi-editable-text",
-            "Text Editor",
-        ));
+        expected.insertion = Some(
+            InsertionDiagnostics::succeeded("atspi-editable-text", "Text Editor")
+                .with_target_class("text-editor"),
+        );
 
         log.append(&expected).expect("append entry");
 
@@ -244,11 +253,14 @@ mod tests {
             "model",
             Duration::from_millis(42),
         );
-        expected.insertion = Some(InsertionDiagnostics::failed(
-            "atspi-editable-text",
-            "Calculator",
-            "friendly insertion target is not editable",
-        ));
+        expected.insertion = Some(
+            InsertionDiagnostics::failed(
+                "atspi-editable-text",
+                "Calculator",
+                "friendly insertion target is not editable",
+            )
+            .with_target_class("unsupported"),
+        );
 
         log.append(&expected).expect("append entry");
 
@@ -259,6 +271,7 @@ mod tests {
         assert!(raw.contains("\"backend_name\":\"backend\""));
         assert!(raw.contains("\"model_name\":\"model\""));
         assert!(raw.contains("\"target_application_name\":\"Calculator\""));
+        assert!(raw.contains("\"target_class\":\"unsupported\""));
         assert!(raw.contains("\"failure_reason\":\"friendly insertion target is not editable\""));
     }
 

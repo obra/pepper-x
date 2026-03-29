@@ -116,6 +116,9 @@ pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
         );
 
         if let Some(insertion) = latest.insertion.as_ref() {
+            if let Some(target_class) = insertion.target_class.as_deref() {
+                summary.push_str(&format!("\nTarget class: {target_class}"));
+            }
             let insertion_summary = if insertion.succeeded {
                 format!(
                     "\nFriendly insertion: inserted into {} via {}",
@@ -181,15 +184,16 @@ mod app_shell {
             "nemo-parakeet-tdt-0.6b-v2-int8",
             Duration::from_millis(84),
         );
-        entry.insertion = Some(InsertionDiagnostics::succeeded(
-            "atspi-editable-text",
-            "Text Editor",
-        ));
+        entry.insertion = Some(
+            InsertionDiagnostics::succeeded("atspi-editable-text", "Text Editor")
+                .with_target_class("text-editor"),
+        );
 
         let summary = history_summary_text(&[entry]);
 
         assert!(summary
             .contains("Friendly insertion: inserted into Text Editor via atspi-editable-text"));
+        assert!(summary.contains("Target class: text-editor"));
     }
 
     #[test]
@@ -201,17 +205,21 @@ mod app_shell {
             "nemo-parakeet-tdt-0.6b-v2-int8",
             Duration::from_millis(84),
         );
-        entry.insertion = Some(InsertionDiagnostics::failed(
-            "atspi-editable-text",
-            "Calculator",
-            "friendly insertion target is not editable",
-        ));
+        entry.insertion = Some(
+            InsertionDiagnostics::failed(
+                "atspi-editable-text",
+                "Calculator",
+                "friendly insertion target is not editable",
+            )
+            .with_target_class("unsupported"),
+        );
 
         let summary = history_summary_text(&[entry]);
 
         assert!(
             summary.contains("Friendly insertion: failed in Calculator via atspi-editable-text")
         );
+        assert!(summary.contains("Target class: unsupported"));
         assert!(summary.contains("Reason: friendly insertion target is not editable"));
     }
 }
