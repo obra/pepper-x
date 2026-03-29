@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use crate::background::BackgroundController;
+use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::AppSettings;
 use crate::transcript_log::{state_root, TranscriptEntry, TranscriptLog};
 use crate::window::MainWindow;
@@ -28,7 +29,7 @@ pub fn run() {
 
     adw::init().expect("failed to initialize GTK/libadwaita");
 
-    let _settings = AppSettings::default();
+    let settings = AppSettings::default();
     let app = build_application();
     let window = MainWindow::new_with_history(
         &app,
@@ -38,8 +39,8 @@ pub fn run() {
         }),
     );
     let (command_sender, command_receiver) = mpsc::channel();
-    let service_handle =
-        ServiceHandle::start(command_sender).expect("failed to start GNOME IPC service");
+    let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))
+        .expect("failed to start GNOME IPC service");
     let _modifier_capture = start_modifier_capture(service_handle.service());
 
     install_command_pump(window.clone(), command_receiver);
@@ -58,9 +59,10 @@ pub fn run() {
 }
 
 fn run_headless() {
+    let settings = AppSettings::default();
     let (command_sender, command_receiver) = mpsc::channel::<AppCommand>();
-    let service_handle =
-        ServiceHandle::start(command_sender).expect("failed to start GNOME IPC service");
+    let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))
+        .expect("failed to start GNOME IPC service");
     let _modifier_capture = start_modifier_capture(service_handle.service());
     let _command_receiver = command_receiver;
     let main_loop = gtk::glib::MainLoop::new(None, false);
@@ -70,6 +72,12 @@ fn run_headless() {
 
 pub fn load_history_entries() -> io::Result<Vec<TranscriptEntry>> {
     TranscriptLog::open(state_root())?.recent_entries()
+}
+
+fn build_live_runtime(settings: &AppSettings) -> std::sync::Arc<LiveRuntimeHandle> {
+    std::sync::Arc::new(LiveRuntimeHandle::new(
+        settings.preferred_microphone.clone(),
+    ))
 }
 
 fn start_modifier_capture(service: PepperXService) -> Option<ModifierCaptureHandle> {
@@ -182,6 +190,7 @@ mod app_shell {
             StartupMode::TranscribeWav {
                 wav_path: state_root.join("loop1.wav"),
             },
+            || unreachable!(),
             |wav_path| {
                 archive_transcription_result(TranscriptionResult {
                     wav_path: wav_path.to_path_buf(),

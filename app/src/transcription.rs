@@ -41,6 +41,7 @@ pub enum TranscriptionRunError {
     TranscriptLog(std::io::Error),
     Asr(TranscriptionError),
     FriendlyInsert(FriendlyInsertRunError),
+    LiveRecording(String),
 }
 
 impl From<std::io::Error> for TranscriptionRunError {
@@ -81,6 +82,7 @@ impl std::fmt::Display for TranscriptionRunError {
             Self::FriendlyInsert(error) => {
                 write!(f, "Pepper X friendly insertion failed: {error}")
             }
+            Self::LiveRecording(error) => write!(f, "Pepper X live recording failed: {error}"),
         }
     }
 }

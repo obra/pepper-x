@@ -1,7 +1,7 @@
 use pepperx_ipc::{
     parse_trigger_source, Capabilities, CapabilityPayload, OBJECT_PATH, SERVICE_NAME,
 };
-use pepperx_session::{RecordingSession, SessionError, SessionState, TriggerSource};
+use pepperx_session::TriggerSource;
 use std::sync::{mpsc::Sender, Arc, Mutex};
 use zbus::{
     blocking::{connection::Builder as ConnectionBuilder, Connection},
@@ -14,15 +14,30 @@ pub enum AppCommand {
     ShowHistory,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingRuntimeError {
+    DuplicateStart,
+    DuplicateStop,
+    Failed(String),
+}
+
+pub trait RecordingRuntime: Send + Sync {
+    fn start_recording(&self, trigger_source: TriggerSource) -> Result<(), RecordingRuntimeError>;
+
+    fn stop_recording(&self) -> Result<(), RecordingRuntimeError>;
+}
+
 pub struct ServiceHandle {
     _connection: Connection,
     service: PepperXService,
 }
 
 impl ServiceHandle {
-    pub fn start(command_sender: Sender<AppCommand>) -> zbus::Result<Self> {
-        let service = PepperXService::new(command_sender);
+    pub fn start(
+        command_sender: Sender<AppCommand>,
+        recording_runtime: Arc<dyn RecordingRuntime>,
+    ) -> zbus::Result<Self> {
+        let service = PepperXService::new(command_sender, recording_runtime);
         let connection = ConnectionBuilder::session()?
             .name(SERVICE_NAME)?
             .serve_at(OBJECT_PATH, service.clone())?
@@ -39,35 +54,35 @@ impl ServiceHandle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PepperXService {
     state: Arc<ServiceState>,
 }
 
-#[derive(Debug)]
+impl std::fmt::Debug for PepperXService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PepperXService").finish_non_exhaustive()
+    }
+}
+
 struct ServiceState {
-    session: Mutex<RecordingSession>,
+    recording_runtime: Arc<dyn RecordingRuntime>,
     capabilities: Mutex<Capabilities>,
     command_sender: Sender<AppCommand>,
 }
 
 impl PepperXService {
-    pub fn new(command_sender: Sender<AppCommand>) -> Self {
+    pub fn new(
+        command_sender: Sender<AppCommand>,
+        recording_runtime: Arc<dyn RecordingRuntime>,
+    ) -> Self {
         Self {
             state: Arc::new(ServiceState {
-                session: Mutex::new(RecordingSession::new()),
+                recording_runtime,
                 capabilities: Mutex::new(Capabilities::shell_default(env!("CARGO_PKG_VERSION"))),
                 command_sender,
             }),
         }
-    }
-
-    pub fn session_state(&self) -> SessionState {
-        self.state
-            .session
-            .lock()
-            .expect("session lock poisoned")
-            .state()
     }
 
     pub fn set_modifier_only_supported(&self, supported: bool) {
@@ -116,39 +131,33 @@ impl PepperXService {
     }
 
     fn start_session(&self, trigger_source: TriggerSource) -> fdo::Result<()> {
-        match self
-            .state
-            .session
-            .lock()
-            .expect("session lock poisoned")
-            .start_recording(trigger_source)
-        {
-            Ok(_) => Ok(()),
-            Err(SessionError::AlreadyRecording) => {
+        match self.state.recording_runtime.start_recording(trigger_source) {
+            Ok(()) => Ok(()),
+            Err(RecordingRuntimeError::DuplicateStart) => {
                 eprintln!("[Pepper X] duplicate request ignored: start");
                 Ok(())
             }
-            Err(error) => Err(fdo::Error::Failed(format!(
-                "failed to start recording: {error:?}"
+            Err(RecordingRuntimeError::DuplicateStop) => Err(fdo::Error::Failed(
+                "failed to start recording: runtime reported duplicate stop".into(),
+            )),
+            Err(RecordingRuntimeError::Failed(error)) => Err(fdo::Error::Failed(format!(
+                "failed to start recording: {error}"
             ))),
         }
     }
 
     fn stop_session(&self) -> fdo::Result<()> {
-        match self
-            .state
-            .session
-            .lock()
-            .expect("session lock poisoned")
-            .stop_recording()
-        {
-            Ok(_) => Ok(()),
-            Err(SessionError::NotRecording) => {
+        match self.state.recording_runtime.stop_recording() {
+            Ok(()) => Ok(()),
+            Err(RecordingRuntimeError::DuplicateStop) => {
                 eprintln!("[Pepper X] duplicate request ignored: stop");
                 Ok(())
             }
-            Err(error) => Err(fdo::Error::Failed(format!(
-                "failed to stop recording: {error:?}"
+            Err(RecordingRuntimeError::DuplicateStart) => Err(fdo::Error::Failed(
+                "failed to stop recording: runtime reported duplicate start".into(),
+            )),
+            Err(RecordingRuntimeError::Failed(error)) => Err(fdo::Error::Failed(format!(
+                "failed to stop recording: {error}"
             ))),
         }
     }
@@ -188,12 +197,91 @@ impl PepperXService {
 #[cfg(test)]
 mod service_contract {
     use super::*;
-    use std::sync::mpsc::channel;
+    use std::collections::VecDeque;
+    use std::sync::{mpsc::channel, Arc, Mutex};
+
+    #[derive(Debug)]
+    struct FakeRecordingRuntime {
+        started_triggers: Mutex<Vec<TriggerSource>>,
+        stop_calls: Mutex<usize>,
+        start_results: Mutex<VecDeque<Result<(), RecordingRuntimeError>>>,
+        stop_results: Mutex<VecDeque<Result<(), RecordingRuntimeError>>>,
+    }
+
+    impl FakeRecordingRuntime {
+        fn succeeding() -> Arc<Self> {
+            Arc::new(Self {
+                started_triggers: Mutex::new(Vec::new()),
+                stop_calls: Mutex::new(0),
+                start_results: Mutex::new(VecDeque::from([Ok(())])),
+                stop_results: Mutex::new(VecDeque::from([Ok(())])),
+            })
+        }
+
+        fn duplicate_start() -> Arc<Self> {
+            Arc::new(Self {
+                started_triggers: Mutex::new(Vec::new()),
+                stop_calls: Mutex::new(0),
+                start_results: Mutex::new(VecDeque::from([
+                    Ok(()),
+                    Err(RecordingRuntimeError::DuplicateStart),
+                ])),
+                stop_results: Mutex::new(VecDeque::from([Ok(())])),
+            })
+        }
+
+        fn duplicate_stop() -> Arc<Self> {
+            Arc::new(Self {
+                started_triggers: Mutex::new(Vec::new()),
+                stop_calls: Mutex::new(0),
+                start_results: Mutex::new(VecDeque::from([Ok(())])),
+                stop_results: Mutex::new(VecDeque::from([
+                    Ok(()),
+                    Err(RecordingRuntimeError::DuplicateStop),
+                ])),
+            })
+        }
+
+        fn failing_stop(message: &str) -> Arc<Self> {
+            Arc::new(Self {
+                started_triggers: Mutex::new(Vec::new()),
+                stop_calls: Mutex::new(0),
+                start_results: Mutex::new(VecDeque::from([Ok(())])),
+                stop_results: Mutex::new(VecDeque::from([Err(RecordingRuntimeError::Failed(
+                    message.into(),
+                ))])),
+            })
+        }
+    }
+
+    impl RecordingRuntime for FakeRecordingRuntime {
+        fn start_recording(
+            &self,
+            trigger_source: TriggerSource,
+        ) -> Result<(), RecordingRuntimeError> {
+            self.started_triggers.lock().unwrap().push(trigger_source);
+            self.start_results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(()))
+        }
+
+        fn stop_recording(&self) -> Result<(), RecordingRuntimeError> {
+            *self.stop_calls.lock().unwrap() += 1;
+            self.stop_results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(()))
+        }
+    }
 
     #[test]
-    fn service_contract_routes_start_and_stop_recording() {
+    fn service_contract_routes_start_and_stop_recording_through_runtime() {
         let (sender, _receiver) = channel();
-        let service = PepperXService::new(sender);
+        let runtime = FakeRecordingRuntime::succeeding();
+        let service = PepperXService::new(sender, runtime.clone());
 
         assert_eq!(service.ping(), "pong");
         service
@@ -201,16 +289,19 @@ mod service_contract {
                 TriggerSource::ModifierOnly,
             ))
             .unwrap();
-        assert_eq!(service.session_state(), SessionState::Recording);
-
         service.stop_recording().unwrap();
-        assert_eq!(service.session_state(), SessionState::Idle);
+
+        assert_eq!(
+            *runtime.started_triggers.lock().unwrap(),
+            vec![TriggerSource::ModifierOnly]
+        );
+        assert_eq!(*runtime.stop_calls.lock().unwrap(), 1);
     }
 
     #[test]
     fn service_contract_routes_shell_actions() {
         let (sender, receiver) = channel();
-        let service = PepperXService::new(sender);
+        let service = PepperXService::new(sender, FakeRecordingRuntime::succeeding());
 
         service.show_settings().unwrap();
         assert_eq!(receiver.recv().unwrap(), AppCommand::ShowSettings);
@@ -222,7 +313,7 @@ mod service_contract {
     #[test]
     fn service_contract_reports_capabilities() {
         let (sender, _receiver) = channel();
-        let service = PepperXService::new(sender);
+        let service = PepperXService::new(sender, FakeRecordingRuntime::succeeding());
 
         assert_eq!(
             Capabilities::from_dbus_payload(service.get_capabilities()),
@@ -237,7 +328,8 @@ mod service_contract {
     #[test]
     fn service_contract_ignores_duplicate_start_requests() {
         let (sender, _receiver) = channel();
-        let service = PepperXService::new(sender);
+        let runtime = FakeRecordingRuntime::duplicate_start();
+        let service = PepperXService::new(sender, runtime.clone());
 
         service
             .start_recording(pepperx_ipc::trigger_source_name(
@@ -250,16 +342,39 @@ mod service_contract {
             ))
             .unwrap();
 
-        assert_eq!(service.session_state(), SessionState::Recording);
+        assert_eq!(
+            *runtime.started_triggers.lock().unwrap(),
+            vec![TriggerSource::ModifierOnly, TriggerSource::ModifierOnly]
+        );
     }
 
     #[test]
     fn service_contract_ignores_duplicate_stop_requests() {
         let (sender, _receiver) = channel();
-        let service = PepperXService::new(sender);
+        let runtime = FakeRecordingRuntime::duplicate_stop();
+        let service = PepperXService::new(sender, runtime.clone());
 
+        service
+            .start_recording(pepperx_ipc::trigger_source_name(
+                TriggerSource::ModifierOnly,
+            ))
+            .unwrap();
+        service.stop_recording().unwrap();
         service.stop_recording().unwrap();
 
-        assert_eq!(service.session_state(), SessionState::Idle);
+        assert_eq!(*runtime.stop_calls.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn service_contract_surfaces_runtime_failures() {
+        let (sender, _receiver) = channel();
+        let service = PepperXService::new(sender, FakeRecordingRuntime::failing_stop("boom"));
+
+        let error = service.stop_recording().unwrap_err();
+
+        match error {
+            fdo::Error::Failed(message) => assert!(message.contains("boom")),
+            other => panic!("expected failed D-Bus error, got {other:?}"),
+        }
     }
 }

@@ -1,6 +1,10 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+use pepperx_session::TriggerSource;
+
+use crate::session_runtime::LiveRuntimeHandle;
+use crate::settings::AppSettings;
 use crate::transcript_log::TranscriptEntry;
 use crate::transcription::{
     transcribe_wav_and_cleanup_and_insert_friendly_to_log, transcribe_wav_and_cleanup_to_log,
@@ -10,6 +14,7 @@ use crate::transcription::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupMode {
     Gui,
+    RecordAndTranscribe,
     TranscribeWav { wav_path: PathBuf },
     TranscribeWavAndCleanup { wav_path: PathBuf },
     TranscribeWavAndInsertFriendly { wav_path: PathBuf },
@@ -32,6 +37,10 @@ where
             }),
             (None, _) => Err("--transcribe-wav requires a WAV path".into()),
             (Some(_), Some(_)) => Err("--transcribe-wav accepts exactly one WAV path".into()),
+        },
+        Some(flag) if flag == OsStr::new("--record-and-transcribe") => match args.next() {
+            None => Ok(StartupMode::RecordAndTranscribe),
+            Some(_) => Err("--record-and-transcribe does not accept positional arguments".into()),
         },
         Some(flag) if flag == OsStr::new("--transcribe-wav-and-cleanup") => {
             match (args.next(), args.next()) {
@@ -79,8 +88,11 @@ where
 }
 
 pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, TranscriptionRunError> {
+    let settings = AppSettings::default();
+
     run_with(
         startup_mode,
+        || record_and_transcribe(settings.preferred_microphone.clone(), wait_for_stop_signal),
         transcribe_wav_to_log,
         transcribe_wav_and_cleanup_to_log,
         crate::transcription::transcribe_wav_and_insert_friendly_to_log,
@@ -88,14 +100,16 @@ pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, Transcr
     )
 }
 
-pub fn run_with<F, G, H, I>(
+pub fn run_with<R, F, G, H, I>(
     startup_mode: StartupMode,
+    record_and_transcribe: R,
     transcribe: F,
     transcribe_and_cleanup: G,
     transcribe_and_insert_friendly: H,
     transcribe_and_cleanup_and_insert_friendly: I,
 ) -> Result<Option<TranscriptEntry>, TranscriptionRunError>
 where
+    R: FnOnce() -> Result<TranscriptEntry, TranscriptionRunError>,
     F: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
     G: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
     H: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
@@ -103,6 +117,7 @@ where
 {
     match startup_mode {
         StartupMode::Gui => Ok(None),
+        StartupMode::RecordAndTranscribe => record_and_transcribe().map(Some),
         StartupMode::TranscribeWav { wav_path } => transcribe(&wav_path).map(Some),
         StartupMode::TranscribeWavAndCleanup { wav_path } => {
             transcribe_and_cleanup(&wav_path).map(Some)
@@ -116,10 +131,79 @@ where
     }
 }
 
+fn record_and_transcribe<F>(
+    selected_microphone: Option<pepperx_audio::SelectedMicrophone>,
+    wait_for_stop: F,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    let runtime = LiveRuntimeHandle::new(selected_microphone);
+    runtime
+        .record_and_transcribe(TriggerSource::ShellAction, wait_for_stop)
+        .map_err(|error| TranscriptionRunError::LiveRecording(error.to_string()))
+}
+
+fn wait_for_stop_signal() -> std::io::Result<()> {
+    let mut stop_line = String::new();
+    std::io::stdin().read_line(&mut stop_line)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod cli_mode {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn app_shell_recording_cli_mode_parses_live_recording_flag() {
+        let command = parse_args([
+            "pepper-x".to_string(),
+            "--record-and-transcribe".to_string(),
+        ])
+        .expect("live recording mode should parse");
+
+        assert_eq!(command, StartupMode::RecordAndTranscribe);
+    }
+
+    #[test]
+    fn app_shell_recording_cli_mode_rejects_extra_live_recording_arguments() {
+        let error = parse_args([
+            "pepper-x".to_string(),
+            "--record-and-transcribe".to_string(),
+            "extra".to_string(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "--record-and-transcribe does not accept positional arguments"
+        );
+    }
+
+    #[test]
+    fn app_shell_recording_cli_mode_runs_live_recording_without_gui() {
+        let wav_path = PathBuf::from("/tmp/live.wav");
+        let expected = TranscriptEntry::new(
+            &wav_path,
+            "hello from live pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            Duration::from_millis(64),
+        );
+
+        let result = run_with(
+            StartupMode::RecordAndTranscribe,
+            || Ok(expected.clone()),
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |_| unreachable!(),
+        )
+        .expect("live recording mode should succeed");
+
+        assert_eq!(result, Some(expected));
+    }
 
     #[test]
     fn cli_mode_parses_transcribe_wav_path() {
@@ -244,6 +328,7 @@ mod cli_mode {
             StartupMode::TranscribeWavAndCleanupAndInsertFriendly {
                 wav_path: wav_path.clone(),
             },
+            || unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
@@ -295,6 +380,7 @@ mod cli_mode {
             StartupMode::TranscribeWav {
                 wav_path: wav_path.clone(),
             },
+            || unreachable!(),
             |path: &std::path::Path| {
                 observed_path = Some(path.to_path_buf());
                 Ok(expected.clone())
@@ -331,6 +417,7 @@ mod cli_mode {
             StartupMode::TranscribeWavAndCleanup {
                 wav_path: wav_path.clone(),
             },
+            || unreachable!(),
             |_| unreachable!(),
             |path: &std::path::Path| {
                 observed_path = Some(path.to_path_buf());
@@ -361,6 +448,7 @@ mod cli_mode {
             StartupMode::TranscribeWavAndInsertFriendly {
                 wav_path: wav_path.clone(),
             },
+            || unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
             |path: &std::path::Path| {
@@ -379,6 +467,7 @@ mod cli_mode {
     fn cli_mode_keeps_gui_startup_mode_outside_runner() {
         let result = run_with(
             StartupMode::Gui,
+            || unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
