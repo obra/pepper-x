@@ -99,3 +99,28 @@ PEPPERX_PARAKEET_MODEL_DIR=/path/to/model cargo test -p pepperx-asr transcriber_
 PEPPERX_PARAKEET_MODEL_DIR=/path/to/model PEPPERX_STATE_ROOT="$PEPPERX_STATE_ROOT" tests/smoke/test_prerecorded_asr.sh
 PEPPERX_STATE_ROOT="$PEPPERX_STATE_ROOT" cargo run -p pepper-x-app
 ```
+
+## Loop 2 Friendly Insertion
+
+Loop 2 keeps the loop-1 prerecorded WAV path and adds one narrow insertion backend:
+
+- GNOME 48+ Wayland session only
+- GNOME Text Editor only
+- semantic `EditableText` insertion only
+- no broader accessible-app support yet
+- no clipboard, string-injection, or `uinput` fallback yet
+
+The loop-2 dev entrypoint is:
+
+```sh
+PEPPERX_PARAKEET_MODEL_DIR=/path/to/model \
+cargo run -p pepper-x-app -- --transcribe-wav-and-insert-friendly tests/fixtures/loop1-hello.wav
+```
+
+For the live-session insertion smoke, start a GNOME Text Editor document, focus the caret where you want the transcript inserted, and run:
+
+```sh
+./scripts/smoke-insert-friendly.sh
+```
+
+Run that helper inside the live GNOME 48+ Wayland session, or export that session's `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, and `XDG_SESSION_TYPE=wayland` first. The helper is only meant for a real in-session GNOME client; SSH into the VM is not an authoritative AT-SPI insertion surface.
