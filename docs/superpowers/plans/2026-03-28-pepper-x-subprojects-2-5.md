@@ -239,11 +239,11 @@ Add tests for:
 
 Run: `cargo test -p pepperx-audio device_ -- --nocapture`
 Run: `cargo test -p pepper-x-app settings_ -- --nocapture`
-Expected: FAIL because the audio crate does not exist yet.
+Expected: FAIL because live recording and app-side preferred-device wiring do not exist yet.
 
 - [ ] **Step 3: Implement the smallest live-device inventory**
 
-Create the audio crate and a device inventory API that the app can call without starting recording. Keep it Linux-only and microphone-only.
+Extend the existing audio crate with a device inventory API that the app can call without starting recording. Keep it Linux-only and microphone-only.
 
 - [ ] **Step 4: Re-run the targeted tests**
 
@@ -297,7 +297,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/cli.rs app/src/session_runtime.rs app/src/transcription.rs crates/pepperx-audio/src/recording.rs
+git add app/src/cli.rs app/src/main.rs app/src/session_runtime.rs app/src/transcription.rs crates/pepperx-audio/src/recording.rs
 git commit -m "Add Pepper X live recording runtime"
 ```
 
@@ -445,7 +445,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/pepperx-platform-gnome/src/context.rs crates/pepperx-platform-gnome/src/screenshot.rs crates/pepperx-platform-gnome/src/lib.rs app/src/transcription.rs tests/smoke/test_ocr_cleanup.sh
+git add crates/pepperx-platform-gnome/src/context.rs crates/pepperx-platform-gnome/src/screenshot.rs crates/pepperx-platform-gnome/src/lib.rs app/src/main.rs app/src/transcription.rs tests/smoke/test_ocr_cleanup.sh
 git commit -m "Add Pepper X cleanup context capture"
 ```
 
@@ -454,6 +454,7 @@ git commit -m "Add Pepper X cleanup context capture"
 **Files:**
 - Create: `crates/pepperx-corrections/Cargo.toml`
 - Create: `crates/pepperx-corrections/src/lib.rs`
+- Create: `crates/pepperx-corrections/src/learning.rs`
 - Create: `crates/pepperx-corrections/src/store.rs`
 - Modify: `Cargo.toml`
 - Modify: `app/Cargo.toml`
@@ -575,7 +576,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/history_store.rs app/src/history_view.rs app/src/window.rs
+git add app/src/history_store.rs app/src/history_view.rs app/src/main.rs app/src/window.rs
 git commit -m "Add Pepper X history browser"
 ```
 
