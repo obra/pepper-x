@@ -14,6 +14,13 @@ pub struct FriendlyInsertPolicy {
     pub target_application_id: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FriendlyInsertTargetClass {
+    TextEditor,
+    BrowserTextarea,
+    Unsupported,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FriendlyFocusedTarget {
     pub application_id: String,
@@ -112,6 +119,28 @@ impl fmt::Display for FriendlyInsertRunError {
                 f.write_str("friendly insertion readback did not match the requested text")
             }
         }
+    }
+}
+
+fn friendly_insert_target_class_from_application_id(
+    application_id: &str,
+) -> FriendlyInsertTargetClass {
+    match application_id {
+        "org.gnome.TextEditor" | "gnome-text-editor" => FriendlyInsertTargetClass::TextEditor,
+        "browser-textarea"
+        | "firefox"
+        | "org.mozilla.firefox"
+        | "chromium"
+        | "chromium-browser"
+        | "google-chrome"
+        | "com.google.Chrome"
+        | "brave-browser"
+        | "com.brave.Browser"
+        | "microsoft-edge"
+        | "com.microsoft.Edge"
+        | "vivaldi"
+        | "com.vivaldi.Vivaldi" => FriendlyInsertTargetClass::BrowserTextarea,
+        _ => FriendlyInsertTargetClass::Unsupported,
     }
 }
 
@@ -276,7 +305,15 @@ pub fn select_friendly_insert_backend(
     target: &FriendlyFocusedTarget,
     policy: &FriendlyInsertPolicy,
 ) -> Result<FriendlyInsertSelection, FriendlyInsertFailure> {
-    if target.application_id != policy.target_application_id {
+    let expected_target_class =
+        friendly_insert_target_class_from_application_id(policy.target_application_id);
+    let actual_target_class =
+        friendly_insert_target_class_from_application_id(&target.application_id);
+
+    if expected_target_class == FriendlyInsertTargetClass::Unsupported
+        || actual_target_class == FriendlyInsertTargetClass::Unsupported
+        || expected_target_class != actual_target_class
+    {
         return Err(FriendlyInsertFailure {
             backend_name: FRIENDLY_INSERT_BACKEND_NAME,
             reason: FriendlyInsertError::UnsupportedApplication {
@@ -902,11 +939,11 @@ mod modifier_hold_state {
 }
 
 #[cfg(test)]
-mod friendly_insert_validation {
+mod accessible_insert_validation {
     use super::*;
 
     #[test]
-    fn friendly_insert_rejects_non_text_editor_targets() {
+    fn accessible_insert_rejects_unsupported_targets() {
         let error = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "org.gnome.Calculator".into(),
@@ -931,7 +968,7 @@ mod friendly_insert_validation {
     }
 
     #[test]
-    fn friendly_insert_rejects_non_editable_targets() {
+    fn accessible_insert_rejects_non_editable_targets() {
         let error = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "org.gnome.TextEditor".into(),
@@ -950,7 +987,7 @@ mod friendly_insert_validation {
     }
 
     #[test]
-    fn friendly_insert_rejects_targets_without_editable_text() {
+    fn accessible_insert_rejects_targets_without_editable_text() {
         let error = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "org.gnome.TextEditor".into(),
@@ -969,7 +1006,7 @@ mod friendly_insert_validation {
     }
 
     #[test]
-    fn friendly_insert_rejects_targets_without_caret_surface() {
+    fn accessible_insert_rejects_targets_without_caret_surface() {
         let error = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "org.gnome.TextEditor".into(),
@@ -988,7 +1025,7 @@ mod friendly_insert_validation {
     }
 
     #[test]
-    fn friendly_insert_reports_stable_backend_name() {
+    fn accessible_insert_reports_stable_backend_name() {
         let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "org.gnome.TextEditor".into(),
@@ -1005,14 +1042,33 @@ mod friendly_insert_validation {
         assert_eq!(selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
         assert_eq!(selection.target_application_id, "org.gnome.TextEditor");
     }
+
+    #[test]
+    fn accessible_insert_accepts_browser_textarea_targets() {
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "firefox".into(),
+                is_editable: true,
+                supports_editable_text: true,
+                supports_caret: true,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "browser-textarea",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
+        assert_eq!(selection.target_application_id, "firefox");
+    }
 }
 
 #[cfg(test)]
-mod friendly_insert_runtime_helpers {
+mod accessible_insert_runtime_helpers {
     use super::*;
 
     #[test]
-    fn friendly_insert_runtime_helpers_map_text_editor_executable() {
+    fn accessible_insert_runtime_helpers_map_text_editor_executable() {
         assert_eq!(
             friendly_application_id_from_executable_name("gnome-text-editor"),
             "org.gnome.TextEditor"
@@ -1020,7 +1076,31 @@ mod friendly_insert_runtime_helpers {
     }
 
     #[test]
-    fn friendly_insert_runtime_helpers_preserve_unknown_executable_names() {
+    fn accessible_insert_runtime_helpers_classify_text_editor_targets() {
+        assert_eq!(
+            friendly_insert_target_class_from_application_id("org.gnome.TextEditor"),
+            FriendlyInsertTargetClass::TextEditor
+        );
+        assert_eq!(
+            friendly_insert_target_class_from_application_id("gnome-text-editor"),
+            FriendlyInsertTargetClass::TextEditor
+        );
+    }
+
+    #[test]
+    fn accessible_insert_runtime_helpers_classify_browser_textarea_targets() {
+        assert_eq!(
+            friendly_insert_target_class_from_application_id("browser-textarea"),
+            FriendlyInsertTargetClass::BrowserTextarea
+        );
+        assert_eq!(
+            friendly_insert_target_class_from_application_id("firefox"),
+            FriendlyInsertTargetClass::BrowserTextarea
+        );
+    }
+
+    #[test]
+    fn accessible_insert_runtime_helpers_preserve_unknown_executable_names() {
         assert_eq!(
             friendly_application_id_from_executable_name("ghostty"),
             "ghostty"
@@ -1028,7 +1108,7 @@ mod friendly_insert_runtime_helpers {
     }
 
     #[test]
-    fn friendly_insert_runtime_helpers_apply_insert_at_char_offset() {
+    fn accessible_insert_runtime_helpers_apply_insert_at_char_offset() {
         assert_eq!(
             apply_insert_at_char_offset("ab🙂d", "X", 3),
             Some("ab🙂Xd".into())
@@ -1037,12 +1117,12 @@ mod friendly_insert_runtime_helpers {
 }
 
 #[cfg(test)]
-mod friendly_insert_live {
+mod accessible_insert_live {
     use super::*;
 
     #[test]
     #[ignore = "requires a live GNOME Wayland session with GNOME Text Editor focused"]
-    fn friendly_insert_live_text_editor_round_trip() {
+    fn accessible_insert_live_text_editor_round_trip() {
         let inserted_text = std::env::var("PEPPERX_FRIENDLY_INSERT_TEXT").unwrap_or_else(|_| {
             format!(
                 " pepperx-smoke-{}",
@@ -1052,19 +1132,37 @@ mod friendly_insert_live {
                     .as_nanos()
             )
         });
+        assert_accessible_insert_live_round_trip("org.gnome.TextEditor", &inserted_text);
+    }
+
+    #[test]
+    #[ignore = "requires a live GNOME Wayland session with a browser textarea focused"]
+    fn accessible_insert_live_browser_textarea_round_trip() {
+        let inserted_text = std::env::var("PEPPERX_FRIENDLY_INSERT_TEXT").unwrap_or_else(|_| {
+            format!(
+                " pepperx-smoke-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock before unix epoch")
+                    .as_nanos()
+            )
+        });
+        assert_accessible_insert_live_round_trip("browser-textarea", &inserted_text);
+    }
+
+    fn assert_accessible_insert_live_round_trip(
+        target_application_id: &'static str,
+        inserted_text: &str,
+    ) {
         let outcome = insert_text_into_friendly_target(
-            &inserted_text,
+            inserted_text,
             &FriendlyInsertPolicy {
-                target_application_id: "org.gnome.TextEditor",
+                target_application_id,
             },
         )
-        .expect("friendly insertion should succeed in GNOME Text Editor");
+        .expect("friendly insertion should succeed");
 
         assert_eq!(outcome.selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
-        assert_eq!(
-            outcome.selection.target_application_id,
-            "org.gnome.TextEditor"
-        );
         assert!(
             !outcome.target_application_name.is_empty(),
             "friendly insertion should report the target application name"
@@ -1073,7 +1171,7 @@ mod friendly_insert_live {
             outcome.after_text,
             apply_insert_at_char_offset(
                 &outcome.before_text,
-                &inserted_text,
+                inserted_text,
                 usize::try_from(outcome.caret_offset).expect("caret offset should be non-negative")
             )
             .expect("expected inserted text snapshot")
