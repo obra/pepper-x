@@ -12,6 +12,85 @@ die() {
     exit 1
 }
 
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+assert_exists() {
+    local path="$1"
+
+    [[ -e "$path" ]] || die "missing expected path: $path"
+}
+
+assert_missing() {
+    local path="$1"
+
+    [[ ! -e "$path" ]] || die "unexpected leftover path: $path"
+}
+
+assert_package_status() {
+    local root="$1"
+    local admindir="$2"
+    local package_name="$3"
+    local expected_status="$4"
+
+    local status
+    status="$(
+        dpkg-query \
+            --root="$root" \
+            --admindir="$admindir" \
+            -W -f '${Status}' \
+            "$package_name"
+    )"
+
+    [[ "$status" == "$expected_status" ]] || die "unexpected package status for $package_name: $status"
+}
+
+assert_package_version() {
+    local root="$1"
+    local admindir="$2"
+    local package_name="$3"
+    local expected_version="$4"
+
+    local version
+    version="$(
+        dpkg-query \
+            --root="$root" \
+            --admindir="$admindir" \
+            -W -f '${Version}' \
+            "$package_name"
+    )"
+
+    [[ "$version" == "$expected_version" ]] || die "unexpected package version for $package_name: $version"
+}
+
+install_package() {
+    local root="$1"
+    local admindir="$2"
+    local pkg="$3"
+
+    dpkg \
+        --force-not-root \
+        --force-depends \
+        --root="$root" \
+        --admindir="$admindir" \
+        -i "$pkg" \
+        >/dev/null
+}
+
+remove_package() {
+    local root="$1"
+    local admindir="$2"
+    local package_name="$3"
+
+    dpkg \
+        --force-not-root \
+        --root="$root" \
+        --admindir="$admindir" \
+        -r "$package_name" \
+        >/dev/null
+}
+
 [[ $# -eq 2 ]] || usage
 
 old_pkg="$1"
@@ -21,18 +100,9 @@ for pkg in "$old_pkg" "$new_pkg"; do
     [[ -f "$pkg" ]] || die "missing package: $pkg"
 done
 
-command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb is required"
-command -v dpkg >/dev/null 2>&1 || die "dpkg is required"
-
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
-
-old_root="$tmpdir/old"
-new_root="$tmpdir/new"
-mkdir -p "$old_root" "$new_root"
-
-dpkg-deb -x "$old_pkg" "$old_root"
-dpkg-deb -x "$new_pkg" "$new_root"
+require_command dpkg-deb
+require_command dpkg
+require_command dpkg-query
 
 old_name="$(dpkg-deb -f "$old_pkg" Package)"
 new_name="$(dpkg-deb -f "$new_pkg" Package)"
@@ -50,9 +120,41 @@ required_paths=(
     "etc/xdg/autostart/pepper-x-autostart.desktop"
 )
 
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+root="$tmpdir/root"
+admindir="$root/var/lib/dpkg"
+mkdir -p "$admindir/updates" "$admindir/info"
+
+install_package "$root" "$admindir" "$old_pkg"
+assert_package_status "$root" "$admindir" "$old_name" "install ok installed"
+assert_package_version "$root" "$admindir" "$old_name" "$old_version"
+
 for path in "${required_paths[@]}"; do
-    [[ -e "$old_root/$path" ]] || die "old package is missing $path"
-    [[ -e "$new_root/$path" ]] || die "new package is missing $path"
+    assert_exists "$root/$path"
 done
+
+install_package "$root" "$admindir" "$new_pkg"
+assert_package_status "$root" "$admindir" "$new_name" "install ok installed"
+assert_package_version "$root" "$admindir" "$new_name" "$new_version"
+
+for path in "${required_paths[@]}"; do
+    assert_exists "$root/$path"
+done
+
+remove_package "$root" "$admindir" "$new_name"
+
+for path in "${required_paths[@]}"; do
+    assert_missing "$root/$path"
+done
+
+if dpkg-query \
+    --root="$root" \
+    --admindir="$admindir" \
+    -W -f '${Status}' \
+    "$new_name" >/dev/null 2>&1; then
+    die "package should have been removed: $new_name"
+fi
 
 echo "Ubuntu upgrade check passed: $old_name $old_version -> $new_version"
