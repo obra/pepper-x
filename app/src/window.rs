@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use pepperx_models::{ModelInventoryEntry, ModelKind};
 
+use crate::history_store::ArchivedRun;
 use crate::settings::AppSettings;
-use crate::transcript_log::TranscriptEntry;
 
 const SETTINGS_PAGE_NAME: &str = "settings";
 const HISTORY_PAGE_NAME: &str = "history";
@@ -33,13 +33,13 @@ impl MainWindow {
 
     pub fn new_with_history_and_settings(
         app: &adw::Application,
-        history_entries: Vec<TranscriptEntry>,
+        history_runs: Vec<ArchivedRun>,
         settings_summary: String,
     ) -> Self {
         Self {
             app: app.clone(),
             settings_summary: Rc::new(settings_summary),
-            history_summary: Rc::new(history_summary_text(&history_entries)),
+            history_summary: Rc::new(history_summary_text(&history_runs)),
             state: Rc::new(RefCell::new(None)),
         }
     }
@@ -144,19 +144,24 @@ pub(crate) fn settings_summary_text(
     lines.join("\n")
 }
 
-pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
-    if let Some(latest) = entries.first() {
+pub(crate) fn history_summary_text(runs: &[ArchivedRun]) -> String {
+    if let Some(latest) = runs.first() {
+        let entry = &latest.entry;
         let mut summary = format!(
             "Raw transcript:\n{}\n\nSource WAV: {}\nBackend: {}\nModel: {}\nElapsed: {} ms\nArchived entries: {}",
-            latest.transcript_text,
-            latest.source_wav_path.display(),
-            latest.backend_name,
-            latest.model_name,
-            latest.elapsed_ms,
-            entries.len()
+            entry.transcript_text,
+            entry.source_wav_path.display(),
+            entry.backend_name,
+            entry.model_name,
+            entry.elapsed_ms,
+            runs.len()
         );
 
-        if let Some(cleanup) = latest.cleanup.as_ref() {
+        if let Some(prompt_profile) = latest.prompt_profile.as_deref() {
+            summary.push_str(&format!("\nCleanup prompt profile: {prompt_profile}"));
+        }
+
+        if let Some(cleanup) = entry.cleanup.as_ref() {
             if let Some(cleaned_text) = cleanup.cleaned_text() {
                 summary.push_str(&format!(
                     "\n\nCleaned transcript:\n{cleaned_text}\nCleanup backend: {}\nCleanup model: {}",
@@ -174,7 +179,7 @@ pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
             }
         }
 
-        if let Some(insertion) = latest.insertion.as_ref() {
+        if let Some(insertion) = entry.insertion.as_ref() {
             if let Some(target_class) = insertion.target_class.as_deref() {
                 summary.push_str(&format!("\nTarget class: {target_class}"));
             }
@@ -238,9 +243,24 @@ mod app_shell {
     use super::*;
     use crate::settings::AppSettings;
     use crate::transcript_log::InsertionDiagnostics;
+    use crate::transcript_log::TranscriptEntry;
     use pepperx_models::{ModelInventoryEntry, ModelKind, ModelReadiness};
     use std::path::PathBuf;
     use std::time::Duration;
+
+    fn archived_run(entry: TranscriptEntry) -> ArchivedRun {
+        ArchivedRun {
+            run_id: "run-1".into(),
+            archived_at_ms: 42,
+            run_dir: PathBuf::from("/tmp/history/run-1"),
+            metadata_path: PathBuf::from("/tmp/history/run-1/run.json"),
+            entry,
+            archived_source_wav_path: Some(PathBuf::from("/tmp/history/run-1/source.wav")),
+            prompt_profile: None,
+            supporting_context_text: None,
+            ocr_text: None,
+        }
+    }
 
     #[test]
     fn model_status_settings_summary_shows_cache_root_and_selected_models() {
@@ -300,7 +320,7 @@ mod app_shell {
                 .with_target_class("text-editor"),
         );
 
-        let summary = history_summary_text(&[entry]);
+        let summary = history_summary_text(&[archived_run(entry)]);
 
         assert!(summary
             .contains("Friendly insertion: inserted into Text Editor via atspi-editable-text"));
@@ -325,7 +345,7 @@ mod app_shell {
             .with_target_class("unsupported"),
         );
 
-        let summary = history_summary_text(&[entry]);
+        let summary = history_summary_text(&[archived_run(entry)]);
 
         assert!(
             summary.contains("Friendly insertion: failed in Calculator via atspi-editable-text")
@@ -341,9 +361,25 @@ mod app_shell {
         )
         .expect("deserialize cleanup transcript entry");
 
-        let summary = history_summary_text(&[entry]);
+        let summary = history_summary_text(&[archived_run(entry)]);
 
         assert!(summary.contains("Raw transcript:\nhello from pepper x"));
         assert!(summary.contains("Cleaned transcript:\nHello from Pepper X."));
+    }
+
+    #[test]
+    fn model_status_history_summary_shows_archived_prompt_profile() {
+        let mut run = archived_run(TranscriptEntry::new(
+            "/tmp/loop5.wav",
+            "hello from pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            Duration::from_millis(21),
+        ));
+        run.prompt_profile = Some("ordinary-dictation".into());
+
+        let summary = history_summary_text(&[run]);
+
+        assert!(summary.contains("Cleanup prompt profile: ordinary-dictation"));
     }
 }

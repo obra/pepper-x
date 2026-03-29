@@ -242,20 +242,42 @@ fn extract_tar_bz2(
             None => entry_path.clone(),
         };
         ensure_safe_relative_path(&relative_path)?;
-
-        let destination = install_root.join(&relative_path);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(io_error)?;
-        }
-        entry
-            .unpack(&destination)
-            .map_err(|error| BootstrapError::ExtractArchive {
-                archive_path: archive_path.to_path_buf(),
-                message: error.to_string(),
-            })?;
+        extract_archive_entry(&mut entry, install_root, &relative_path)?;
     }
 
     Ok(())
+}
+
+fn extract_archive_entry<R: io::Read>(
+    entry: &mut tar::Entry<'_, R>,
+    install_root: &Path,
+    relative_path: &Path,
+) -> Result<(), BootstrapError> {
+    let entry_type = entry.header().entry_type();
+    if entry_type.is_symlink() || entry_type.is_hard_link() {
+        return Err(BootstrapError::InvalidArchiveEntry(
+            relative_path.to_path_buf(),
+        ));
+    }
+
+    let destination = install_root.join(relative_path);
+    if entry_type.is_dir() {
+        return fs::create_dir_all(&destination).map_err(io_error);
+    }
+
+    if !entry_type.is_file() {
+        return Err(BootstrapError::InvalidArchiveEntry(
+            relative_path.to_path_buf(),
+        ));
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(io_error)?;
+    }
+
+    let mut output = File::create(&destination).map_err(io_error)?;
+    io::copy(entry, &mut output).map_err(io_error)?;
+    output.flush().map_err(io_error)
 }
 
 fn ensure_safe_relative_path(path: &Path) -> Result<(), BootstrapError> {
@@ -351,7 +373,7 @@ mod tests {
             .expect("catalog should include the default cleanup model");
         let cleanup_path = crate::model_install_dir(cleanup, &root);
         std::fs::create_dir_all(cleanup_path.parent().unwrap()).unwrap();
-        std::fs::write(&cleanup_path, b"pepper-x-cleanup-model").unwrap();
+        write_cleanup_model_file(&cleanup_path);
 
         let inventory = model_inventory(&root);
         let asr = inventory
@@ -365,6 +387,44 @@ mod tests {
 
         assert!(!asr.readiness.is_ready);
         assert!(cleanup.readiness.is_ready);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn download_rejects_cleanup_models_without_gguf_header() {
+        let root = temp_root("invalid-cleanup");
+        let cleanup = catalog_model("qwen2.5-3b-instruct-q4_k_m.gguf")
+            .expect("catalog should include the default cleanup model");
+        let cleanup_path = crate::model_install_dir(cleanup, &root);
+        std::fs::create_dir_all(cleanup_path.parent().unwrap()).unwrap();
+        std::fs::write(&cleanup_path, b"not-a-gguf-model").unwrap();
+
+        let readiness = model_readiness(cleanup, &root);
+
+        assert!(!readiness.is_ready);
+        assert_eq!(
+            readiness.missing_files,
+            vec!["qwen2.5-3b-instruct-q4_k_m.gguf".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn download_rejects_archive_entries_with_unsafe_symlink_targets() {
+        let root = temp_root("unsafe-symlink");
+        let model = catalog_model("nemo-parakeet-tdt-0.6b-v2-int8")
+            .expect("catalog should include the default ASR model");
+
+        let error = bootstrap_model_with_fetch(model, &root, |_url, target_path| {
+            if let Some(parent) = target_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            write_asr_bundle_with_unsafe_symlink(target_path);
+            Ok::<(), std::io::Error>(())
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, BootstrapError::InvalidArchiveEntry(_)));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -413,5 +473,30 @@ mod tests {
         }
 
         tar.into_inner().unwrap().flush().unwrap();
+    }
+
+    fn write_asr_bundle_with_unsafe_symlink(target_path: &std::path::Path) {
+        let archive = std::fs::File::create(target_path).unwrap();
+        let encoder = BzEncoder::new(archive, bzip2::Compression::best());
+        let mut tar = Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_link_name("../../pepper-x-escape").unwrap();
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/unsafe-link",
+            std::io::empty(),
+        )
+        .unwrap();
+
+        tar.into_inner().unwrap().flush().unwrap();
+    }
+
+    fn write_cleanup_model_file(target_path: &std::path::Path) {
+        std::fs::write(target_path, b"GGUFpepper-x-cleanup-model").unwrap();
     }
 }

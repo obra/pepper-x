@@ -507,6 +507,10 @@ fn configured_cleanup_model_path_with(
     settings: &AppSettings,
     cache_root: &Path,
 ) -> Result<PathBuf, CleanupError> {
+    if let Some(model_path) = nonempty_env_path("PEPPERX_CLEANUP_MODEL_PATH") {
+        return Ok(model_path);
+    }
+
     let model = catalog_model(&settings.preferred_cleanup_model)
         .ok_or_else(|| CleanupError::UnsupportedModel(settings.preferred_cleanup_model.clone()))?;
     let readiness = model_readiness(model, cache_root);
@@ -661,6 +665,47 @@ mod app_shell {
             TranscriptionRunError::UnreadyAsrModel { model_id, .. }
                 if model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
         ));
+    }
+
+    #[test]
+    fn model_status_cleanup_model_env_override_takes_precedence_over_settings() {
+        let _guard = env_lock().lock().unwrap();
+        let override_path = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-override-{}-{}.gguf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_cleanup_model = std::env::var_os("PEPPERX_CLEANUP_MODEL_PATH");
+        std::fs::write(&override_path, b"GGUFpepper-x-cleanup-model").unwrap();
+        std::env::set_var("PEPPERX_CLEANUP_MODEL_PATH", &override_path);
+        let settings = AppSettings {
+            preferred_cleanup_model: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            ..AppSettings::default()
+        };
+        let cache_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let configured_path = configured_cleanup_model_path_with(&settings, &cache_root)
+            .expect("cleanup env override should win");
+
+        assert_eq!(configured_path, override_path);
+        match previous_cleanup_model {
+            Some(previous_cleanup_model) => {
+                std::env::set_var("PEPPERX_CLEANUP_MODEL_PATH", previous_cleanup_model)
+            }
+            None => std::env::remove_var("PEPPERX_CLEANUP_MODEL_PATH"),
+        }
+        let _ = std::fs::remove_file(override_path);
+        let _ = std::fs::remove_dir_all(cache_root);
     }
 
     #[test]

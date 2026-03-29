@@ -1,6 +1,9 @@
 pub mod cleanup;
 
-pub use cleanup::{cleanup_prompt, run_cleanup, CleanupError, CleanupRequest, CleanupResult};
+pub use cleanup::{
+    cleanup_prompt, run_cleanup, CleanupError, CleanupRequest, CleanupResult,
+    LITERAL_DICTATION_PROMPT_PROFILE, ORDINARY_DICTATION_PROMPT_PROFILE,
+};
 
 #[cfg(test)]
 mod cleanup_runtime {
@@ -34,6 +37,25 @@ mod cleanup_runtime {
         };
 
         assert_eq!(cleanup_prompt(&request), cleanup_prompt(&request));
+    }
+
+    #[test]
+    fn cleanup_runtime_prompt_profile_changes_the_prompt_contract() {
+        let ordinary_prompt = cleanup_prompt(&CleanupRequest {
+            transcript_text: "hello from pepper x".into(),
+            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
+            ocr_text: None,
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+        });
+        let literal_prompt = cleanup_prompt(&CleanupRequest {
+            transcript_text: "hello from pepper x".into(),
+            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
+            ocr_text: None,
+            prompt_profile: "literal-dictation".into(),
+        });
+
+        assert_ne!(ordinary_prompt, literal_prompt);
+        assert!(literal_prompt.contains("Preserve spoken filler words"));
     }
 
     #[test]

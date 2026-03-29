@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use crate::background::BackgroundController;
-use crate::history_store::HistoryStore;
+use crate::history_store::{ArchivedRun, HistoryStore};
 use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::AppSettings;
 use crate::transcript_log::{state_root, TranscriptEntry};
@@ -37,7 +37,7 @@ pub fn run() {
     let inventory = model_inventory(&cache_root);
     let window = MainWindow::new_with_history_and_settings(
         &app,
-        load_history_entries().unwrap_or_else(|error| {
+        load_history_runs().unwrap_or_else(|error| {
             eprintln!("[Pepper X] failed to load transcript history: {error}");
             Vec::new()
         }),
@@ -73,6 +73,10 @@ fn run_headless() {
     let main_loop = gtk::glib::MainLoop::new(None, false);
 
     main_loop.run();
+}
+
+pub fn load_history_runs() -> io::Result<Vec<ArchivedRun>> {
+    HistoryStore::open(state_root())?.recent_runs()
 }
 
 pub fn load_history_entries() -> io::Result<Vec<TranscriptEntry>> {
@@ -124,6 +128,22 @@ mod app_shell {
     use pepperx_asr::TranscriptionResult;
     use pepperx_ipc::SERVICE_NAME;
     use std::time::Duration;
+
+    fn archived_run(entry: TranscriptEntry) -> ArchivedRun {
+        ArchivedRun {
+            run_id: "run-1".into(),
+            archived_at_ms: 42,
+            run_dir: std::path::PathBuf::from("/tmp/history/run-1"),
+            metadata_path: std::path::PathBuf::from("/tmp/history/run-1/run.json"),
+            entry,
+            archived_source_wav_path: Some(std::path::PathBuf::from(
+                "/tmp/history/run-1/source.wav",
+            )),
+            prompt_profile: None,
+            supporting_context_text: None,
+            ocr_text: None,
+        }
+    }
 
     #[test]
     fn app_shell_builds_application_with_stable_id() {
@@ -226,13 +246,13 @@ mod app_shell {
 
     #[test]
     fn app_shell_history_summary_shows_latest_transcript_and_not_placeholder_copy() {
-        let summary = history_summary_text(&[TranscriptEntry::new(
+        let summary = history_summary_text(&[archived_run(TranscriptEntry::new(
             "/tmp/loop1.wav",
             "hello from pepper x",
             "sherpa-onnx",
             "nemo-parakeet-tdt-0.6b-v2-int8",
             Duration::from_millis(84),
-        )]);
+        ))]);
 
         assert!(summary.contains("hello from pepper x"));
         assert!(summary.contains("sherpa-onnx"));

@@ -6,6 +6,7 @@ use std::time::Instant;
 
 const CLEANUP_BACKEND_NAME: &str = "llama.cpp";
 pub const ORDINARY_DICTATION_PROMPT_PROFILE: &str = "ordinary-dictation";
+pub const LITERAL_DICTATION_PROMPT_PROFILE: &str = "literal-dictation";
 const CLEANUP_MAX_TOKENS: usize = 128;
 const CLEANUP_OUTPUT_LIMIT: usize = 512;
 const CLEANUP_OCR_CONTEXT_LIMIT: usize = 512;
@@ -115,20 +116,7 @@ impl fmt::Display for CleanupError {
 }
 
 pub fn cleanup_prompt(request: &CleanupRequest) -> String {
-    let mut prompt = match request.prompt_profile.as_str() {
-        ORDINARY_DICTATION_PROMPT_PROFILE => String::from(
-            "You clean speech recognition transcripts.\n\
-Return only the cleaned transcript on a single line.\n\
-Preserve wording and meaning.\n\
-Fix capitalization, punctuation, and obvious transcription artifacts.\n",
-        ),
-        _ => String::from(
-            "You clean speech recognition transcripts.\n\
-Return only the cleaned transcript on a single line.\n\
-Preserve wording and meaning.\n\
-Fix capitalization, punctuation, and obvious transcription artifacts.\n",
-        ),
-    };
+    let mut prompt = prompt_preamble(&request.prompt_profile).to_string();
 
     if let Some(ocr_text) = bounded_ocr_text(request.ocr_text.as_deref()) {
         prompt.push_str("Optional OCR context:\n");
@@ -140,6 +128,29 @@ Fix capitalization, punctuation, and obvious transcription artifacts.\n",
     prompt.push_str(request.transcript_text.trim());
     prompt.push_str("\nCleaned transcript:\n");
     prompt
+}
+
+fn prompt_preamble(profile: &str) -> &'static str {
+    match profile {
+        ORDINARY_DICTATION_PROMPT_PROFILE => {
+            "You clean speech recognition transcripts.\n\
+Return only the cleaned transcript on a single line.\n\
+Preserve wording and meaning.\n\
+Fix capitalization, punctuation, and obvious transcription artifacts.\n"
+        }
+        LITERAL_DICTATION_PROMPT_PROFILE => {
+            "You lightly normalize speech recognition transcripts.\n\
+Return only the transcript on a single line.\n\
+Preserve spoken filler words, hesitations, and casing when they appear intentional.\n\
+Fix only obvious transcription errors that change the words themselves.\n"
+        }
+        _ => {
+            "You clean speech recognition transcripts.\n\
+Return only the cleaned transcript on a single line.\n\
+Preserve wording and meaning.\n\
+Fix capitalization, punctuation, and obvious transcription artifacts.\n"
+        }
+    }
 }
 
 pub fn run_cleanup(request: &CleanupRequest) -> Result<CleanupResult, CleanupError> {
