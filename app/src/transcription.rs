@@ -40,6 +40,7 @@ pub enum TranscriptionRunError {
     MissingModelDir,
     TranscriptLog(std::io::Error),
     Asr(TranscriptionError),
+    FriendlyInsert(FriendlyInsertRunError),
 }
 
 impl From<std::io::Error> for TranscriptionRunError {
@@ -51,6 +52,12 @@ impl From<std::io::Error> for TranscriptionRunError {
 impl From<TranscriptionError> for TranscriptionRunError {
     fn from(error: TranscriptionError) -> Self {
         Self::Asr(error)
+    }
+}
+
+impl From<FriendlyInsertRunError> for TranscriptionRunError {
+    fn from(error: FriendlyInsertRunError) -> Self {
+        Self::FriendlyInsert(error)
     }
 }
 
@@ -71,6 +78,9 @@ impl std::fmt::Display for TranscriptionRunError {
                 "Pepper X transcription failed: {}",
                 describe_asr_error(error)
             ),
+            Self::FriendlyInsert(error) => {
+                write!(f, "Pepper X friendly insertion failed: {error}")
+            }
         }
     }
 }
@@ -112,6 +122,37 @@ pub fn transcribe_wav_and_insert_friendly_to_log(
             request_uinput_text_insertion,
         )
     })
+}
+
+pub fn transcribe_wav_and_cleanup_and_insert_friendly_to_log(
+    wav_path: &Path,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let result = transcribe_wav_result(wav_path)?;
+    archive_transcription_result_with_cleanup_and_friendly_insert(
+        result,
+        |transcript_text| {
+            let model_path = configured_cleanup_model_path()?;
+            run_cleanup(&CleanupRequest {
+                transcript_text: transcript_text.into(),
+                model_path,
+                ocr_text: None,
+            })
+        },
+        |transcript_text| {
+            insert_with_uinput_fallback(
+                transcript_text,
+                |transcript_text| {
+                    insert_text_into_friendly_target(
+                        transcript_text,
+                        &FriendlyInsertPolicy {
+                            target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
+                        },
+                    )
+                },
+                request_uinput_text_insertion,
+            )
+        },
+    )
 }
 
 fn insert_with_uinput_fallback<P, H>(
@@ -162,14 +203,10 @@ fn request_uinput_text_insertion(
     let socket_path = configured_uinput_helper_socket_path()?;
     let mut stream = connect_or_spawn_uinput_helper(&socket_path)?;
     serde_json::to_writer(&mut stream, &request).map_err(|error| {
-        FriendlyInsertRunError::Access(format!(
-            "failed to encode Pepper X uinput request: {error}"
-        ))
+        FriendlyInsertRunError::Access(format!("failed to encode Pepper X uinput request: {error}"))
     })?;
     stream.write_all(b"\n").map_err(|error| {
-        FriendlyInsertRunError::Access(format!(
-            "failed to write Pepper X uinput request: {error}"
-        ))
+        FriendlyInsertRunError::Access(format!("failed to write Pepper X uinput request: {error}"))
     })?;
     stream
         .shutdown(std::net::Shutdown::Write)
@@ -197,7 +234,9 @@ fn request_uinput_text_insertion(
     }
 }
 
-fn connect_or_spawn_uinput_helper(socket_path: &Path) -> Result<UnixStream, FriendlyInsertRunError> {
+fn connect_or_spawn_uinput_helper(
+    socket_path: &Path,
+) -> Result<UnixStream, FriendlyInsertRunError> {
     match UnixStream::connect(socket_path) {
         Ok(stream) => return Ok(stream),
         Err(initial_error) if initial_error.kind() != std::io::ErrorKind::NotFound => {
@@ -210,14 +249,12 @@ fn connect_or_spawn_uinput_helper(socket_path: &Path) -> Result<UnixStream, Frie
     }
 
     let helper_bin = configured_uinput_helper_bin_path();
-    Command::new(&helper_bin)
-        .spawn()
-        .map_err(|error| {
-            FriendlyInsertRunError::Access(format!(
-                "failed to launch Pepper X uinput helper {}: {error}",
-                helper_bin.display()
-            ))
-        })?;
+    Command::new(&helper_bin).spawn().map_err(|error| {
+        FriendlyInsertRunError::Access(format!(
+            "failed to launch Pepper X uinput helper {}: {error}",
+            helper_bin.display()
+        ))
+    })?;
 
     let deadline = std::time::Instant::now() + UINPUT_HELPER_STARTUP_TIMEOUT;
     loop {
@@ -227,8 +264,7 @@ fn connect_or_spawn_uinput_helper(socket_path: &Path) -> Result<UnixStream, Frie
                 if std::time::Instant::now() < deadline
                     && matches!(
                         error.kind(),
-                        std::io::ErrorKind::ConnectionRefused
-                            | std::io::ErrorKind::NotFound
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
                     ) =>
             {
                 std::thread::sleep(UINPUT_HELPER_STARTUP_POLL_INTERVAL);
@@ -283,19 +319,7 @@ where
     F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
 {
     let mut entry = transcript_entry_from_result(result);
-    entry.cleanup = Some(match cleanup(&entry.transcript_text) {
-        Ok(result) => {
-            let mut diagnostics = CleanupDiagnostics::succeeded(
-                result.backend_name,
-                result.model_name,
-                result.cleaned_text,
-                Duration::from_millis(result.elapsed_ms),
-            );
-            diagnostics.used_ocr = result.used_ocr;
-            diagnostics
-        }
-        Err(error) => cleanup_diagnostics_from_error(&error),
-    });
+    record_cleanup(&mut entry, cleanup);
     archive_transcript_entry(entry)
 }
 
@@ -307,42 +331,30 @@ where
     F: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
 {
     let mut entry = transcript_entry_from_result(result);
-    entry.insertion = Some(match insert(&entry.transcript_text) {
-        Ok(outcome) => InsertionDiagnostics::succeeded(
-            outcome.selection.backend_name,
-            outcome.target_application_name,
-        )
-        .with_target_class(outcome.target_class)
-        .with_attempted_backends(outcome.selection.attempted_backends.iter().copied()),
-        Err(error) => match error.selected_backend() {
-            Some(selection) => InsertionDiagnostics::failed(
-                selection.backend_name,
-                error.target_application_name().unwrap_or("unknown"),
-                error.to_string(),
-            )
-            .with_target_class(selection.target_class)
-            .with_attempted_backends(selection.attempted_backends.iter().copied()),
-            None => {
-                let mut diagnostics = InsertionDiagnostics::failed(
-                FRIENDLY_INSERT_BACKEND_NAME,
-                error.target_application_name().unwrap_or("unknown"),
-                error.to_string(),
-                );
-
-                if let Some(target_class) = error.target_class() {
-                    diagnostics = diagnostics.with_target_class(target_class);
-                }
-
-                if !error.attempted_backends().is_empty() {
-                    diagnostics = diagnostics
-                        .with_attempted_backends(error.attempted_backends().iter().copied());
-                }
-
-                diagnostics
-            }
-        },
-    });
+    let insert_text = entry.transcript_text.clone();
+    let _ = record_friendly_insert(&mut entry, &insert_text, insert);
     archive_transcript_entry(entry)
+}
+
+fn archive_transcription_result_with_cleanup_and_friendly_insert<C, I>(
+    result: TranscriptionResult,
+    cleanup: C,
+    insert: I,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    C: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
+    I: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
+{
+    let mut entry = transcript_entry_from_result(result);
+    record_cleanup(&mut entry, cleanup);
+    let insert_text = entry.display_text().to_string();
+    let insert_error = record_friendly_insert(&mut entry, &insert_text, insert).err();
+    let entry = archive_transcript_entry(entry)?;
+
+    match insert_error {
+        Some(error) => Err(TranscriptionRunError::FriendlyInsert(error)),
+        None => Ok(entry),
+    }
 }
 
 fn transcript_entry_from_result(result: TranscriptionResult) -> TranscriptEntry {
@@ -397,6 +409,27 @@ fn configured_cleanup_model_path() -> Result<PathBuf, CleanupError> {
     nonempty_env_path("PEPPERX_CLEANUP_MODEL_PATH").ok_or(CleanupError::MissingModelConfiguration)
 }
 
+fn record_cleanup<F>(entry: &mut TranscriptEntry, cleanup: F)
+where
+    F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
+{
+    entry.cleanup = Some(match cleanup(&entry.transcript_text) {
+        Ok(result) => cleanup_diagnostics_from_result(result),
+        Err(error) => cleanup_diagnostics_from_error(&error),
+    });
+}
+
+fn cleanup_diagnostics_from_result(result: CleanupResult) -> CleanupDiagnostics {
+    let mut diagnostics = CleanupDiagnostics::succeeded(
+        result.backend_name,
+        result.model_name,
+        result.cleaned_text,
+        Duration::from_millis(result.elapsed_ms),
+    );
+    diagnostics.used_ocr = result.used_ocr;
+    diagnostics
+}
+
 fn cleanup_diagnostics_from_error(error: &CleanupError) -> CleanupDiagnostics {
     let mut diagnostics = CleanupDiagnostics::failed(
         error.backend_name(),
@@ -407,6 +440,65 @@ fn cleanup_diagnostics_from_error(error: &CleanupError) -> CleanupDiagnostics {
     );
     diagnostics.used_ocr = false;
     diagnostics
+}
+
+fn record_friendly_insert<F>(
+    entry: &mut TranscriptEntry,
+    insert_text: &str,
+    insert: F,
+) -> Result<(), FriendlyInsertRunError>
+where
+    F: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
+{
+    match insert(insert_text) {
+        Ok(outcome) => {
+            entry.insertion = Some(insertion_diagnostics_from_outcome(outcome));
+            Ok(())
+        }
+        Err(error) => {
+            entry.insertion = Some(insertion_diagnostics_from_error(&error));
+            Err(error)
+        }
+    }
+}
+
+fn insertion_diagnostics_from_outcome(outcome: FriendlyInsertOutcome) -> InsertionDiagnostics {
+    InsertionDiagnostics::succeeded(
+        outcome.selection.backend_name,
+        outcome.target_application_name,
+    )
+    .with_target_class(outcome.target_class)
+    .with_attempted_backends(outcome.selection.attempted_backends.iter().copied())
+}
+
+fn insertion_diagnostics_from_error(error: &FriendlyInsertRunError) -> InsertionDiagnostics {
+    match error.selected_backend() {
+        Some(selection) => InsertionDiagnostics::failed(
+            selection.backend_name,
+            error.target_application_name().unwrap_or("unknown"),
+            error.to_string(),
+        )
+        .with_target_class(selection.target_class)
+        .with_attempted_backends(selection.attempted_backends.iter().copied()),
+        None => {
+            let mut diagnostics = InsertionDiagnostics::failed(
+                FRIENDLY_INSERT_BACKEND_NAME,
+                error.target_application_name().unwrap_or("unknown"),
+                error.to_string(),
+            );
+
+            if let Some(target_class) = error.target_class() {
+                diagnostics = diagnostics.with_target_class(target_class);
+            }
+
+            if !error.attempted_backends().is_empty() {
+                diagnostics =
+                    diagnostics.with_attempted_backends(error.attempted_backends().iter().copied());
+            }
+
+            diagnostics
+        }
+    }
 }
 
 #[cfg(test)]
@@ -500,6 +592,19 @@ mod app_shell {
 
     #[test]
     fn cleanup_runtime_archives_cleaned_text_separately_from_raw_transcript() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-success-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
         let entry = archive_transcription_result_with_cleanup(
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
@@ -531,10 +636,31 @@ mod app_shell {
                 Duration::from_millis(19),
             ))
         );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
     }
 
     #[test]
     fn cleanup_runtime_falls_back_to_raw_transcript_when_model_is_unavailable() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
         let entry = archive_transcription_result_with_cleanup(
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
@@ -543,7 +669,11 @@ mod app_shell {
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
-            |_| Err(CleanupError::MissingModelPath(PathBuf::from("/tmp/missing.gguf"))),
+            |_| {
+                Err(CleanupError::MissingModelPath(PathBuf::from(
+                    "/tmp/missing.gguf",
+                )))
+            },
         )
         .expect("archive raw-only fallback entry");
 
@@ -557,6 +687,76 @@ mod app_shell {
                 "cleanup model path does not exist: /tmp/missing.gguf",
             ))
         );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_runtime_archives_missing_cleanup_model_configuration_as_failure() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-missing-model-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_cleanup_model = std::env::var_os("PEPPERX_CLEANUP_MODEL_PATH");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::env::remove_var("PEPPERX_CLEANUP_MODEL_PATH");
+
+        let entry = archive_transcription_result_with_cleanup(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |transcript_text| {
+                let model_path = configured_cleanup_model_path()?;
+                run_cleanup(&CleanupRequest {
+                    transcript_text: transcript_text.into(),
+                    model_path,
+                    ocr_text: None,
+                })
+            },
+        )
+        .expect("archive raw-only fallback entry");
+
+        assert_eq!(entry.transcript_text, "hello from pepper x");
+        assert_eq!(entry.display_text(), "hello from pepper x");
+        assert_eq!(
+            entry.cleanup,
+            Some(CleanupDiagnostics::failed(
+                "llama.cpp",
+                "unknown",
+                "cleanup model path is not configured",
+            ))
+        );
+
+        match previous_cleanup_model {
+            Some(previous_cleanup_model) => {
+                std::env::set_var("PEPPERX_CLEANUP_MODEL_PATH", previous_cleanup_model)
+            }
+            None => std::env::remove_var("PEPPERX_CLEANUP_MODEL_PATH"),
+        }
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
     }
 
     #[test]
@@ -699,7 +899,10 @@ mod app_shell {
         .unwrap_err();
 
         assert_eq!(
-            error.selected_backend().expect("selected backend").backend_name,
+            error
+                .selected_backend()
+                .expect("selected backend")
+                .backend_name,
             pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME
         );
         assert_eq!(error.target_application_name(), Some("Firefox"));
@@ -978,6 +1181,166 @@ mod app_shell {
             )
             .with_target_class("unsupported"))
         );
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_insert_runtime_uses_cleaned_text_for_friendly_insertion() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-insert-success-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        let mut inserted_text = None;
+
+        let entry = archive_transcription_result_with_cleanup_and_friendly_insert(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |text| {
+                inserted_text = Some(text.to_string());
+                Ok(FriendlyInsertOutcome {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: "atspi-editable-text",
+                        target_application_id: "org.gnome.TextEditor".into(),
+                        target_class: "text-editor",
+                        attempted_backends: vec!["atspi-editable-text"],
+                    },
+                    target_application_name: "Text Editor".into(),
+                    target_class: "text-editor".into(),
+                    caret_offset: 5,
+                    before_text: "Hello from Pepper X.".into(),
+                    after_text: "Hello from Pepper X.".into(),
+                })
+            },
+        )
+        .expect("archive cleanup plus insert entry");
+
+        assert_eq!(inserted_text.as_deref(), Some("Hello from Pepper X."));
+        assert_eq!(entry.transcript_text, "hello from pepper x");
+        assert_eq!(entry.display_text(), "Hello from Pepper X.");
+        assert_eq!(
+            entry.cleanup,
+            Some(CleanupDiagnostics::succeeded(
+                "llama.cpp",
+                "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "Hello from Pepper X.",
+                Duration::from_millis(19),
+            ))
+        );
+        assert_eq!(
+            entry.insertion,
+            Some(
+                InsertionDiagnostics::succeeded("atspi-editable-text", "Text Editor")
+                    .with_target_class("text-editor")
+                    .with_attempted_backends(["atspi-editable-text"])
+            )
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_insert_runtime_returns_insertion_error_after_archiving_entry() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-insert-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let error = archive_transcription_result_with_cleanup_and_friendly_insert(
+            TranscriptionResult {
+                wav_path: state_root.join("loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |text| {
+                assert_eq!(text, "Hello from Pepper X.");
+                Err(FriendlyInsertRunError::MissingFocusedTarget)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Pepper X friendly insertion failed: friendly insertion could not find a focused target"
+        );
+
+        let entries = TranscriptLog::open(&state_root)
+            .expect("open transcript log")
+            .recent_entries()
+            .expect("load transcript log");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].transcript_text, "hello from pepper x");
+        assert_eq!(entries[0].display_text(), "Hello from Pepper X.");
+        assert_eq!(
+            entries[0].cleanup,
+            Some(CleanupDiagnostics::succeeded(
+                "llama.cpp",
+                "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "Hello from Pepper X.",
+                Duration::from_millis(19),
+            ))
+        );
+        assert_eq!(
+            entries[0].insertion,
+            Some(InsertionDiagnostics::failed(
+                FRIENDLY_INSERT_BACKEND_NAME,
+                "unknown",
+                "friendly insertion could not find a focused target"
+            ))
+        );
+
         match previous_state_root {
             Some(previous_state_root) => {
                 std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)

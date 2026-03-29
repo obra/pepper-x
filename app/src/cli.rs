@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use crate::transcript_log::TranscriptEntry;
 use crate::transcription::{
-    transcribe_wav_and_cleanup_to_log, transcribe_wav_to_log, TranscriptionRunError,
+    transcribe_wav_and_cleanup_and_insert_friendly_to_log, transcribe_wav_and_cleanup_to_log,
+    transcribe_wav_to_log, TranscriptionRunError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +13,7 @@ pub enum StartupMode {
     TranscribeWav { wav_path: PathBuf },
     TranscribeWavAndCleanup { wav_path: PathBuf },
     TranscribeWavAndInsertFriendly { wav_path: PathBuf },
+    TranscribeWavAndCleanupAndInsertFriendly { wav_path: PathBuf },
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<StartupMode, String>
@@ -53,6 +55,22 @@ where
                 }
             }
         }
+        Some(flag) if flag == OsStr::new("--transcribe-wav-and-cleanup-and-insert-friendly") => {
+            match (args.next(), args.next()) {
+                (Some(wav_path), None) => {
+                    Ok(StartupMode::TranscribeWavAndCleanupAndInsertFriendly {
+                        wav_path: PathBuf::from(wav_path),
+                    })
+                }
+                (None, _) => Err(
+                    "--transcribe-wav-and-cleanup-and-insert-friendly requires a WAV path".into(),
+                ),
+                (Some(_), Some(_)) => Err(
+                    "--transcribe-wav-and-cleanup-and-insert-friendly accepts exactly one WAV path"
+                        .into(),
+                ),
+            }
+        }
         Some(flag) => Err(format!(
             "unknown Pepper X argument: {}",
             PathBuf::from(flag).display()
@@ -66,19 +84,22 @@ pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, Transcr
         transcribe_wav_to_log,
         transcribe_wav_and_cleanup_to_log,
         crate::transcription::transcribe_wav_and_insert_friendly_to_log,
+        transcribe_wav_and_cleanup_and_insert_friendly_to_log,
     )
 }
 
-pub fn run_with<F, G, H>(
+pub fn run_with<F, G, H, I>(
     startup_mode: StartupMode,
     transcribe: F,
     transcribe_and_cleanup: G,
     transcribe_and_insert_friendly: H,
+    transcribe_and_cleanup_and_insert_friendly: I,
 ) -> Result<Option<TranscriptEntry>, TranscriptionRunError>
 where
     F: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
     G: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
     H: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
+    I: FnOnce(&std::path::Path) -> Result<TranscriptEntry, TranscriptionRunError>,
 {
     match startup_mode {
         StartupMode::Gui => Ok(None),
@@ -88,6 +109,9 @@ where
         }
         StartupMode::TranscribeWavAndInsertFriendly { wav_path } => {
             transcribe_and_insert_friendly(&wav_path).map(Some)
+        }
+        StartupMode::TranscribeWavAndCleanupAndInsertFriendly { wav_path } => {
+            transcribe_and_cleanup_and_insert_friendly(&wav_path).map(Some)
         }
     }
 }
@@ -168,6 +192,73 @@ mod cli_mode {
     }
 
     #[test]
+    fn cleanup_insert_cli_mode_parses_cleanup_and_insert_friendly_path() {
+        let command = parse_args([
+            "pepper-x".to_string(),
+            "--transcribe-wav-and-cleanup-and-insert-friendly".to_string(),
+            "/tmp/loop5.wav".to_string(),
+        ])
+        .expect("cleanup plus insert mode should parse");
+
+        assert_eq!(
+            command,
+            StartupMode::TranscribeWavAndCleanupAndInsertFriendly {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+            }
+        );
+    }
+
+    #[test]
+    fn cleanup_insert_cli_mode_rejects_missing_cleanup_and_insert_wav_path() {
+        let error = parse_args([
+            "pepper-x".to_string(),
+            "--transcribe-wav-and-cleanup-and-insert-friendly".to_string(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "--transcribe-wav-and-cleanup-and-insert-friendly requires a WAV path"
+        );
+    }
+
+    #[test]
+    fn cleanup_insert_cli_mode_runs_transcribe_wav_and_cleanup_and_insert_without_gui() {
+        let wav_path = PathBuf::from("/tmp/loop5.wav");
+        let mut observed_path = None;
+        let mut expected = TranscriptEntry::new(
+            &wav_path,
+            "hello from pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            Duration::from_millis(37),
+        );
+        expected.cleanup = Some(crate::transcript_log::CleanupDiagnostics::succeeded(
+            "llama.cpp",
+            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "Hello from Pepper X.",
+            Duration::from_millis(19),
+        ));
+
+        let result = run_with(
+            StartupMode::TranscribeWavAndCleanupAndInsertFriendly {
+                wav_path: wav_path.clone(),
+            },
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |path: &std::path::Path| {
+                observed_path = Some(path.to_path_buf());
+                Ok(expected.clone())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(observed_path, Some(wav_path));
+        assert_eq!(result, Some(expected));
+    }
+
+    #[test]
     fn cli_mode_rejects_missing_friendly_insert_wav_path() {
         let error = parse_args([
             "pepper-x".to_string(),
@@ -210,6 +301,7 @@ mod cli_mode {
             },
             |_| unreachable!(),
             |_| unreachable!(),
+            |_| unreachable!(),
         )
         .unwrap();
 
@@ -245,6 +337,7 @@ mod cli_mode {
                 Ok(expected.clone())
             },
             |_| unreachable!(),
+            |_| unreachable!(),
         )
         .unwrap();
 
@@ -274,6 +367,7 @@ mod cli_mode {
                 observed_path = Some(path.to_path_buf());
                 Ok(expected.clone())
             },
+            |_| unreachable!(),
         )
         .unwrap();
 
@@ -285,6 +379,7 @@ mod cli_mode {
     fn cli_mode_keeps_gui_startup_mode_outside_runner() {
         let result = run_with(
             StartupMode::Gui,
+            |_| unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),
             |_| unreachable!(),

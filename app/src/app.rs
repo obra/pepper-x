@@ -193,6 +193,7 @@ mod app_shell {
             },
             |_| unreachable!(),
             |_| unreachable!(),
+            |_| unreachable!(),
         )
         .unwrap();
 
