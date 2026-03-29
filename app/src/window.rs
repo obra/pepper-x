@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::history_view::build_history_browser;
 use pepperx_models::{ModelInventoryEntry, ModelKind};
 
 use crate::history_store::ArchivedRun;
@@ -16,7 +17,7 @@ const HISTORY_PAGE_NAME: &str = "history";
 pub struct MainWindow {
     app: adw::Application,
     settings_summary: Rc<String>,
-    history_summary: Rc<String>,
+    history_runs: Rc<Vec<ArchivedRun>>,
     state: Rc<RefCell<Option<WindowState>>>,
 }
 
@@ -39,7 +40,7 @@ impl MainWindow {
         Self {
             app: app.clone(),
             settings_summary: Rc::new(settings_summary),
-            history_summary: Rc::new(history_summary_text(&history_runs)),
+            history_runs: Rc::new(history_runs),
             state: Rc::new(RefCell::new(None)),
         }
     }
@@ -82,7 +83,7 @@ impl MainWindow {
             "Settings",
         );
         stack.add_titled(
-            &build_page("History", self.history_summary.as_str()),
+            &build_history_browser(self.history_runs.as_ref()),
             Some(HISTORY_PAGE_NAME),
             "History",
         );
