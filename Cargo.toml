@@ -3,6 +3,7 @@ members = [
     "app",
     "crates/pepperx-asr",
     "crates/pepperx-audio",
+    "crates/pepperx-corrections",
     "crates/pepperx-models",
     "crates/pepperx-ipc",
     "crates/pepperx-session",

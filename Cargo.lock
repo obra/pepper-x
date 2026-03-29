@@ -1492,6 +1492,7 @@ dependencies = [
  "pepperx-asr",
  "pepperx-audio",
  "pepperx-cleanup",
+ "pepperx-corrections",
  "pepperx-ipc",
  "pepperx-models",
  "pepperx-platform-gnome",
@@ -1523,6 +1524,14 @@ name = "pepperx-cleanup"
 version = "0.1.0"
 dependencies = [
  "llama_cpp",
+]
+
+[[package]]
+name = "pepperx-corrections"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -14,6 +14,7 @@ gtk = { package = "gtk4", version = "0.11.1", features = ["gnome_46"] }
 pepperx-asr = { path = "../crates/pepperx-asr" }
 pepperx-audio = { path = "../crates/pepperx-audio" }
 pepperx-cleanup = { path = "../crates/pepperx-cleanup" }
+pepperx-corrections = { path = "../crates/pepperx-corrections" }
 pepperx-ipc = { path = "../crates/pepperx-ipc" }
 pepperx-models = { path = "../crates/pepperx-models" }
 pepperx-platform-gnome = { path = "../crates/pepperx-platform-gnome" }
