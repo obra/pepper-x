@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
 use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
-use pepperx_corrections::CorrectionStore;
+use pepperx_corrections::{learn_correction, CorrectionStore};
 use pepperx_models::{catalog_model, default_cache_root, model_readiness};
 use pepperx_platform_gnome::atspi::{
     insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
@@ -18,7 +18,8 @@ use pepperx_platform_gnome::context::{capture_supporting_context, SupportingCont
 use crate::history_store::{ArchiveWriteRequest, HistoryStore};
 use crate::settings::{corrections_store_path, AppSettings};
 use crate::transcript_log::{
-    nonempty_env_path, state_root, CleanupDiagnostics, InsertionDiagnostics, TranscriptEntry,
+    nonempty_env_path, state_root, CleanupDiagnostics, InsertionDiagnostics, LearningDiagnostics,
+    TranscriptEntry,
 };
 
 #[cfg(test)]
@@ -626,13 +627,21 @@ where
     match insert(insert_text) {
         Ok(outcome) => {
             entry.insertion = Some(insertion_diagnostics_from_outcome(outcome));
+            entry.learning = learning_diagnostics(entry, insert_text);
             Ok(())
         }
         Err(error) => {
             entry.insertion = Some(insertion_diagnostics_from_error(&error));
+            entry.learning = None;
             Err(error)
         }
     }
+}
+
+fn learning_diagnostics(entry: &TranscriptEntry, insert_text: &str) -> Option<LearningDiagnostics> {
+    learn_correction(&entry.transcript_text, insert_text, true).map(|learned| {
+        LearningDiagnostics::preferred_transcription(learned.source, learned.replacement)
+    })
 }
 
 fn insertion_diagnostics_from_outcome(outcome: FriendlyInsertOutcome) -> InsertionDiagnostics {
@@ -1906,6 +1915,213 @@ mod app_shell {
                 "friendly insertion could not find a focused target"
             ))
         );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn post_paste_learning_archives_successful_preferred_transcription_suggestion() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-post-paste-learning-success-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_cleanup_and_friendly_insert(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext::default(),
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |_| {
+                Ok(FriendlyInsertOutcome {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: "atspi-editable-text",
+                        target_application_id: "org.gnome.TextEditor".into(),
+                        target_class: "text-editor",
+                        attempted_backends: vec!["atspi-editable-text"],
+                    },
+                    target_application_name: "Text Editor".into(),
+                    target_class: "text-editor".into(),
+                    caret_offset: 5,
+                    before_text: "Hello from Pepper X.".into(),
+                    after_text: "Hello from Pepper X.".into(),
+                })
+            },
+        )
+        .expect("archive cleanup plus insert entry");
+
+        assert_eq!(
+            entry.learning,
+            Some(
+                crate::transcript_log::LearningDiagnostics::preferred_transcription(
+                    "hello from pepper x",
+                    "Hello from Pepper X."
+                )
+            )
+        );
+        assert_eq!(
+            TranscriptLog::open(&state_root)
+                .expect("open transcript log")
+                .recent_entries()
+                .expect("load transcript log")[0]
+                .learning,
+            Some(
+                crate::transcript_log::LearningDiagnostics::preferred_transcription(
+                    "hello from pepper x",
+                    "Hello from Pepper X."
+                )
+            )
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn post_paste_learning_rejects_failed_insertions() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-post-paste-learning-failed-insert-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let error = archive_transcription_result_with_cleanup_and_friendly_insert(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext::default(),
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |_| Err(FriendlyInsertRunError::MissingFocusedTarget),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Pepper X friendly insertion failed: friendly insertion could not find a focused target"
+        );
+        assert_eq!(
+            TranscriptLog::open(&state_root)
+                .expect("open transcript log")
+                .recent_entries()
+                .expect("load transcript log")[0]
+                .learning,
+            None
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn post_paste_learning_rejects_destructive_cleanup_rewrites() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-post-paste-learning-destructive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_cleanup_and_friendly_insert(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext::default(),
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |_| {
+                Ok(FriendlyInsertOutcome {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: "atspi-editable-text",
+                        target_application_id: "org.gnome.TextEditor".into(),
+                        target_class: "text-editor",
+                        attempted_backends: vec!["atspi-editable-text"],
+                    },
+                    target_application_name: "Text Editor".into(),
+                    target_class: "text-editor".into(),
+                    caret_offset: 5,
+                    before_text: "Hello".into(),
+                    after_text: "Hello".into(),
+                })
+            },
+        )
+        .expect("archive cleanup plus insert entry");
+
+        assert_eq!(entry.learning, None);
 
         match previous_state_root {
             Some(previous_state_root) => {

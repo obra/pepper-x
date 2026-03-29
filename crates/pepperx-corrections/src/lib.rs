@@ -56,4 +56,33 @@ mod tests {
         assert_eq!(reloaded.apply("uh turn on mic"), "Turn on the mic");
         assert_eq!(reloaded.apply("the mic is live"), "the microphone is live");
     }
+
+    #[test]
+    fn learning_accepts_successful_inserted_phrase_normalization() {
+        let learned = learn_correction("hello from pepper x", "Hello from Pepper X.", true);
+
+        assert_eq!(
+            learned,
+            Some(LearnedCorrection {
+                source: "hello from pepper x".into(),
+                replacement: "Hello from Pepper X.".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn learning_rejects_failed_insertions() {
+        let learned = learn_correction("hello from pepper x", "Hello from Pepper X.", false);
+
+        assert_eq!(learned, None);
+    }
+
+    #[test]
+    fn learning_rejects_low_confidence_or_destructive_updates() {
+        let low_confidence = learn_correction("pepper x", "paper x", true);
+        let destructive = learn_correction("hello from pepper x", "Hello", true);
+
+        assert_eq!(low_confidence, None);
+        assert_eq!(destructive, None);
+    }
 }

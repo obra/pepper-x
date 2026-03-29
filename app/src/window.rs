@@ -202,6 +202,17 @@ pub(crate) fn history_summary_text(runs: &[ArchivedRun]) -> String {
             summary.push_str(&insertion_summary);
         }
 
+        if let Some(learning) = entry.learning.as_ref() {
+            let action_label = match learning.action.as_str() {
+                "preferred-transcription" => "preferred transcription",
+                action => action,
+            };
+            summary.push_str(&format!(
+                "\nPost-paste learning: {action_label}\n{} -> {}",
+                learning.source_text, learning.replacement_text
+            ));
+        }
+
         summary
     } else {
         "No dictation runs yet. Run `pepper-x --transcribe-wav <path>` or `pepper-x --transcribe-wav-and-insert-friendly <path>` to archive a transcript."
@@ -242,8 +253,7 @@ fn build_page(title: &str, description: &str) -> gtk::Box {
 mod app_shell {
     use super::*;
     use crate::settings::AppSettings;
-    use crate::transcript_log::InsertionDiagnostics;
-    use crate::transcript_log::TranscriptEntry;
+    use crate::transcript_log::{InsertionDiagnostics, LearningDiagnostics, TranscriptEntry};
     use pepperx_models::{ModelInventoryEntry, ModelKind, ModelReadiness};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -381,5 +391,25 @@ mod app_shell {
         let summary = history_summary_text(&[run]);
 
         assert!(summary.contains("Cleanup prompt profile: ordinary-dictation"));
+    }
+
+    #[test]
+    fn post_paste_learning_history_summary_shows_latest_learning_action() {
+        let mut entry = TranscriptEntry::new(
+            "/tmp/loop5.wav",
+            "hello from pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v2-int8",
+            Duration::from_millis(21),
+        );
+        entry.learning = Some(LearningDiagnostics::preferred_transcription(
+            "hello from pepper x",
+            "Hello from Pepper X.",
+        ));
+
+        let summary = history_summary_text(&[archived_run(entry)]);
+
+        assert!(summary.contains("Post-paste learning: preferred transcription"));
+        assert!(summary.contains("hello from pepper x -> Hello from Pepper X."));
     }
 }

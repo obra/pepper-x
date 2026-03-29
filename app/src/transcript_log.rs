@@ -18,6 +18,8 @@ pub struct TranscriptEntry {
     pub cleanup: Option<CleanupDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insertion: Option<InsertionDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learning: Option<LearningDiagnostics>,
 }
 
 impl TranscriptEntry {
@@ -36,6 +38,7 @@ impl TranscriptEntry {
             elapsed_ms: elapsed.as_millis() as u64,
             cleanup: None,
             insertion: None,
+            learning: None,
         }
     }
 
@@ -110,6 +113,26 @@ pub struct InsertionDiagnostics {
     pub succeeded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningDiagnostics {
+    pub action: String,
+    pub source_text: String,
+    pub replacement_text: String,
+}
+
+impl LearningDiagnostics {
+    pub fn preferred_transcription(
+        source_text: impl Into<String>,
+        replacement_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            action: "preferred-transcription".into(),
+            source_text: source_text.into(),
+            replacement_text: replacement_text.into(),
+        }
+    }
 }
 
 impl InsertionDiagnostics {
@@ -548,5 +571,48 @@ mod tests {
         assert!(copied.contains("\"transcript_text\":\"hello from pepper x\""));
         assert!(copied.contains("\"cleanup\":{"));
         assert!(copied.contains("\"cleaned_text\":\"Hello from Pepper X.\""));
+    }
+
+    #[test]
+    fn post_paste_learning_transcript_log_round_trips_learning_diagnostics_from_jsonl() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(
+                br#"{"source_wav_path":"loop5.wav","transcript_text":"hello from pepper x","backend_name":"sherpa-onnx","model_name":"nemo-parakeet-tdt-0.6b-v2-int8","elapsed_ms":7,"learning":{"action":"preferred-transcription","source_text":"hello from pepper x","replacement_text":"Hello from Pepper X."}}"#,
+            )
+            .expect("append loop5 learning entry");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(b"\n")
+            .expect("append newline");
+
+        let entry = log
+            .recent_entries()
+            .expect("load entries")
+            .into_iter()
+            .next()
+            .expect("load loop5 learning entry");
+        let copy_root = temp_root();
+        let copy_log = TranscriptLog::open(&copy_root).expect("open copy log");
+
+        assert_eq!(
+            entry.learning,
+            Some(LearningDiagnostics::preferred_transcription(
+                "hello from pepper x",
+                "Hello from Pepper X."
+            ))
+        );
+        copy_log.append(&entry).expect("append copied entry");
+
+        let copied = std::fs::read_to_string(copy_log.log_path()).expect("read copied log");
+        assert!(copied.contains("\"learning\":{"));
+        assert!(copied.contains("\"action\":\"preferred-transcription\""));
     }
 }
