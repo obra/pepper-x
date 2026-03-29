@@ -16,6 +16,7 @@ const CLEANUP_SESSION_CTX: u32 = 2048;
 pub struct CleanupRequest {
     pub transcript_text: String,
     pub model_path: PathBuf,
+    pub supporting_context_text: Option<String>,
     pub ocr_text: Option<String>,
     pub prompt_profile: String,
 }
@@ -118,7 +119,13 @@ impl fmt::Display for CleanupError {
 pub fn cleanup_prompt(request: &CleanupRequest) -> String {
     let mut prompt = prompt_preamble(&request.prompt_profile).to_string();
 
-    if let Some(ocr_text) = bounded_ocr_text(request.ocr_text.as_deref()) {
+    if let Some(supporting_context_text) =
+        bounded_supporting_context_text(request.supporting_context_text.as_deref())
+    {
+        prompt.push_str("Optional supporting context:\n");
+        prompt.push_str(&supporting_context_text);
+        prompt.push_str("\n");
+    } else if let Some(ocr_text) = bounded_ocr_text(request.ocr_text.as_deref()) {
         prompt.push_str("Optional OCR context:\n");
         prompt.push_str(&ocr_text);
         prompt.push_str("\n");
@@ -224,6 +231,15 @@ pub fn run_cleanup(request: &CleanupRequest) -> Result<CleanupResult, CleanupErr
         elapsed_ms: start.elapsed().as_millis() as u64,
         used_ocr: bounded_ocr_text(request.ocr_text.as_deref()).is_some(),
     })
+}
+
+fn bounded_supporting_context_text(supporting_context_text: Option<&str>) -> Option<String> {
+    let trimmed = supporting_context_text?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed.chars().take(CLEANUP_OCR_CONTEXT_LIMIT).collect())
 }
 
 fn bounded_ocr_text(ocr_text: Option<&str>) -> Option<String> {

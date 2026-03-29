@@ -6,6 +6,8 @@ pub const SCREENSHOT_BUS_NAME: &str = "org.gnome.Shell.Screenshot";
 pub const SCREENSHOT_OBJECT_PATH: &str = "/org/gnome/Shell/Screenshot";
 pub const SCREENSHOT_INTERFACE_NAME: &str = "org.gnome.Shell.Screenshot";
 pub const SCREENSHOT_METHOD_NAME: &str = "ScreenshotWindow";
+const INTROSPECTABLE_INTERFACE_NAME: &str = "org.freedesktop.DBus.Introspectable";
+const INTROSPECT_METHOD_NAME: &str = "Introspect";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenshotContractError {
@@ -116,6 +118,23 @@ pub fn screenshot_window(
         .map_err(|_| ScreenshotWindowError::InvalidReply)?;
 
     interpret_screenshot_reply(success, filename_used)
+}
+
+pub fn introspect_interface_xml(connection: &Connection) -> Result<String, ScreenshotWindowError> {
+    let reply = connection
+        .call_method(
+            Some(SCREENSHOT_BUS_NAME),
+            SCREENSHOT_OBJECT_PATH,
+            Some(INTROSPECTABLE_INTERFACE_NAME),
+            INTROSPECT_METHOD_NAME,
+            &(),
+        )
+        .map_err(classify_dbus_error)?;
+
+    reply
+        .body()
+        .deserialize::<String>()
+        .map_err(|_| ScreenshotWindowError::InvalidReply)
 }
 
 fn validated_png_path(path: &Path) -> Result<PathBuf, ScreenshotWindowError> {

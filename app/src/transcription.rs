@@ -12,6 +12,7 @@ use pepperx_platform_gnome::atspi::{
     insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
     FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME, UINPUT_TEXT_BACKEND_NAME,
 };
+use pepperx_platform_gnome::context::{capture_supporting_context, SupportingContext};
 
 use crate::history_store::{ArchiveWriteRequest, HistoryStore};
 use crate::settings::AppSettings;
@@ -119,16 +120,19 @@ pub fn transcribe_wav_and_cleanup_to_log(
     let settings = AppSettings::load_or_default();
     let prompt_profile = settings.cleanup_prompt_profile.clone();
     let cache_root = default_cache_root();
+    let supporting_context = capture_cleanup_context();
     let result = transcribe_wav_result(wav_path)?;
     archive_transcription_result_with_cleanup(
         result,
         Some(prompt_profile.clone()),
+        supporting_context.clone(),
         move |transcript_text| {
             let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
             run_cleanup(&CleanupRequest {
                 transcript_text: transcript_text.into(),
                 model_path,
-                ocr_text: None,
+                supporting_context_text: supporting_context.supporting_context_text.clone(),
+                ocr_text: supporting_context.ocr_text.clone(),
                 prompt_profile: prompt_profile.clone(),
             })
         },
@@ -161,16 +165,19 @@ pub fn transcribe_wav_and_cleanup_and_insert_friendly_to_log(
     let settings = AppSettings::load_or_default();
     let prompt_profile = settings.cleanup_prompt_profile.clone();
     let cache_root = default_cache_root();
+    let supporting_context = capture_cleanup_context();
     let result = transcribe_wav_result(wav_path)?;
     archive_transcription_result_with_cleanup_and_friendly_insert(
         result,
         Some(prompt_profile.clone()),
+        supporting_context.clone(),
         move |transcript_text| {
             let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
             run_cleanup(&CleanupRequest {
                 transcript_text: transcript_text.into(),
                 model_path,
-                ocr_text: None,
+                supporting_context_text: supporting_context.supporting_context_text.clone(),
+                ocr_text: supporting_context.ocr_text.clone(),
                 prompt_profile: prompt_profile.clone(),
             })
         },
@@ -351,26 +358,32 @@ pub(crate) fn archive_transcription_result(
 fn archive_transcription_result_with_cleanup<F>(
     result: TranscriptionResult,
     prompt_profile: Option<String>,
+    supporting_context: SupportingContext,
     cleanup: F,
 ) -> Result<TranscriptEntry, TranscriptionRunError>
 where
     F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
 {
-    archive_transcription_result_with_cleanup_context(result, prompt_profile, false, cleanup)
+    archive_transcription_result_with_cleanup_context(
+        result,
+        prompt_profile,
+        supporting_context,
+        cleanup,
+    )
 }
 
 fn archive_transcription_result_with_cleanup_context<F>(
     result: TranscriptionResult,
     prompt_profile: Option<String>,
-    used_ocr_context: bool,
+    supporting_context: SupportingContext,
     cleanup: F,
 ) -> Result<TranscriptEntry, TranscriptionRunError>
 where
     F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
 {
     let mut entry = transcript_entry_from_result(result);
-    record_cleanup(&mut entry, used_ocr_context, cleanup);
-    archive_transcript_entry_with_request(entry, prompt_profile)
+    record_cleanup(&mut entry, &supporting_context, cleanup);
+    archive_transcript_entry_with_request(entry, prompt_profile, Some(&supporting_context))
 }
 
 pub(crate) fn archive_transcription_result_with_friendly_insert<F>(
@@ -389,6 +402,7 @@ where
 fn archive_transcription_result_with_cleanup_and_friendly_insert<C, I>(
     result: TranscriptionResult,
     prompt_profile: Option<String>,
+    supporting_context: SupportingContext,
     cleanup: C,
     insert: I,
 ) -> Result<TranscriptEntry, TranscriptionRunError>
@@ -397,10 +411,11 @@ where
     I: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
 {
     let mut entry = transcript_entry_from_result(result);
-    record_cleanup(&mut entry, false, cleanup);
+    record_cleanup(&mut entry, &supporting_context, cleanup);
     let insert_text = entry.display_text().to_string();
     let insert_error = record_friendly_insert(&mut entry, &insert_text, insert).err();
-    let entry = archive_transcript_entry_with_request(entry, prompt_profile)?;
+    let entry =
+        archive_transcript_entry_with_request(entry, prompt_profile, Some(&supporting_context))?;
 
     match insert_error {
         Some(error) => Err(TranscriptionRunError::FriendlyInsert(error)),
@@ -421,20 +436,27 @@ fn transcript_entry_from_result(result: TranscriptionResult) -> TranscriptEntry 
 fn archive_transcript_entry(
     entry: TranscriptEntry,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
-    archive_transcript_entry_with_request(entry, None)
+    archive_transcript_entry_with_request(entry, None, None)
 }
 
 fn archive_transcript_entry_with_request(
     entry: TranscriptEntry,
     prompt_profile: Option<String>,
+    supporting_context: Option<&SupportingContext>,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
     let store = HistoryStore::open(state_root())?;
-    let request = match prompt_profile {
-        Some(prompt_profile) => {
-            ArchiveWriteRequest::new(entry.clone()).with_prompt_profile(prompt_profile)
+    let mut request = ArchiveWriteRequest::new(entry.clone());
+    if let Some(prompt_profile) = prompt_profile {
+        request = request.with_prompt_profile(prompt_profile);
+    }
+    if let Some(supporting_context) = supporting_context {
+        if let Some(supporting_context_text) = supporting_context.supporting_context_text.as_ref() {
+            request = request.with_supporting_context(supporting_context_text.clone());
         }
-        None => ArchiveWriteRequest::new(entry.clone()),
-    };
+        if let Some(ocr_text) = supporting_context.ocr_text.as_ref() {
+            request = request.with_ocr_text(ocr_text.clone());
+        }
+    }
     store.archive_run(&request)?;
     Ok(entry)
 }
@@ -521,13 +543,16 @@ fn configured_cleanup_model_path_with(
     }
 }
 
-fn record_cleanup<F>(entry: &mut TranscriptEntry, used_ocr_context: bool, cleanup: F)
-where
+fn record_cleanup<F>(
+    entry: &mut TranscriptEntry,
+    supporting_context: &SupportingContext,
+    cleanup: F,
+) where
     F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
 {
     entry.cleanup = Some(match cleanup(&entry.transcript_text) {
         Ok(result) => cleanup_diagnostics_from_result(result),
-        Err(error) => cleanup_diagnostics_from_error(&error, used_ocr_context),
+        Err(error) => cleanup_diagnostics_from_error(&error, supporting_context.used_ocr),
     });
 }
 
@@ -555,6 +580,16 @@ fn cleanup_diagnostics_from_error(
     );
     diagnostics.used_ocr = used_ocr_context;
     diagnostics
+}
+
+fn capture_cleanup_context() -> SupportingContext {
+    match capture_supporting_context() {
+        Ok(context) => context,
+        Err(error) => {
+            eprintln!("[Pepper X] failed to capture cleanup context: {error}");
+            SupportingContext::default()
+        }
+    }
 }
 
 fn record_friendly_insert<F>(
@@ -619,9 +654,11 @@ fn insertion_diagnostics_from_error(error: &FriendlyInsertRunError) -> Insertion
 #[cfg(test)]
 mod app_shell {
     use super::*;
+    use crate::history_store::HistoryStore;
     use crate::settings::AppSettings;
     use crate::transcript_log::{env_lock, TranscriptLog};
     use pepperx_cleanup::cleanup::{CleanupError, CleanupResult};
+    use pepperx_platform_gnome::context::SupportingContext;
 
     #[test]
     fn transcription_run_rejects_empty_model_dir_override() {
@@ -799,6 +836,7 @@ mod app_shell {
                 elapsed_ms: 42,
             },
             Some("ordinary-dictation".into()),
+            SupportingContext::default(),
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
@@ -856,6 +894,7 @@ mod app_shell {
                 elapsed_ms: 42,
             },
             Some("ordinary-dictation".into()),
+            SupportingContext::default(),
             |_| {
                 Err(CleanupError::MissingModelPath(PathBuf::from(
                     "/tmp/missing.gguf",
@@ -910,11 +949,13 @@ mod app_shell {
                 elapsed_ms: 42,
             },
             Some("ordinary-dictation".into()),
+            SupportingContext::default(),
             |transcript_text| {
                 let model_path = configured_cleanup_model_path()?;
                 run_cleanup(&CleanupRequest {
                     transcript_text: transcript_text.into(),
                     model_path,
+                    supporting_context_text: None,
                     ocr_text: None,
                     prompt_profile: "ordinary-dictation".into(),
                 })
@@ -977,6 +1018,7 @@ mod app_shell {
                 elapsed_ms: 42,
             },
             Some("ordinary-dictation".into()),
+            SupportingContext::default(),
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
@@ -1012,6 +1054,70 @@ mod app_shell {
     }
 
     #[test]
+    fn cleanup_ocr_runtime_archives_supporting_context_artifacts() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        let entry = archive_transcription_result_with_cleanup_context(
+            TranscriptionResult {
+                wav_path: PathBuf::from("/tmp/loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext {
+                supporting_context_text: Some("line before\nline after".into()),
+                ocr_text: Some("ocr fallback".into()),
+                used_ocr: true,
+            },
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: true,
+                })
+            },
+        )
+        .expect("archive cleanup entry");
+        let archived = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .recent_runs()
+            .expect("load archived runs")
+            .into_iter()
+            .next()
+            .expect("expected one archived run");
+
+        assert_eq!(entry.display_text(), "Hello from Pepper X.");
+        assert_eq!(
+            archived.supporting_context_text.as_deref(),
+            Some("line before\nline after")
+        );
+        assert_eq!(archived.ocr_text.as_deref(), Some("ocr fallback"));
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
     fn cleanup_ocr_runtime_archives_used_ocr_flag_on_cleanup_failure() {
         let _guard = env_lock().lock().unwrap();
         let state_root = std::env::temp_dir().join(format!(
@@ -1035,7 +1141,11 @@ mod app_shell {
                 elapsed_ms: 42,
             },
             Some("ordinary-dictation".into()),
-            true,
+            SupportingContext {
+                supporting_context_text: Some("line before\nline after".into()),
+                ocr_text: Some("ocr fallback".into()),
+                used_ocr: true,
+            },
             |_| {
                 Err(CleanupError::MissingModelPath(PathBuf::from(
                     "/tmp/missing.gguf",
@@ -1522,6 +1632,7 @@ mod app_shell {
                 elapsed_ms: 42,
             },
             Some("ordinary-dictation".into()),
+            SupportingContext::default(),
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
@@ -1604,6 +1715,7 @@ mod app_shell {
                 elapsed_ms: 42,
             },
             Some("ordinary-dictation".into()),
+            SupportingContext::default(),
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
