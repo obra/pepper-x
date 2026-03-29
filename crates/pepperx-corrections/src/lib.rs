@@ -22,25 +22,33 @@ mod tests {
     }
 
     #[test]
-    fn correction_applies_exact_preferred_transcription_override() {
+    fn correction_store_formats_preferred_transcriptions_as_prompt_memory() {
         let mut store = CorrectionStore::new(temp_root("preferred-override"));
         store.set_preferred_transcription("um i guess", "I guess");
         store.add_replacement_rule("guess", "think");
 
-        let corrected = store.apply("um i guess");
+        let prompt_memory = store
+            .prompt_memory_text()
+            .expect("prompt memory should be present");
 
-        assert_eq!(corrected, "I guess");
+        assert!(prompt_memory.contains("Preferred transcript examples:"));
+        assert!(prompt_memory.contains("- raw: um i guess"));
+        assert!(prompt_memory.contains("  preferred: I guess"));
     }
 
     #[test]
-    fn correction_applies_deterministic_replacements_after_cleanup() {
+    fn correction_store_formats_replacement_rules_as_prompt_memory() {
         let mut store = CorrectionStore::new(temp_root("deterministic-replacements"));
         store.add_replacement_rule("pepper", "Pepper");
         store.add_replacement_rule("pepper x", "Pepper X");
 
-        let corrected = store.apply("pepper x and pepper");
+        let prompt_memory = store
+            .prompt_memory_text()
+            .expect("prompt memory should be present");
 
-        assert_eq!(corrected, "Pepper X and Pepper");
+        assert!(prompt_memory.contains("Preferred replacements:"));
+        assert!(prompt_memory.contains("- pepper x => Pepper X"));
+        assert!(prompt_memory.contains("- pepper => Pepper"));
     }
 
     #[test]
@@ -53,8 +61,13 @@ mod tests {
 
         let reloaded = CorrectionStore::load(root).unwrap();
 
-        assert_eq!(reloaded.apply("uh turn on mic"), "Turn on the mic");
-        assert_eq!(reloaded.apply("the mic is live"), "the microphone is live");
+        let prompt_memory = reloaded
+            .prompt_memory_text()
+            .expect("prompt memory should be present");
+
+        assert!(prompt_memory.contains("- raw: uh turn on mic"));
+        assert!(prompt_memory.contains("  preferred: Turn on the mic"));
+        assert!(prompt_memory.contains("- mic => microphone"));
     }
 
     #[test]

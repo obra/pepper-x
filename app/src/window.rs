@@ -205,11 +205,11 @@ pub(crate) fn history_summary_text(runs: &[ArchivedRun]) -> String {
 
         if let Some(learning) = entry.learning.as_ref() {
             let action_label = match learning.action.as_str() {
-                "preferred-transcription" => "preferred transcription",
+                "prompt-memory" => "Correction memory updated",
                 action => action,
             };
             summary.push_str(&format!(
-                "\nPost-paste learning: {action_label}\n{} -> {}",
+                "\n{action_label}\n{} -> {}",
                 learning.source_text, learning.replacement_text
             ));
         }
@@ -395,7 +395,7 @@ mod app_shell {
     }
 
     #[test]
-    fn post_paste_learning_history_summary_shows_latest_learning_action() {
+    fn correction_memory_history_summary_shows_latest_learning_action() {
         let mut entry = TranscriptEntry::new(
             "/tmp/loop5.wav",
             "hello from pepper x",
@@ -403,14 +403,14 @@ mod app_shell {
             "nemo-parakeet-tdt-0.6b-v2-int8",
             Duration::from_millis(21),
         );
-        entry.learning = Some(LearningDiagnostics::preferred_transcription(
+        entry.learning = Some(LearningDiagnostics::prompt_memory(
             "hello from pepper x",
             "Hello from Pepper X.",
         ));
 
         let summary = history_summary_text(&[archived_run(entry)]);
 
-        assert!(summary.contains("Post-paste learning: preferred transcription"));
+        assert!(summary.contains("Correction memory updated"));
         assert!(summary.contains("hello from pepper x -> Hello from Pepper X."));
     }
 }

@@ -60,7 +60,7 @@ This includes:
 - local speech transcription
 - local cleanup with model selection
 - OCR-assisted cleanup context
-- deterministic corrections
+- prompt-side correction memory
 - conservative post-paste learning
 - history browser
 - reruns with alternate models and prompts
@@ -149,7 +149,7 @@ Responsibilities:
 - cleanup model catalog
 - prompt assembly
 - OCR-informed prompt context
-- deterministic correction passes
+- correction-memory prompt input
 - fallback behavior when models are unavailable or unusable
 
 The Ghost Pepper concepts of `Very fast`, `Fast`, and `Full` are worth preserving if they still benchmark well on Linux.
@@ -181,7 +181,7 @@ Responsibilities:
 - persistent preferred transcriptions
 - persistent commonly-misheard replacements
 - conservative post-paste learning
-- deterministic application of user-owned vocabulary and corrections
+- prompt-side correction memory for future cleanup runs
 
 ### History/lab subsystem
 
@@ -228,7 +228,7 @@ Cleanup should be based on `llama.cpp`, with the same product concepts Ghost Pep
 - prompt editing
 - cleanup model selection
 - OCR-assisted cleanup
-- deterministic corrections
+- correction memory folded into the cleanup prompt
 
 ### OCR
 
@@ -297,7 +297,7 @@ Pepper X needs more than unit tests because the risky seams are desktop integrat
 - cleanup pipeline and prompt assembly
 - model catalog and runtime state
 - history serialization
-- correction and learning logic
+- correction-memory and learning logic
 
 ### Integration tests
 
@@ -356,7 +356,7 @@ Includes:
 - `llama.cpp` cleanup runtime
 - cleanup prompt pipeline
 - OCR context
-- deterministic correction store
+- prompt-side correction memory store
 - post-paste learning
 
 ### 4. History, reruns, and diagnostics

@@ -76,43 +76,32 @@ impl CorrectionStore {
             .insert(source.into(), replacement.into());
     }
 
-    pub fn apply(&self, input: &str) -> String {
-        if let Some(preferred) = self.preferred_transcriptions.get(input) {
-            return preferred.clone();
+    pub fn prompt_memory_text(&self) -> Option<String> {
+        if self.preferred_transcriptions.is_empty() && self.replacement_rules.is_empty() {
+            return None;
         }
 
-        let mut rules: Vec<_> = self.replacement_rules.iter().collect();
-        rules.sort_by(|left, right| {
-            right
-                .0
-                .len()
-                .cmp(&left.0.len())
-                .then_with(|| left.0.cmp(right.0))
-        });
+        let mut lines = Vec::new();
 
-        let mut output = String::with_capacity(input.len());
-        let mut index = 0;
-
-        while index < input.len() {
-            let mut matched_rule = None;
-
-            for (source, replacement) in &rules {
-                if input[index..].starts_with(source.as_str()) {
-                    matched_rule = Some((source.as_str(), replacement.as_str()));
-                    output.push_str(replacement);
-                    index += source.len();
-                    break;
-                }
-            }
-
-            if matched_rule.is_none() {
-                let current = input[index..].chars().next().expect("valid utf-8 boundary");
-                output.push(current);
-                index += current.len_utf8();
+        if !self.preferred_transcriptions.is_empty() {
+            lines.push(String::from("Preferred transcript examples:"));
+            for (source, replacement) in &self.preferred_transcriptions {
+                lines.push(format!("- raw: {source}"));
+                lines.push(format!("  preferred: {replacement}"));
             }
         }
 
-        output
+        if !self.replacement_rules.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(String::from("Preferred replacements:"));
+            for (source, replacement) in &self.replacement_rules {
+                lines.push(format!("- {source} => {replacement}"));
+            }
+        }
+
+        Some(lines.join("\n"))
     }
 
     pub fn persist(&self) -> io::Result<()> {

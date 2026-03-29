@@ -18,6 +18,7 @@ mod cleanup_runtime {
             model_path: PathBuf::from("/tmp/pepper-x-missing.gguf"),
             supporting_context_text: None,
             ocr_text: None,
+            correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         })
         .unwrap_err();
@@ -35,6 +36,7 @@ mod cleanup_runtime {
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             supporting_context_text: None,
             ocr_text: None,
+            correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         };
 
@@ -48,6 +50,7 @@ mod cleanup_runtime {
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             supporting_context_text: None,
             ocr_text: None,
+            correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         });
         let literal_prompt = cleanup_prompt(&CleanupRequest {
@@ -55,6 +58,7 @@ mod cleanup_runtime {
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             supporting_context_text: None,
             ocr_text: None,
+            correction_memory_text: None,
             prompt_profile: "literal-dictation".into(),
         });
 
@@ -69,6 +73,7 @@ mod cleanup_runtime {
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             supporting_context_text: None,
             ocr_text: None,
+            correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         });
 
@@ -83,6 +88,7 @@ mod cleanup_runtime {
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             supporting_context_text: None,
             ocr_text: Some(oversized_ocr.clone()),
+            correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         });
 
@@ -100,11 +106,29 @@ mod cleanup_runtime {
             model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             supporting_context_text: Some("line before\nline after".into()),
             ocr_text: None,
+            correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         });
 
         assert!(prompt.contains("Optional supporting context:\nline before\nline after"));
         assert!(!prompt.contains("Optional OCR context:"));
+    }
+
+    #[test]
+    fn cleanup_runtime_prompt_includes_correction_memory_when_present() {
+        let prompt = cleanup_prompt(&CleanupRequest {
+            transcript_text: "hello from pepper x".into(),
+            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
+            supporting_context_text: None,
+            ocr_text: None,
+            correction_memory_text: Some(
+                "When the raw transcript is `pepper x`, prefer `Pepper X`.".into(),
+            ),
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+        });
+
+        assert!(prompt.contains("Saved correction memory:\n"));
+        assert!(prompt.contains("When the raw transcript is `pepper x`, prefer `Pepper X`."));
     }
 
     #[test]
@@ -119,6 +143,7 @@ mod cleanup_runtime {
             model_path,
             supporting_context_text: None,
             ocr_text: None,
+            correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
         })
         .expect("real cleanup run should succeed");

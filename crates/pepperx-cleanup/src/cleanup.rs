@@ -10,6 +10,7 @@ pub const LITERAL_DICTATION_PROMPT_PROFILE: &str = "literal-dictation";
 const CLEANUP_MAX_TOKENS: usize = 128;
 const CLEANUP_OUTPUT_LIMIT: usize = 512;
 const CLEANUP_OCR_CONTEXT_LIMIT: usize = 512;
+const CLEANUP_CORRECTION_MEMORY_LIMIT: usize = 2048;
 const CLEANUP_SESSION_CTX: u32 = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +19,7 @@ pub struct CleanupRequest {
     pub model_path: PathBuf,
     pub supporting_context_text: Option<String>,
     pub ocr_text: Option<String>,
+    pub correction_memory_text: Option<String>,
     pub prompt_profile: String,
 }
 
@@ -118,6 +120,14 @@ impl fmt::Display for CleanupError {
 
 pub fn cleanup_prompt(request: &CleanupRequest) -> String {
     let mut prompt = prompt_preamble(&request.prompt_profile).to_string();
+
+    if let Some(correction_memory_text) =
+        bounded_correction_memory_text(request.correction_memory_text.as_deref())
+    {
+        prompt.push_str("Saved correction memory:\n");
+        prompt.push_str(&correction_memory_text);
+        prompt.push_str("\n");
+    }
 
     if let Some(supporting_context_text) =
         bounded_supporting_context_text(request.supporting_context_text.as_deref())
@@ -240,6 +250,20 @@ fn bounded_supporting_context_text(supporting_context_text: Option<&str>) -> Opt
     }
 
     Some(trimmed.chars().take(CLEANUP_OCR_CONTEXT_LIMIT).collect())
+}
+
+fn bounded_correction_memory_text(correction_memory_text: Option<&str>) -> Option<String> {
+    let trimmed = correction_memory_text?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(
+        trimmed
+            .chars()
+            .take(CLEANUP_CORRECTION_MEMORY_LIMIT)
+            .collect(),
+    )
 }
 
 fn bounded_ocr_text(ocr_text: Option<&str>) -> Option<String> {

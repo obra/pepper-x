@@ -19,7 +19,7 @@ pub fn learn_correction(
         return None;
     }
 
-    // Only learn phrase-level normalization when the underlying words stay the same.
+    // Only learn phrase-level normalization into prompt memory when the underlying words stay the same.
     // Broader rewrites stay out of the automatic path until Pepper X has explicit review.
     if normalized_tokens(source) != normalized_tokens(replacement) {
         return None;

@@ -130,11 +130,13 @@ pub fn transcribe_wav_and_cleanup_to_log(
         supporting_context.clone(),
         move |transcript_text| {
             let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
+            let correction_memory_text = load_correction_store().prompt_memory_text();
             run_cleanup(&CleanupRequest {
                 transcript_text: transcript_text.into(),
                 model_path,
                 supporting_context_text: supporting_context.supporting_context_text.clone(),
                 ocr_text: supporting_context.ocr_text.clone(),
+                correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
             })
         },
@@ -175,11 +177,13 @@ pub fn transcribe_wav_and_cleanup_and_insert_friendly_to_log(
         supporting_context.clone(),
         move |transcript_text| {
             let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
+            let correction_memory_text = load_correction_store().prompt_memory_text();
             run_cleanup(&CleanupRequest {
                 transcript_text: transcript_text.into(),
                 model_path,
                 supporting_context_text: supporting_context.supporting_context_text.clone(),
                 ocr_text: supporting_context.ocr_text.clone(),
+                correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
             })
         },
@@ -553,20 +557,9 @@ fn record_cleanup<F>(
     F: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
 {
     entry.cleanup = Some(match cleanup(&entry.transcript_text) {
-        Ok(result) => {
-            let correction_store = load_correction_store();
-            cleanup_diagnostics_from_result(apply_cleanup_corrections(result, &correction_store))
-        }
+        Ok(result) => cleanup_diagnostics_from_result(result),
         Err(error) => cleanup_diagnostics_from_error(&error, supporting_context.used_ocr),
     });
-}
-
-fn apply_cleanup_corrections(
-    mut result: CleanupResult,
-    correction_store: &CorrectionStore,
-) -> CleanupResult {
-    result.cleaned_text = correction_store.apply(&result.cleaned_text);
-    result
 }
 
 fn cleanup_diagnostics_from_result(result: CleanupResult) -> CleanupDiagnostics {
@@ -627,7 +620,7 @@ where
     match insert(insert_text) {
         Ok(outcome) => {
             entry.insertion = Some(insertion_diagnostics_from_outcome(outcome));
-            entry.learning = learning_diagnostics(entry, insert_text);
+            entry.learning = persist_prompt_memory_update(entry, insert_text);
             Ok(())
         }
         Err(error) => {
@@ -638,10 +631,25 @@ where
     }
 }
 
-fn learning_diagnostics(entry: &TranscriptEntry, insert_text: &str) -> Option<LearningDiagnostics> {
-    learn_correction(&entry.transcript_text, insert_text, true).map(|learned| {
-        LearningDiagnostics::preferred_transcription(learned.source, learned.replacement)
-    })
+fn persist_prompt_memory_update(
+    entry: &TranscriptEntry,
+    insert_text: &str,
+) -> Option<LearningDiagnostics> {
+    let learned = learn_correction(&entry.transcript_text, insert_text, true)?;
+    let mut correction_store = load_correction_store();
+    correction_store.set_preferred_transcription(&learned.source, &learned.replacement);
+    if let Err(error) = correction_store.persist() {
+        eprintln!(
+            "[Pepper X] failed to persist correction memory {}: {error}",
+            corrections_store_path().display()
+        );
+        return None;
+    }
+
+    Some(LearningDiagnostics::prompt_memory(
+        learned.source,
+        learned.replacement,
+    ))
 }
 
 fn insertion_diagnostics_from_outcome(outcome: FriendlyInsertOutcome) -> InsertionDiagnostics {
@@ -990,6 +998,7 @@ mod app_shell {
                     model_path,
                     supporting_context_text: None,
                     ocr_text: None,
+                    correction_memory_text: None,
                     prompt_profile: "ordinary-dictation".into(),
                 })
             },
@@ -1151,7 +1160,7 @@ mod app_shell {
     }
 
     #[test]
-    fn cleanup_corrections_runtime_applies_exact_preferred_transcription_override() {
+    fn cleanup_corrections_runtime_does_not_rewrite_cleanup_output() {
         let _guard = env_lock().lock().unwrap();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-corrections-preferred-{}-{}",
@@ -1192,13 +1201,13 @@ mod app_shell {
         )
         .expect("archive corrected cleanup entry");
 
-        assert_eq!(entry.display_text(), "Hello from Pepper X.");
+        assert_eq!(entry.display_text(), "hello from pepper x");
         assert_eq!(
             entry
                 .cleanup
                 .as_ref()
                 .and_then(|cleanup| cleanup.cleaned_text()),
-            Some("Hello from Pepper X.")
+            Some("hello from pepper x")
         );
 
         match previous_state_root {
@@ -1211,7 +1220,7 @@ mod app_shell {
     }
 
     #[test]
-    fn cleanup_corrections_runtime_applies_deterministic_replacements_after_cleanup() {
+    fn cleanup_corrections_runtime_keeps_phrase_replacement_memory_out_of_current_output() {
         let _guard = env_lock().lock().unwrap();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-corrections-replacements-{}-{}",
@@ -1253,13 +1262,13 @@ mod app_shell {
         )
         .expect("archive corrected cleanup entry");
 
-        assert_eq!(entry.display_text(), "Pepper X and Pepper");
+        assert_eq!(entry.display_text(), "pepper x and pepper");
         assert_eq!(
             entry
                 .cleanup
                 .as_ref()
                 .and_then(|cleanup| cleanup.cleaned_text()),
-            Some("Pepper X and Pepper")
+            Some("pepper x and pepper")
         );
 
         match previous_state_root {
@@ -1926,7 +1935,7 @@ mod app_shell {
     }
 
     #[test]
-    fn post_paste_learning_archives_successful_preferred_transcription_suggestion() {
+    fn post_paste_learning_persists_prompt_memory_for_future_cleanup() {
         let _guard = env_lock().lock().unwrap();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-post-paste-learning-success-{}-{}",
@@ -1977,27 +1986,31 @@ mod app_shell {
         )
         .expect("archive cleanup plus insert entry");
 
+        let correction_store =
+            CorrectionStore::load(state_root.join("corrections")).expect("load correction store");
+        let prompt_memory = correction_store
+            .prompt_memory_text()
+            .expect("prompt memory should be present");
+
         assert_eq!(
             entry.learning,
-            Some(
-                crate::transcript_log::LearningDiagnostics::preferred_transcription(
-                    "hello from pepper x",
-                    "Hello from Pepper X."
-                )
-            )
+            Some(crate::transcript_log::LearningDiagnostics::prompt_memory(
+                "hello from pepper x",
+                "Hello from Pepper X."
+            ))
         );
+        assert!(prompt_memory.contains("- raw: hello from pepper x"));
+        assert!(prompt_memory.contains("  preferred: Hello from Pepper X."));
         assert_eq!(
             TranscriptLog::open(&state_root)
                 .expect("open transcript log")
                 .recent_entries()
                 .expect("load transcript log")[0]
                 .learning,
-            Some(
-                crate::transcript_log::LearningDiagnostics::preferred_transcription(
-                    "hello from pepper x",
-                    "Hello from Pepper X."
-                )
-            )
+            Some(crate::transcript_log::LearningDiagnostics::prompt_memory(
+                "hello from pepper x",
+                "Hello from Pepper X."
+            ))
         );
 
         match previous_state_root {
@@ -2070,7 +2083,7 @@ mod app_shell {
     }
 
     #[test]
-    fn post_paste_learning_rejects_destructive_cleanup_rewrites() {
+    fn post_paste_learning_rejects_destructive_prompt_memory_updates() {
         let _guard = env_lock().lock().unwrap();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-post-paste-learning-destructive-{}-{}",

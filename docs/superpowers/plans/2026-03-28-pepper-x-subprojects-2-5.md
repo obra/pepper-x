@@ -4,7 +4,7 @@
 
 **Goal:** Finish Pepper X's remaining V1 product work after the shell/GNOME foundation by adding live audio/runtime behavior, cleanup/OCR/corrections, first-class history and reruns, and real packaging/operational polish.
 
-**Architecture:** Keep the app as the product coordinator and reuse the existing loop-1 through loop-5 seams instead of replacing them. Add focused runtime crates only where the boundary is real and testable: live audio capture, model catalog/cache management, archive/history browsing, and deterministic corrections. Keep GNOME-facing capture and context acquisition Linux-native: PipeWire-backed live audio, AT-SPI text context first, and GNOME Shell screenshot D-Bus with local Tesseract only as the OCR fallback. The GNOME platform crate stays thin and GNOME-facing; model/runtime/history ownership remains in the app and focused Rust crates.
+**Architecture:** Keep the app as the product coordinator and reuse the existing loop-1 through loop-5 seams instead of replacing them. Add focused runtime crates only where the boundary is real and testable: live audio capture, model catalog/cache management, archive/history browsing, and prompt-side correction memory. Keep GNOME-facing capture and context acquisition Linux-native: PipeWire-backed live audio, AT-SPI text context first, and GNOME Shell screenshot D-Bus with local Tesseract only as the OCR fallback. The GNOME platform crate stays thin and GNOME-facing; model/runtime/history ownership remains in the app and focused Rust crates.
 
 **Tech Stack:** Rust, Cargo workspace, GTK4, libadwaita, PipeWire Rust bindings, `sherpa-onnx`, Parakeet NeMo models, `llama.cpp`, GNOME Shell screenshot D-Bus, local Tesseract OCR, AT-SPI, D-Bus, `.deb`/`.rpm` packaging
 
@@ -44,7 +44,7 @@
 - `crates/pepperx-models/src/download.rs`
   - Download/bootstrap support for supported model bundles.
 - `crates/pepperx-corrections/Cargo.toml`
-  - Persistent deterministic correction store.
+  - Persistent prompt-memory correction store.
 - `crates/pepperx-corrections/src/lib.rs`
   - Public correction and learning API.
 - `crates/pepperx-corrections/src/store.rs`
@@ -449,7 +449,7 @@ git add crates/pepperx-platform-gnome/src/context.rs crates/pepperx-platform-gno
 git commit -m "Add Pepper X cleanup context capture"
 ```
 
-### Task 8: Add deterministic corrections and preferred transcriptions
+### Task 8: Add prompt-side correction memory and preferred transcriptions
 
 **Files:**
 - Create: `crates/pepperx-corrections/Cargo.toml`
@@ -463,22 +463,22 @@ git commit -m "Add Pepper X cleanup context capture"
 - Test: `crates/pepperx-corrections/src/lib.rs`
 - Test: `app/src/transcription.rs`
 
-- [ ] **Step 1: Write failing corrections tests**
+- [ ] **Step 1: Write failing correction-memory tests**
 
 Add tests for:
-- applying an exact preferred-transcription override
-- applying deterministic replacement rules after cleanup
+- formatting preferred transcriptions as cleanup prompt memory
+- formatting replacement rules as cleanup prompt memory
 - persisting and reloading the correction store
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
 Run: `cargo test -p pepperx-corrections correction_ -- --nocapture`
 Run: `cargo test -p pepper-x-app cleanup_corrections_ -- --nocapture`
-Expected: FAIL because there is no correction store yet.
+Expected: FAIL because there is no correction-memory store yet.
 
-- [ ] **Step 3: Implement the smallest deterministic correction layer**
+- [ ] **Step 3: Implement the smallest prompt-memory correction layer**
 
-Apply user-owned corrections after cleanup and before insertion. Keep matching deterministic and auditable.
+Load user-owned correction memory into the cleanup prompt instead of rewriting current output. Keep the stored data auditable and append-only.
 
 - [ ] **Step 4: Re-run the targeted tests**
 
@@ -490,7 +490,7 @@ Expected: PASS
 
 ```bash
 git add Cargo.toml app/Cargo.toml crates/pepperx-corrections app/src/transcription.rs app/src/settings.rs
-git commit -m "Add Pepper X deterministic corrections"
+git commit -m "Add Pepper X prompt-side correction memory"
 ```
 
 ### Task 9: Add conservative post-paste learning
@@ -508,7 +508,7 @@ git commit -m "Add Pepper X deterministic corrections"
 Add tests for:
 - learning only from successful insertions
 - rejecting low-confidence or destructive learning updates
-- recording the learning action in archived diagnostics
+- recording the prompt-memory update in archived diagnostics
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
@@ -518,7 +518,7 @@ Expected: FAIL because learning behavior does not exist yet.
 
 - [ ] **Step 3: Implement the smallest conservative learning path**
 
-Keep the first version append-only and auditable. Do not mutate existing correction rules implicitly.
+Keep the first version append-only and auditable. Persist learned preferred transcriptions as future cleanup prompt memory instead of rewriting current output.
 
 - [ ] **Step 4: Re-run the targeted tests**
 
