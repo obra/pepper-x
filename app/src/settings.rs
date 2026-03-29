@@ -54,4 +54,30 @@ mod tests {
 
         assert_eq!(restored.preferred_microphone, settings.preferred_microphone);
     }
+
+    #[test]
+    fn settings_serialize_preferred_microphone_with_explicit_shape() {
+        let settings = AppSettings {
+            preferred_microphone: Some(SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            )),
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_value(&settings).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "launch_at_login": false,
+                "enable_gnome_extension_integration": true,
+                "preferred_recording_trigger_mode": "modifier-only",
+                "preferred_microphone": {
+                    "stable_id": "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                    "display_name": "Blue Yeti"
+                }
+            })
+        );
+    }
 }

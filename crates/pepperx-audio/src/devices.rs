@@ -2,8 +2,43 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use serde_json::{Map, Value};
+
 #[cfg(target_os = "linux")]
-use cpal::traits::DeviceTrait;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
+
+#[cfg(target_os = "linux")]
+use pipewire as pw;
+
+#[cfg(any(test, target_os = "linux"))]
+trait PipeWirePropertySource {
+    fn property_string(&self, key: &str) -> Option<String>;
+}
+
+#[cfg(test)]
+impl PipeWirePropertySource for Map<String, Value> {
+    fn property_string(&self, key: &str) -> Option<String> {
+        match self.get(key) {
+            Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+            Some(Value::Bool(value)) => Some(value.to_string()),
+            Some(Value::Number(value)) => Some(value.to_string()),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl PipeWirePropertySource for pw::spa::utils::dict::DictRef {
+    fn property_string(&self, key: &str) -> Option<String> {
+        self.get(key)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MicrophoneDevice {
@@ -78,11 +113,15 @@ pub struct DeviceEnumerationError {
 }
 
 impl DeviceEnumerationError {
-    #[cfg(target_os = "linux")]
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn unsupported_platform() -> Self {
+        Self::new("microphone enumeration is only supported on linux")
     }
 }
 
@@ -97,59 +136,239 @@ impl std::error::Error for DeviceEnumerationError {}
 pub fn enumerate_microphones() -> Result<MicrophoneInventory, DeviceEnumerationError> {
     #[cfg(target_os = "linux")]
     {
-        enumerate_linux_microphones()
+        return enumerate_linux_microphones();
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        Ok(MicrophoneInventory::default())
+        Err(DeviceEnumerationError::unsupported_platform())
     }
 }
 
 #[cfg(target_os = "linux")]
 fn enumerate_linux_microphones() -> Result<MicrophoneInventory, DeviceEnumerationError> {
-    let host = cpal::default_host();
-    let devices = host.input_devices().map_err(|error| {
-        DeviceEnumerationError::new(format!("failed to enumerate microphones: {error}"))
+    pw::init();
+
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|error| {
+        DeviceEnumerationError::new(format!("failed to create PipeWire main loop: {error}"))
+    })?;
+    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|error| {
+        DeviceEnumerationError::new(format!("failed to create PipeWire context: {error}"))
+    })?;
+    let core = context.connect_rc(None).map_err(|error| {
+        DeviceEnumerationError::new(format!("failed to connect to PipeWire: {error}"))
+    })?;
+    let registry = core.get_registry().map_err(|error| {
+        DeviceEnumerationError::new(format!("failed to get PipeWire registry: {error}"))
     })?;
 
-    let microphones = devices
-        .enumerate()
-        .map(|(index, device)| microphone_from_device(host.id().name(), index, device))
-        .collect::<Result<Vec<_>, _>>()?;
+    let microphones = Rc::new(RefCell::new(Vec::new()));
+    let enumeration_error = Rc::new(RefCell::new(None::<DeviceEnumerationError>));
+    let done = Rc::new(Cell::new(false));
+
+    let registry_microphones = Rc::clone(&microphones);
+    let registry_error = Rc::clone(&enumeration_error);
+    let registry_loop = mainloop.clone();
+    let _registry_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            if global.type_.to_str() != "PipeWire:Interface:Node" {
+                return;
+            }
+
+            let Some(properties) = global.props else {
+                return;
+            };
+
+            match microphone_from_pipewire_dict(properties) {
+                Ok(Some(device)) => registry_microphones.borrow_mut().push(device),
+                Ok(None) => {}
+                Err(error) => {
+                    if registry_error.borrow().is_none() {
+                        *registry_error.borrow_mut() = Some(error);
+                    }
+                    registry_loop.quit();
+                }
+            }
+        })
+        .register();
+
+    let pending = core.sync(0).map_err(|error| {
+        DeviceEnumerationError::new(format!("failed to sync PipeWire: {error}"))
+    })?;
+
+    let done_flag = Rc::clone(&done);
+    let core_loop = mainloop.clone();
+    let _core_listener = core
+        .add_listener_local()
+        .done(move |id, sequence| {
+            if id == pw::core::PW_ID_CORE && sequence == pending {
+                done_flag.set(true);
+                core_loop.quit();
+            }
+        })
+        .register();
+
+    while !done.get() && enumeration_error.borrow().is_none() {
+        mainloop.run();
+    }
+
+    if let Some(error) = enumeration_error.borrow_mut().take() {
+        return Err(error);
+    }
+
+    let mut microphones = microphones.borrow().clone();
+    microphones.sort_by(|left, right| {
+        left.display_name()
+            .cmp(right.display_name())
+            .then_with(|| left.stable_id().cmp(right.stable_id()))
+    });
+    microphones.dedup_by(|left, right| left.stable_id() == right.stable_id());
 
     Ok(MicrophoneInventory::from_devices(microphones))
 }
 
-#[cfg(target_os = "linux")]
-fn microphone_from_device(
-    host_name: &str,
-    index: usize,
-    device: cpal::Device,
-) -> Result<MicrophoneDevice, DeviceEnumerationError> {
-    let display_name = device.name().map_err(|error| {
-        DeviceEnumerationError::new(format!("failed to read microphone name: {error}"))
-    })?;
+#[cfg(test)]
+fn inventory_from_pipewire_objects(
+    objects: &[Value],
+) -> Result<MicrophoneInventory, DeviceEnumerationError> {
+    let mut microphones = Vec::new();
 
-    Ok(MicrophoneDevice::new(
-        format!("{host_name}:{}:{index}", slugify(&display_name)),
-        display_name,
-    ))
-}
-
-#[cfg(target_os = "linux")]
-fn slugify(value: &str) -> String {
-    let mut slug = String::with_capacity(value.len());
-
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-        } else if !slug.ends_with('-') {
-            slug.push('-');
+    for object in objects {
+        if let Some(device) = microphone_from_pipewire_object(object)? {
+            microphones.push(device);
         }
     }
 
-    slug.trim_matches('-').to_string()
+    Ok(MicrophoneInventory::from_devices(microphones))
+}
+
+#[cfg(test)]
+fn microphone_from_pipewire_object(
+    object: &Value,
+) -> Result<Option<MicrophoneDevice>, DeviceEnumerationError> {
+    if object.get("type").and_then(Value::as_str) != Some("PipeWire:Interface:Node") {
+        return Ok(None);
+    }
+
+    let Some(properties) = object
+        .get("info")
+        .and_then(|info| info.get("props"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(None);
+    };
+
+    microphone_from_pipewire_properties(properties)
+}
+
+#[cfg(test)]
+fn microphone_from_pipewire_properties(
+    properties: &Map<String, Value>,
+) -> Result<Option<MicrophoneDevice>, DeviceEnumerationError> {
+    microphone_from_pipewire_source(properties)
+}
+
+#[cfg(target_os = "linux")]
+fn microphone_from_pipewire_dict(
+    properties: &pw::spa::utils::dict::DictRef,
+) -> Result<Option<MicrophoneDevice>, DeviceEnumerationError> {
+    microphone_from_pipewire_source(properties)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn microphone_from_pipewire_source(
+    properties: &impl PipeWirePropertySource,
+) -> Result<Option<MicrophoneDevice>, DeviceEnumerationError> {
+    if properties.property_string("media.class").as_deref() != Some("Audio/Source") {
+        return Ok(None);
+    }
+
+    if properties.property_string("node.virtual").as_deref() == Some("true") {
+        return Ok(None);
+    }
+
+    let node_name = properties.property_string("node.name");
+
+    if node_name
+        .as_deref()
+        .is_some_and(|name| name.contains(".monitor"))
+    {
+        return Ok(None);
+    }
+
+    let stable_id = stable_pipewire_id(properties, node_name.as_deref())?;
+    let display_name = properties
+        .property_string("node.description")
+        .or_else(|| properties.property_string("node.nick"))
+        .or(node_name)
+        .ok_or_else(|| {
+            DeviceEnumerationError::new(
+                "failed to read microphone display name from PipeWire properties",
+            )
+        })?;
+
+    Ok(Some(MicrophoneDevice::new(stable_id, display_name)))
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn stable_pipewire_id(
+    properties: &impl PipeWirePropertySource,
+    node_name: Option<&str>,
+) -> Result<String, DeviceEnumerationError> {
+    if let Some(object_path) = properties.property_string("object.path") {
+        return Ok(format!("pipewire:object.path={object_path}"));
+    }
+
+    if let Some(node_name) = node_name {
+        return Ok(format!("pipewire:node.name={node_name}"));
+    }
+
+    Err(DeviceEnumerationError::new(
+        "failed to derive a stable microphone identifier from PipeWire properties",
+    ))
+}
+
+#[cfg(test)]
+fn microphone_from_pipewire_node(
+    properties: &[(&str, &str)],
+) -> Result<Option<MicrophoneDevice>, DeviceEnumerationError> {
+    microphone_from_pipewire_properties(&test_pipewire_properties(properties))
+}
+
+#[cfg(test)]
+fn inventory_from_pipewire_test_nodes(
+    nodes: &[&[(&str, &str)]],
+) -> Result<MicrophoneInventory, DeviceEnumerationError> {
+    let objects = nodes
+        .iter()
+        .map(|properties| {
+            let mut object = Map::new();
+            let mut info = Map::new();
+
+            object.insert(
+                "type".into(),
+                Value::String("PipeWire:Interface:Node".into()),
+            );
+            info.insert(
+                "props".into(),
+                Value::Object(test_pipewire_properties(properties)),
+            );
+            object.insert("info".into(), Value::Object(info));
+
+            Value::Object(object)
+        })
+        .collect::<Vec<_>>();
+
+    inventory_from_pipewire_objects(&objects)
+}
+
+#[cfg(test)]
+fn test_pipewire_properties(properties: &[(&str, &str)]) -> Map<String, Value> {
+    properties
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), Value::String((*value).to_string())))
+        .collect()
 }
 
 #[cfg(test)]
@@ -177,5 +396,123 @@ mod tests {
         let inventory = MicrophoneInventory::from_devices(Vec::new());
 
         assert!(inventory.devices().is_empty());
+    }
+
+    #[test]
+    fn selected_microphone_serializes_with_only_stable_id_and_display_name() {
+        let microphone = SelectedMicrophone::new(
+            "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+            "Blue Yeti",
+        );
+
+        let json = serde_json::to_value(&microphone).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "stable_id": "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "display_name": "Blue Yeti"
+            })
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn device_enumerator_reports_unsupported_platform_instead_of_empty_inventory() {
+        let error = enumerate_microphones().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "microphone enumeration is only supported on linux"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn device_enumerator_does_not_require_pw_dump_binary() {
+        const CHILD_ENV: &str = "PEPPERX_AUDIO_TEST_WITHOUT_PW_DUMP";
+        const TEST_NAME: &str = "devices::tests::device_enumerator_does_not_require_pw_dump_binary";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            if let Err(error) = enumerate_microphones() {
+                assert!(
+                    !error.to_string().contains("pw-dump"),
+                    "expected PipeWire enumeration without pw-dump shelling, got: {error}"
+                );
+            }
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .env(CHILD_ENV, "1")
+            .env("PATH", "/definitely-missing-pepperx-tools")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn pipewire_node_ids_do_not_depend_on_enumeration_order() {
+        let first = microphone_from_pipewire_node(&[
+            ("node.name", "alsa_input.usb-blue-yeti-00.analog-stereo"),
+            ("node.description", "Blue Yeti"),
+            ("media.class", "Audio/Source"),
+        ])
+        .unwrap()
+        .unwrap();
+        let second = microphone_from_pipewire_node(&[
+            ("node.name", "alsa_input.usb-blue-yeti-00.analog-stereo"),
+            ("node.description", "Blue Yeti"),
+            ("media.class", "Audio/Source"),
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            first.stable_id(),
+            "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo"
+        );
+        assert_eq!(second.stable_id(), first.stable_id());
+    }
+
+    #[test]
+    fn pipewire_inventory_filters_out_non_microphone_nodes() {
+        let inventory = inventory_from_pipewire_test_nodes(&[
+            &[
+                ("node.name", "alsa_input.usb-blue-yeti-00.analog-stereo"),
+                ("node.description", "Blue Yeti"),
+                ("media.class", "Audio/Source"),
+            ],
+            &[
+                (
+                    "node.name",
+                    "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor",
+                ),
+                ("node.description", "Monitor of Built-in Audio"),
+                ("media.class", "Audio/Sink"),
+            ],
+            &[
+                ("node.name", "loopback.capture"),
+                ("node.description", "Loopback"),
+                ("media.class", "Stream/Input/Audio"),
+            ],
+        ])
+        .unwrap();
+
+        assert_eq!(
+            inventory.devices(),
+            &[MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            )]
+        );
     }
 }
