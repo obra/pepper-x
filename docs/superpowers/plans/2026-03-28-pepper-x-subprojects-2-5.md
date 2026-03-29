@@ -4,9 +4,9 @@
 
 **Goal:** Finish Pepper X's remaining V1 product work after the shell/GNOME foundation by adding live audio/runtime behavior, cleanup/OCR/corrections, first-class history and reruns, and real packaging/operational polish.
 
-**Architecture:** Keep the app as the product coordinator and reuse the existing loop-1 through loop-5 seams instead of replacing them. Add focused runtime crates only where the boundary is real and testable: live audio capture, model catalog/cache management, OCR acquisition, and archive/history browsing. The GNOME platform crate stays thin and GNOME-facing; model/runtime/history ownership remains in the app and focused Rust crates.
+**Architecture:** Keep the app as the product coordinator and reuse the existing loop-1 through loop-5 seams instead of replacing them. Add focused runtime crates only where the boundary is real and testable: live audio capture, model catalog/cache management, archive/history browsing, and deterministic corrections. Keep GNOME-facing capture and context acquisition Linux-native: PipeWire-backed live audio, AT-SPI text context first, and GNOME Shell screenshot D-Bus with local Tesseract only as the OCR fallback. The GNOME platform crate stays thin and GNOME-facing; model/runtime/history ownership remains in the app and focused Rust crates.
 
-**Tech Stack:** Rust, Cargo workspace, GTK4, libadwaita, GStreamer-backed live audio capture, `sherpa-onnx`, Parakeet NeMo models, `llama.cpp`, GNOME Shell screenshot D-Bus, local OCR, AT-SPI, D-Bus, `.deb`/`.rpm` packaging
+**Tech Stack:** Rust, Cargo workspace, GTK4, libadwaita, PipeWire Rust bindings, `sherpa-onnx`, Parakeet NeMo models, `llama.cpp`, GNOME Shell screenshot D-Bus, local Tesseract OCR, AT-SPI, D-Bus, `.deb`/`.rpm` packaging
 
 ---
 
@@ -43,14 +43,6 @@
   - Cache root discovery, installed model inventory, readiness status.
 - `crates/pepperx-models/src/download.rs`
   - Download/bootstrap support for supported model bundles.
-- `crates/pepperx-ocr/Cargo.toml`
-  - GNOME screenshot + local OCR dependencies.
-- `crates/pepperx-ocr/src/lib.rs`
-  - Public OCR/context API.
-- `crates/pepperx-ocr/src/gnome_screenshot.rs`
-  - Frontmost-window or focused-screen capture via GNOME-friendly D-Bus.
-- `crates/pepperx-ocr/src/recognize.rs`
-  - OCR extraction and bounded context shaping.
 - `crates/pepperx-corrections/Cargo.toml`
   - Persistent deterministic correction store.
 - `crates/pepperx-corrections/src/lib.rs`
@@ -88,7 +80,11 @@
 - `crates/pepperx-platform-gnome/src/service.rs`
   - Hold-to-talk IPC routing into the runtime coordinator.
 - `crates/pepperx-platform-gnome/src/atspi.rs`
-  - Modifier capture and focused-app insertion only.
+  - Modifier capture, focused-app insertion, and text-context extraction.
+- `crates/pepperx-platform-gnome/src/context.rs`
+  - GNOME-friendly supporting-context acquisition: AT-SPI text first, screenshot fallback second.
+- `crates/pepperx-platform-gnome/src/screenshot.rs`
+  - Focused-window capture through `org.gnome.Shell.Screenshot`.
 - `gnome-extension/`
   - Thin extension remains shell-facing only.
 
@@ -272,7 +268,7 @@ Expected: FAIL because live recording is not implemented.
 
 - [ ] **Step 3: Implement the smallest live recording runtime**
 
-Record mono PCM into a deterministic temporary WAV file suitable for the existing `sherpa-onnx` path. Keep the runtime single-session and synchronous at the app boundary.
+Record mono PCM from PipeWire into a deterministic temporary WAV file suitable for the existing `sherpa-onnx` path. Keep the runtime single-session and synchronous at the app boundary.
 
 - [ ] **Step 4: Re-run the targeted tests**
 
@@ -377,43 +373,42 @@ git commit -m "Add Pepper X model readiness and bootstrap flows"
 
 ## Chunk 3: Subproject 3 Cleanup, OCR, and Corrections
 
-### Task 7: Add GNOME-friendly OCR capture and bounded cleanup context
+### Task 7: Add GNOME-friendly supporting context and bounded cleanup input
 
 **Files:**
-- Create: `crates/pepperx-ocr/Cargo.toml`
-- Create: `crates/pepperx-ocr/src/lib.rs`
-- Create: `crates/pepperx-ocr/src/gnome_screenshot.rs`
-- Create: `crates/pepperx-ocr/src/recognize.rs`
-- Modify: `Cargo.toml`
-- Modify: `app/Cargo.toml`
+- Create: `crates/pepperx-platform-gnome/src/context.rs`
+- Create: `crates/pepperx-platform-gnome/src/screenshot.rs`
+- Modify: `crates/pepperx-platform-gnome/src/lib.rs`
 - Modify: `app/src/transcription.rs`
-- Test: `crates/pepperx-ocr/src/lib.rs`
+- Test: `crates/pepperx-platform-gnome/src/context.rs`
 - Test: `app/src/transcription.rs`
 - Test: `tests/smoke/test_ocr_cleanup.sh`
 
-- [ ] **Step 1: Write failing OCR tests**
+- [ ] **Step 1: Write failing context tests**
 
 Add tests for:
-- acquiring OCR text from a provided image fixture
-- bounding OCR context before it reaches cleanup
-- recording `used_ocr` only when OCR text actually contributed
+- preferring AT-SPI text context when the focused target exposes it
+- falling back to screenshot-backed OCR when AT-SPI text is unavailable
+- bounding supporting context before it reaches cleanup
+- recording `used_ocr` only when screenshot OCR actually contributed
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
-Run: `cargo test -p pepperx-ocr ocr_ -- --nocapture`
+Run: `cargo test -p pepperx-platform-gnome context_ -- --nocapture`
 Run: `cargo test -p pepper-x-app cleanup_ocr_ -- --nocapture`
-Expected: FAIL because OCR is currently only a shape in the cleanup request.
+Expected: FAIL because supporting context is currently only a shape in the cleanup request.
 
-- [ ] **Step 3: Implement the smallest OCR path**
+- [ ] **Step 3: Implement the smallest supporting-context path**
 
 Add:
-- GNOME screenshot capture for the relevant surface
-- local OCR extraction
+- AT-SPI text context around the focused caret when available
+- GNOME Shell focused-window capture as the fallback
+- local Tesseract OCR only for the screenshot fallback
 - bounded OCR text fed into the existing cleanup runtime
 
 - [ ] **Step 4: Re-run the targeted tests and smoke**
 
-Run: `cargo test -p pepperx-ocr ocr_ -- --nocapture`
+Run: `cargo test -p pepperx-platform-gnome context_ -- --nocapture`
 Run: `cargo test -p pepper-x-app cleanup_ocr_ -- --nocapture`
 Run: `tests/smoke/test_ocr_cleanup.sh`
 Expected: PASS
@@ -421,8 +416,8 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Cargo.toml app/Cargo.toml crates/pepperx-ocr app/src/transcription.rs tests/smoke/test_ocr_cleanup.sh
-git commit -m "Add Pepper X OCR-assisted cleanup context"
+git add crates/pepperx-platform-gnome/src/context.rs crates/pepperx-platform-gnome/src/screenshot.rs crates/pepperx-platform-gnome/src/lib.rs app/src/transcription.rs tests/smoke/test_ocr_cleanup.sh
+git commit -m "Add Pepper X cleanup context capture"
 ```
 
 ### Task 8: Add deterministic corrections and preferred transcriptions
