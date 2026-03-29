@@ -491,9 +491,9 @@ mod cli_mode {
             "--rerun-archived-run".to_string(),
             "run-123".to_string(),
             "--asr-model".to_string(),
-            "nemo-parakeet-tdt-1.1b".to_string(),
+            "nemo-parakeet-tdt-0.6b-v3-int8".to_string(),
             "--cleanup-model".to_string(),
-            "qwen2.5-1.5b".to_string(),
+            "qwen2.5-1.5b-instruct-q4_k_m.gguf".to_string(),
             "--cleanup-prompt-profile".to_string(),
             "literal-dictation".to_string(),
         ])
@@ -503,8 +503,8 @@ mod cli_mode {
             command,
             StartupMode::RerunArchivedRun {
                 run_id: "run-123".into(),
-                asr_model_id: Some("nemo-parakeet-tdt-1.1b".into()),
-                cleanup_model_id: Some("qwen2.5-1.5b".into()),
+                asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             }
         );
@@ -607,7 +607,7 @@ mod cli_mode {
             &wav_path,
             "hello from rerun pepper x",
             "sherpa-onnx",
-            "nemo-parakeet-tdt-1.1b",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
             Duration::from_millis(41),
         );
         let mut observed_request = None;
@@ -615,8 +615,8 @@ mod cli_mode {
         let result = run_with(
             StartupMode::RerunArchivedRun {
                 run_id: "run-123".into(),
-                asr_model_id: Some("nemo-parakeet-tdt-1.1b".into()),
-                cleanup_model_id: Some("qwen2.5-1.5b".into()),
+                asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             },
             || unreachable!(),
@@ -635,8 +635,8 @@ mod cli_mode {
             observed_request,
             Some(ArchivedRunRerunRequest {
                 run_id: "run-123".into(),
-                asr_model_id: Some("nemo-parakeet-tdt-1.1b".into()),
-                cleanup_model_id: Some("qwen2.5-1.5b".into()),
+                asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             })
         );

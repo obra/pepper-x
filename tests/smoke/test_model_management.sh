@@ -10,7 +10,9 @@ if ! command -v cargo >/dev/null 2>&1 && [[ -f "${HOME}/.cargo/env" ]]; then
 fi
 
 asr_model_id="nemo-parakeet-tdt-0.6b-v2-int8"
+alternate_asr_model_id="nemo-parakeet-tdt-0.6b-v3-int8"
 cleanup_model_id="qwen2.5-3b-instruct-q4_k_m.gguf"
+alternate_cleanup_model_id="qwen2.5-1.5b-instruct-q4_k_m.gguf"
 offline_mode=0
 
 if [[ "${1:-}" == "--offline" ]]; then
@@ -28,24 +30,6 @@ if [[ -z "${XDG_CACHE_HOME:-}" ]]; then
 fi
 
 mkdir -p "${PEPPERX_STATE_ROOT}" "${XDG_CACHE_HOME}"
-
-if ! command -v pkg-config >/dev/null 2>&1 || ! command -v nm >/dev/null 2>&1; then
-    echo "pkg-config and nm are required for the Pepper X model-management smoke" >&2
-    exit 1
-fi
-
-atspi_libdir="$(pkg-config --variable=libdir atspi-2 2>/dev/null || true)"
-atspi_lib="${atspi_libdir}/libatspi.so"
-
-if [[ -z "${atspi_libdir}" || ! -f "${atspi_lib}" ]]; then
-    echo "Pepper X model-management smoke requires libatspi development files" >&2
-    exit 1
-fi
-
-if ! nm -D "${atspi_lib}" | grep -q 'atspi_device_a11y_manager_try_new_full'; then
-    echo "Pepper X model-management smoke requires GNOME 48+ AT-SPI libraries (missing atspi_device_a11y_manager_try_new_full)" >&2
-    exit 1
-fi
 
 run_cli() {
     PEPPERX_STATE_ROOT="${PEPPERX_STATE_ROOT}" \
@@ -68,6 +52,8 @@ assert_contains "${status_before}" "Model cache: ${XDG_CACHE_HOME}/pepper-x/mode
 assert_contains "${status_before}" "Default ASR model: ${asr_model_id}"
 assert_contains "${status_before}" "Default cleanup model: ${cleanup_model_id}"
 assert_contains "${status_before}" "Cleanup prompt profile: ordinary-dictation"
+assert_contains "${status_before}" "- ${alternate_asr_model_id} [asr]"
+assert_contains "${status_before}" "- ${alternate_cleanup_model_id} [cleanup]"
 
 run_cli --set-default-asr-model "${asr_model_id}" >/dev/null
 run_cli --set-default-cleanup-model "${cleanup_model_id}" >/dev/null
@@ -102,5 +88,10 @@ fi
 status_after="$(run_cli --list-models)"
 assert_contains "${status_after}" "Default ASR model: ${asr_model_id}"
 assert_contains "${status_after}" "Default cleanup model: ${cleanup_model_id}"
-assert_contains "${status_after}" "- ${asr_model_id} [asr] ready"
-assert_contains "${status_after}" "- ${cleanup_model_id} [cleanup] ready"
+assert_contains "${status_after}" "- ${alternate_asr_model_id} [asr]"
+assert_contains "${status_after}" "- ${alternate_cleanup_model_id} [cleanup]"
+
+if [[ "${offline_mode}" -eq 0 ]]; then
+    assert_contains "${status_after}" "- ${asr_model_id} [asr] ready"
+    assert_contains "${status_after}" "- ${cleanup_model_id} [cleanup] ready"
+fi

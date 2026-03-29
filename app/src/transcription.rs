@@ -1070,10 +1070,10 @@ mod app_shell {
         let previous_model_dir = std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR");
         std::fs::create_dir_all(&override_path).unwrap();
         std::env::set_var("PEPPERX_PARAKEET_MODEL_DIR", &override_path);
-        let expected_path = materialize_ready_model(&cache_root, "nemo-parakeet-tdt-0.6b-v2-int8");
+        let expected_path = materialize_ready_model(&cache_root, "nemo-parakeet-tdt-0.6b-v3-int8");
 
         let configured_path = configured_requested_model_dir_for_model_id_with(
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
             &cache_root,
         )
         .expect("explicit rerun ASR model should resolve from the catalog cache");
@@ -1104,10 +1104,11 @@ mod app_shell {
         std::fs::create_dir_all(&cache_root).unwrap();
         std::fs::write(&override_path, b"override-model").unwrap();
         std::env::set_var("PEPPERX_CLEANUP_MODEL_PATH", &override_path);
-        let expected_path = materialize_ready_model(&cache_root, "qwen2.5-3b-instruct-q4_k_m.gguf");
+        let expected_path =
+            materialize_ready_model(&cache_root, "qwen2.5-1.5b-instruct-q4_k_m.gguf");
 
         let configured_path = configured_requested_cleanup_model_path_for_model_id_with(
-            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "qwen2.5-1.5b-instruct-q4_k_m.gguf",
             &cache_root,
         )
         .expect("explicit rerun cleanup model should resolve from the catalog cache");
@@ -2605,8 +2606,8 @@ mod app_shell {
         let entry = rerun_archived_run_with(
             ArchivedRunRerunRequest {
                 run_id: original_run.run_id.clone(),
-                asr_model_id: Some("nemo-parakeet-tdt-1.1b".into()),
-                cleanup_model_id: Some("qwen2.5-1.5b".into()),
+                asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             },
             |wav_path: &Path, model_id: &str| {
@@ -2649,10 +2650,13 @@ mod app_shell {
                     .archived_source_wav_path
                     .clone()
                     .expect("archived source wav path"),
-                "nemo-parakeet-tdt-1.1b".into()
+                "nemo-parakeet-tdt-0.6b-v3-int8".into()
             ))
         );
-        assert_eq!(observed_cleanup_model.as_deref(), Some("qwen2.5-1.5b"));
+        assert_eq!(
+            observed_cleanup_model.as_deref(),
+            Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+        );
         assert_eq!(cleanup_request.prompt_profile, "literal-dictation");
         assert_eq!(
             cleanup_request.supporting_context_text.as_deref(),
@@ -2668,14 +2672,14 @@ mod app_shell {
             Some(original_run.run_id.as_str())
         );
         assert_eq!(rerun.prompt_profile.as_deref(), Some("literal-dictation"));
-        assert_eq!(rerun.entry.model_name, "nemo-parakeet-tdt-1.1b");
+        assert_eq!(rerun.entry.model_name, "nemo-parakeet-tdt-0.6b-v3-int8");
         assert_eq!(
             rerun
                 .entry
                 .cleanup
                 .as_ref()
                 .map(|cleanup| cleanup.model_name.as_str()),
-            Some("qwen2.5-1.5b")
+            Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
         );
 
         match previous_state_root {

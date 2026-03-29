@@ -93,7 +93,10 @@ if [[ -z "${rerun_output//[[:space:]]/}" ]]; then
     exit 1
 fi
 
-python3 - "${history_root}" "${parent_run_id}" "${rerun_output}" <<'PY'
+expected_rerun_asr_model="${PEPPERX_RERUN_ASR_MODEL:-}"
+expected_rerun_cleanup_model="${PEPPERX_RERUN_CLEANUP_MODEL:-}"
+
+python3 - "${history_root}" "${parent_run_id}" "${rerun_output}" "${expected_rerun_asr_model}" "${expected_rerun_cleanup_model}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -101,6 +104,8 @@ from pathlib import Path
 history_root = Path(sys.argv[1])
 parent_run_id = sys.argv[2]
 stdout_rerun = sys.argv[3].strip()
+expected_asr_model = sys.argv[4] or None
+expected_cleanup_model = sys.argv[5] or None
 
 metadata_payloads = [
     json.loads(path.read_text())
@@ -135,6 +140,14 @@ if parent.get("prompt_profile") != "ordinary-dictation":
 if child.get("prompt_profile") != "literal-dictation":
     raise SystemExit(f"Child prompt profile did not capture the rerun override: {child}")
 
+if expected_asr_model is None:
+    expected_asr_model = parent["entry"]["model_name"]
+if child["entry"]["model_name"] != expected_asr_model:
+    raise SystemExit(
+        "Child rerun did not capture the expected ASR model override: "
+        f"{child['entry']['model_name']!r} != {expected_asr_model!r}"
+    )
+
 parent_archived_wav = Path(parent["archived_source_wav_path"])
 child_entry_wav = Path(child["entry"]["source_wav_path"])
 if child_entry_wav != parent_archived_wav:
@@ -153,6 +166,13 @@ if child_archived_wav.read_bytes() != parent_archived_wav.read_bytes():
 cleanup = child["entry"].get("cleanup")
 if not cleanup or cleanup.get("succeeded") is not True:
     raise SystemExit(f"Child rerun is missing successful cleanup diagnostics: {child}")
+
+expected_cleanup_model = expected_cleanup_model or parent["entry"]["cleanup"]["model_name"]
+if cleanup.get("model_name") != expected_cleanup_model:
+    raise SystemExit(
+        "Child rerun did not capture the expected cleanup model override: "
+        f"{cleanup.get('model_name')!r} != {expected_cleanup_model!r}"
+    )
 
 if stdout_rerun != cleanup.get("cleaned_text", "").strip():
     raise SystemExit(

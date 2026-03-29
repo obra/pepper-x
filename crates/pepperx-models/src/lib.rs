@@ -51,7 +51,13 @@ mod tests {
             model.id == "nemo-parakeet-tdt-0.6b-v2-int8" && model.kind == ModelKind::Asr
         }));
         assert!(models.iter().any(|model| {
+            model.id == "nemo-parakeet-tdt-0.6b-v3-int8" && model.kind == ModelKind::Asr
+        }));
+        assert!(models.iter().any(|model| {
             model.id == "qwen2.5-3b-instruct-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
+        }));
+        assert!(models.iter().any(|model| {
+            model.id == "qwen2.5-1.5b-instruct-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
         }));
     }
 

@@ -615,8 +615,9 @@ mod history_view_tests {
         );
         rerun.parent_run_id = Some(parent.run_id.clone());
         rerun.prompt_profile = Some("literal-dictation".into());
-        rerun.entry.model_name = "nemo-parakeet-tdt-1.1b".into();
-        rerun.entry.cleanup.as_mut().expect("cleanup").model_name = "qwen2.5-1.5b".into();
+        rerun.entry.model_name = "nemo-parakeet-tdt-0.6b-v3-int8".into();
+        rerun.entry.cleanup.as_mut().expect("cleanup").model_name =
+            "qwen2.5-1.5b-instruct-q4_k_m.gguf".into();
 
         let model = HistoryBrowserModel::new(vec![parent, rerun]);
         let details = model
@@ -625,9 +626,9 @@ mod history_view_tests {
 
         assert!(details.contains("Original raw transcript:\nhello from pepper x"));
         assert!(details.contains("Rerun raw transcript:\nhello from pepper ex"));
-        assert!(
-            details.contains("ASR model: nemo-parakeet-tdt-0.6b-v2-int8 -> nemo-parakeet-tdt-1.1b")
-        );
+        assert!(details.contains(
+            "ASR model: nemo-parakeet-tdt-0.6b-v2-int8 -> nemo-parakeet-tdt-0.6b-v3-int8"
+        ));
         assert!(details.contains("Cleanup prompt profile: ordinary-dictation -> literal-dictation"));
     }
 
