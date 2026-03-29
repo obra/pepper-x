@@ -6,6 +6,9 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[path = "context.rs"]
+pub(crate) mod context;
+
 const CONTROL_LEFT_KEYSYM: u32 = 65_507;
 const CONTROL_RIGHT_KEYSYM: u32 = 65_508;
 const V_KEYSYM: u32 = b'v' as u32;
@@ -38,6 +41,29 @@ impl FriendlyInsertBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FriendlyInsertPolicy {
     pub target_application_id: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FocusedTargetSnapshot {
+    pub application_id: String,
+    pub application_name: String,
+    pub target_class: &'static str,
+    pub is_editable: bool,
+    pub supports_text: bool,
+    pub supports_editable_text: bool,
+    pub supports_caret: bool,
+    pub before_text: Option<String>,
+    pub caret_offset: Option<i32>,
+}
+
+impl FocusedTargetSnapshot {
+    #[allow(dead_code)]
+    pub(crate) fn supporting_context_text(&self, max_chars: usize) -> Option<String> {
+        let before_text = self.before_text.as_deref()?;
+        let caret_offset = self.caret_offset?;
+
+        supporting_context_excerpt(before_text, caret_offset, max_chars)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +266,30 @@ fn friendly_insert_target_class_name(target_class: FriendlyInsertTargetClass) ->
         FriendlyInsertTargetClass::Hostile => "hostile",
         FriendlyInsertTargetClass::Unsupported => "unsupported",
     }
+}
+
+#[allow(dead_code)]
+fn supporting_context_excerpt(
+    before_text: &str,
+    caret_offset: i32,
+    max_chars: usize,
+) -> Option<String> {
+    let max_chars = max_chars.max(1);
+    let caret_offset = usize::try_from(caret_offset).ok()?;
+    let total_chars = before_text.chars().count();
+
+    if total_chars == 0 {
+        return Some(String::new());
+    }
+
+    let caret_offset = caret_offset.min(total_chars);
+    let start = caret_offset.saturating_sub(max_chars / 2);
+    let end = (start + max_chars).min(total_chars);
+    let start = end.saturating_sub(max_chars).min(start);
+    let start_byte = byte_index_for_char_offset(before_text, start)?;
+    let end_byte = byte_index_for_char_offset(before_text, end).unwrap_or(before_text.len());
+
+    Some(before_text[start_byte..end_byte].to_string())
 }
 
 #[derive(Debug)]
@@ -844,6 +894,99 @@ fn focused_friendly_target(
     policy: &FriendlyInsertPolicy,
 ) -> Result<FocusedFriendlyTarget, FriendlyInsertRunError> {
     let focused = unsafe { find_focused_accessible()? };
+    let snapshot = inspect_focused_target_from_accessible(&focused)?;
+    let target = FriendlyFocusedTarget {
+        application_id: snapshot.application_id.clone(),
+        is_editable: snapshot.is_editable,
+        supports_text: snapshot.supports_text,
+        supports_editable_text: snapshot.supports_editable_text,
+        supports_caret: snapshot.supports_caret,
+    };
+    let target_class = snapshot.target_class;
+    let selection = select_friendly_insert_backend(&target, policy).map_err(|error| {
+        FriendlyInsertRunError::UnsupportedTarget(
+            error.with_target_application_name(snapshot.application_name.clone()),
+        )
+    })?;
+    ensure_runtime_supported_backend(&selection, &snapshot.application_name)?;
+    if matches!(
+        selection.backend_name,
+        STRING_INJECTION_BACKEND_NAME | CLIPBOARD_PASTE_BACKEND_NAME
+    ) {
+        return Ok(FocusedFriendlyTarget {
+            selection,
+            application_name: snapshot.application_name,
+            target_class,
+            text: None,
+            editable_text: None,
+            before_text: None,
+            caret_offset: None,
+        });
+    }
+
+    let before_text = snapshot.before_text.ok_or_else(|| {
+        with_selected_backend_failure(
+            &selection,
+            &snapshot.application_name,
+            FriendlyInsertRunError::Access(
+                "friendly insertion target is missing Text support".into(),
+            ),
+        )
+    })?;
+    let caret_offset = snapshot.caret_offset.ok_or_else(|| {
+        with_selected_backend_failure(
+            &selection,
+            &snapshot.application_name,
+            FriendlyInsertRunError::Access(
+                "friendly insertion target is missing a caret surface".into(),
+            ),
+        )
+    })?;
+    let text = unsafe { OwnedGObject::new(ffi::atspi_accessible_get_text_iface(focused.as_ptr())) };
+    let text = text.ok_or_else(|| {
+        with_selected_backend_failure(
+            &selection,
+            &snapshot.application_name,
+            FriendlyInsertRunError::Access(
+                "friendly insertion target is missing Text support".into(),
+            ),
+        )
+    })?;
+    let editable_text = unsafe {
+        OwnedGObject::new(ffi::atspi_accessible_get_editable_text_iface(
+            focused.as_ptr(),
+        ))
+    };
+    let editable_text = editable_text.ok_or_else(|| {
+        with_selected_backend_failure(
+            &selection,
+            &snapshot.application_name,
+            FriendlyInsertRunError::Access(
+                "friendly insertion target is missing EditableText support".into(),
+            ),
+        )
+    })?;
+
+    Ok(FocusedFriendlyTarget {
+        selection,
+        application_name: snapshot.application_name,
+        target_class,
+        text: Some(text),
+        editable_text: Some(editable_text),
+        before_text: Some(before_text),
+        caret_offset: Some(caret_offset),
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn inspect_focused_target() -> Result<FocusedTargetSnapshot, FriendlyInsertRunError> {
+    let focused = unsafe { find_focused_accessible()? };
+    inspect_focused_target_from_accessible(&focused)
+}
+
+fn inspect_focused_target_from_accessible(
+    focused: &OwnedGObject<ffi::AtspiAccessible>,
+) -> Result<FocusedTargetSnapshot, FriendlyInsertRunError> {
     let application = unsafe { accessible_application(focused.as_ptr())? };
     let application_name = unsafe { accessible_name(application.as_ptr())? };
     let application_id = unsafe { friendly_application_id_from_process_id(focused.as_ptr())? };
@@ -858,75 +1001,34 @@ fn focused_friendly_target(
             focused.as_ptr(),
         ))
     };
+    let supports_text = text.is_some();
+    let supports_editable_text = editable_text.is_some();
     let caret_offset = match actual_target_class {
         FriendlyInsertTargetClass::TextEditor | FriendlyInsertTargetClass::BrowserTextarea => {
             match text.as_ref() {
-                Some(text) => unsafe { text_caret_offset(text.as_ptr())? },
-                None => -1,
+                Some(text) => Some(unsafe { text_caret_offset(text.as_ptr())? }),
+                None => None,
             }
         }
         FriendlyInsertTargetClass::Terminal
         | FriendlyInsertTargetClass::Hostile
-        | FriendlyInsertTargetClass::Unsupported => -1,
+        | FriendlyInsertTargetClass::Unsupported => None,
     };
-    let target = FriendlyFocusedTarget {
+    let before_text = match text.as_ref() {
+        Some(text) => Some(unsafe { text_contents(text.as_ptr())? }),
+        None => None,
+    };
+
+    Ok(FocusedTargetSnapshot {
         application_id,
-        is_editable,
-        supports_text: text.is_some(),
-        supports_editable_text: editable_text.is_some(),
-        supports_caret: caret_offset >= 0,
-    };
-    let target_class = friendly_insert_target_class_name(actual_target_class);
-    let selection = select_friendly_insert_backend(&target, policy).map_err(|error| {
-        FriendlyInsertRunError::UnsupportedTarget(
-            error.with_target_application_name(application_name.clone()),
-        )
-    })?;
-    ensure_runtime_supported_backend(&selection, &application_name)?;
-    if matches!(
-        selection.backend_name,
-        STRING_INJECTION_BACKEND_NAME | CLIPBOARD_PASTE_BACKEND_NAME
-    ) {
-        return Ok(FocusedFriendlyTarget {
-            selection,
-            application_name,
-            target_class,
-            text: None,
-            editable_text: None,
-            before_text: None,
-            caret_offset: None,
-        });
-    }
-
-    let text = text.ok_or_else(|| {
-        with_selected_backend_failure(
-            &selection,
-            &application_name,
-            FriendlyInsertRunError::Access(
-                "friendly insertion target is missing Text support".into(),
-            ),
-        )
-    })?;
-    let editable_text = editable_text.ok_or_else(|| {
-        with_selected_backend_failure(
-            &selection,
-            &application_name,
-            FriendlyInsertRunError::Access(
-                "friendly insertion target is missing EditableText support".into(),
-            ),
-        )
-    })?;
-    let before_text = unsafe { text_contents(text.as_ptr()) }
-        .map_err(|error| with_selected_backend_failure(&selection, &application_name, error))?;
-
-    Ok(FocusedFriendlyTarget {
-        selection,
         application_name,
-        target_class,
-        text: Some(text),
-        editable_text: Some(editable_text),
-        before_text: Some(before_text),
-        caret_offset: Some(caret_offset),
+        target_class: friendly_insert_target_class_name(actual_target_class),
+        is_editable,
+        supports_text,
+        supports_editable_text,
+        supports_caret: caret_offset.is_some(),
+        before_text,
+        caret_offset,
     })
 }
 
@@ -1713,6 +1815,45 @@ mod accessible_insert_validation {
                 CLIPBOARD_PASTE_BACKEND_NAME,
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod focused_target_snapshot {
+    use super::*;
+
+    #[test]
+    fn focused_target_snapshot_bounds_context_around_caret() {
+        let snapshot = FocusedTargetSnapshot {
+            application_id: "org.gnome.TextEditor".into(),
+            application_name: "Text Editor".into(),
+            target_class: "text-editor",
+            is_editable: true,
+            supports_text: true,
+            supports_editable_text: true,
+            supports_caret: true,
+            before_text: Some("abcdefghi".into()),
+            caret_offset: Some(4),
+        };
+
+        assert_eq!(snapshot.supporting_context_text(4).as_deref(), Some("cdef"));
+    }
+
+    #[test]
+    fn focused_target_snapshot_returns_none_without_text_or_caret() {
+        let snapshot = FocusedTargetSnapshot {
+            application_id: "org.gnome.TextEditor".into(),
+            application_name: "Text Editor".into(),
+            target_class: "text-editor",
+            is_editable: true,
+            supports_text: false,
+            supports_editable_text: false,
+            supports_caret: false,
+            before_text: None,
+            caret_offset: None,
+        };
+
+        assert_eq!(snapshot.supporting_context_text(4), None);
     }
 }
 
