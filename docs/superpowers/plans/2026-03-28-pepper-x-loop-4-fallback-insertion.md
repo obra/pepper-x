@@ -17,6 +17,7 @@
 **Files:**
 - Modify: `crates/pepperx-platform-gnome/src/atspi.rs`
 - Modify: `app/src/transcript_log.rs`
+- Modify: `app/src/transcription.rs`
 
 - [ ] **Step 1: Write the failing fallback-selection tests**
 
@@ -38,6 +39,7 @@ Run:
 cd pepper-x
 cargo test -p pepperx-platform-gnome fallback_insert_ -- --nocapture
 cargo test -p pepper-x-app transcript_log -- --nocapture
+cargo test -p pepper-x-app app_shell -- --nocapture
 ```
 
 Expected:
@@ -63,7 +65,7 @@ Expected:
 
 ```bash
 git -C pepper-x status --short
-git -C pepper-x add crates/pepperx-platform-gnome/src/atspi.rs app/src/transcript_log.rs
+git -C pepper-x add crates/pepperx-platform-gnome/src/atspi.rs app/src/transcript_log.rs app/src/transcription.rs
 git -C pepper-x commit -m "Model Pepper X insertion fallback selection"
 ```
 
@@ -199,6 +201,7 @@ Run:
 ```sh
 cd pepper-x
 cargo test -p pepper-x-app uinput_insert_ -- --nocapture
+cargo check -p pepperx-uinput-helper
 ```
 
 Expected:
@@ -218,10 +221,10 @@ The helper must:
 
 - [ ] **Step 4: Re-run the targeted `uinput` tests**
 
-Run the command from Step 2.
+Run the commands from Step 2.
 
 Expected:
-- the helper-backed fallback tests pass
+- the helper-backed fallback tests pass and the helper crate builds cleanly
 
 - [ ] **Step 5: Commit**
 
@@ -272,14 +275,16 @@ Run:
 ```sh
 cd pepper-x
 cargo fmt --check
+cargo test -p pepperx-platform-gnome accessible_insert_ -- --nocapture
 cargo test -p pepperx-platform-gnome fallback_insert_ -- --nocapture
 cargo test -p pepperx-platform-gnome clipboard_insert_ -- --nocapture
 cargo test -p pepper-x-app app_shell -- --nocapture
 cargo test -p pepper-x-app uinput_insert_ -- --nocapture
+cargo check -p pepperx-uinput-helper
 ```
 
 Expected:
-- the loop-4 targeted tests pass
+- the loop-4 targeted tests pass and the loop-3 semantic insertion targets still stay green
 
 - [ ] **Step 2: Run workspace validation**
 
