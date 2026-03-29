@@ -106,7 +106,7 @@ impl MainWindow {
 pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
     if let Some(latest) = entries.first() {
         let mut summary = format!(
-            "Latest transcript:\n{}\n\nSource WAV: {}\nBackend: {}\nModel: {}\nElapsed: {} ms\nArchived entries: {}",
+            "Raw transcript:\n{}\n\nSource WAV: {}\nBackend: {}\nModel: {}\nElapsed: {} ms\nArchived entries: {}",
             latest.transcript_text,
             latest.source_wav_path.display(),
             latest.backend_name,
@@ -114,6 +114,24 @@ pub(crate) fn history_summary_text(entries: &[TranscriptEntry]) -> String {
             latest.elapsed_ms,
             entries.len()
         );
+
+        if let Some(cleanup) = latest.cleanup.as_ref() {
+            if let Some(cleaned_text) = cleanup.cleaned_text() {
+                summary.push_str(&format!(
+                    "\n\nCleaned transcript:\n{cleaned_text}\nCleanup backend: {}\nCleanup model: {}",
+                    cleanup.backend_name, cleanup.model_name
+                ));
+            } else {
+                summary.push_str(&format!(
+                    "\n\nCleanup: failed via {}\nReason: {}",
+                    cleanup.backend_name,
+                    cleanup
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("unknown cleanup failure")
+                ));
+            }
+        }
 
         if let Some(insertion) = latest.insertion.as_ref() {
             if let Some(target_class) = insertion.target_class.as_deref() {
@@ -221,5 +239,18 @@ mod app_shell {
         );
         assert!(summary.contains("Target class: unsupported"));
         assert!(summary.contains("Reason: friendly insertion target is not editable"));
+    }
+
+    #[test]
+    fn cleanup_history_summary_shows_raw_and_cleaned_transcript() {
+        let entry: TranscriptEntry = serde_json::from_str(
+            r#"{"source_wav_path":"/tmp/loop5.wav","transcript_text":"hello from pepper x","backend_name":"sherpa-onnx","model_name":"nemo-parakeet-tdt-0.6b-v2-int8","elapsed_ms":21,"cleanup":{"backend_name":"llama.cpp","model_name":"qwen2.5-3b-instruct-q4_k_m.gguf","cleaned_text":"Hello from Pepper X.","elapsed_ms":19,"used_ocr":false,"succeeded":true}}"#,
+        )
+        .expect("deserialize cleanup transcript entry");
+
+        let summary = history_summary_text(&[entry]);
+
+        assert!(summary.contains("Raw transcript:\nhello from pepper x"));
+        assert!(summary.contains("Cleaned transcript:\nHello from Pepper X."));
     }
 }

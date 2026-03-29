@@ -15,6 +15,8 @@ pub struct TranscriptEntry {
     pub model_name: String,
     pub elapsed_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<CleanupDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insertion: Option<InsertionDiagnostics>,
 }
 
@@ -32,8 +34,68 @@ impl TranscriptEntry {
             backend_name: backend_name.into(),
             model_name: model_name.into(),
             elapsed_ms: elapsed.as_millis() as u64,
+            cleanup: None,
             insertion: None,
         }
+    }
+
+    pub fn display_text(&self) -> &str {
+        self.cleanup
+            .as_ref()
+            .and_then(CleanupDiagnostics::cleaned_text)
+            .unwrap_or(&self.transcript_text)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupDiagnostics {
+    pub backend_name: String,
+    pub model_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleaned_text: Option<String>,
+    pub elapsed_ms: u64,
+    pub used_ocr: bool,
+    pub succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+impl CleanupDiagnostics {
+    pub fn succeeded(
+        backend_name: impl Into<String>,
+        model_name: impl Into<String>,
+        cleaned_text: impl Into<String>,
+        elapsed: Duration,
+    ) -> Self {
+        Self {
+            backend_name: backend_name.into(),
+            model_name: model_name.into(),
+            cleaned_text: Some(cleaned_text.into()),
+            elapsed_ms: elapsed.as_millis() as u64,
+            used_ocr: false,
+            succeeded: true,
+            failure_reason: None,
+        }
+    }
+
+    pub fn failed(
+        backend_name: impl Into<String>,
+        model_name: impl Into<String>,
+        failure_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend_name: backend_name.into(),
+            model_name: model_name.into(),
+            cleaned_text: None,
+            elapsed_ms: 0,
+            used_ocr: false,
+            succeeded: false,
+            failure_reason: Some(failure_reason.into()),
+        }
+    }
+
+    pub fn cleaned_text(&self) -> Option<&str> {
+        self.cleaned_text.as_deref().filter(|_| self.succeeded)
     }
 }
 
@@ -447,5 +509,42 @@ mod tests {
         let copied = std::fs::read_to_string(copy_log.log_path()).expect("read copied log");
         assert!(copied.contains("\"backend_name\":\"uinput-text\""));
         assert!(copied.contains("\"attempted_backends\":[\"atspi-editable-text\",\"atspi-key-string\",\"clipboard-paste\",\"uinput-text\"]"));
+    }
+
+    #[test]
+    fn cleanup_transcript_log_round_trips_cleanup_diagnostics_from_jsonl() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(
+                br#"{"source_wav_path":"loop5.wav","transcript_text":"hello from pepper x","backend_name":"sherpa-onnx","model_name":"nemo-parakeet-tdt-0.6b-v2-int8","elapsed_ms":7,"cleanup":{"backend_name":"llama.cpp","model_name":"qwen2.5-3b-instruct-q4_k_m.gguf","cleaned_text":"Hello from Pepper X.","elapsed_ms":19,"used_ocr":false,"succeeded":true}}"#,
+            )
+            .expect("append loop5 cleanup entry");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(b"\n")
+            .expect("append newline");
+
+        let entry = log
+            .recent_entries()
+            .expect("load entries")
+            .into_iter()
+            .next()
+            .expect("load loop5 cleanup entry");
+        let copy_root = temp_root();
+        let copy_log = TranscriptLog::open(&copy_root).expect("open copy log");
+
+        copy_log.append(&entry).expect("append copied entry");
+
+        let copied = std::fs::read_to_string(copy_log.log_path()).expect("read copied log");
+        assert!(copied.contains("\"transcript_text\":\"hello from pepper x\""));
+        assert!(copied.contains("\"cleanup\":{"));
+        assert!(copied.contains("\"cleaned_text\":\"Hello from Pepper X.\""));
     }
 }

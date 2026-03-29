@@ -16,7 +16,7 @@ fn main() {
     };
 
     match cli::run(startup_mode) {
-        Ok(Some(entry)) => println!("{}", entry.transcript_text),
+        Ok(Some(entry)) => println!("{}", entry.display_text()),
         Ok(None) => app::run(),
         Err(error) => {
             eprintln!("{error}");

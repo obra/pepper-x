@@ -12,10 +12,14 @@ use pepperx_platform_gnome::atspi::{
 };
 
 use crate::transcript_log::{
-    nonempty_env_path, state_root, InsertionDiagnostics, TranscriptEntry, TranscriptLog,
+    nonempty_env_path, state_root, CleanupDiagnostics, InsertionDiagnostics, TranscriptEntry,
+    TranscriptLog,
 };
 
 const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
+const CLEANUP_BACKEND_NAME: &str = "llama.cpp";
+const CLEANUP_MODEL_NAME: &str = "unconfigured";
+const CLEANUP_UNAVAILABLE_REASON: &str = "Pepper X cleanup backend is not configured yet";
 const FRIENDLY_TARGET_APPLICATION_ID: &str = "org.gnome.TextEditor";
 const DEFAULT_UINPUT_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-uinput-helper";
 const UINPUT_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
@@ -76,6 +80,19 @@ impl std::fmt::Display for TranscriptionRunError {
 pub fn transcribe_wav_to_log(wav_path: &Path) -> Result<TranscriptEntry, TranscriptionRunError> {
     let result = transcribe_wav_result(wav_path)?;
     archive_transcription_result(result)
+}
+
+pub fn transcribe_wav_and_cleanup_to_log(
+    wav_path: &Path,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let result = transcribe_wav_result(wav_path)?;
+    let mut entry = transcript_entry_from_result(result);
+    entry.cleanup = Some(CleanupDiagnostics::failed(
+        CLEANUP_BACKEND_NAME,
+        CLEANUP_MODEL_NAME,
+        CLEANUP_UNAVAILABLE_REASON,
+    ));
+    archive_transcript_entry(entry)
 }
 
 pub fn transcribe_wav_and_insert_friendly_to_log(
