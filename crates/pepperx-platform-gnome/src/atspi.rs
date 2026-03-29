@@ -1,5 +1,5 @@
 use crate::service::PepperXService;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::Mutex;
@@ -29,6 +29,15 @@ pub struct FriendlyInsertSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FriendlyInsertOutcome {
+    pub selection: FriendlyInsertSelection,
+    pub target_application_name: String,
+    pub caret_offset: i32,
+    pub before_text: String,
+    pub after_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FriendlyInsertFailure {
     pub backend_name: &'static str,
     pub reason: FriendlyInsertError,
@@ -43,6 +52,16 @@ pub enum FriendlyInsertError {
     TargetNotEditable,
     MissingEditableText,
     MissingCaretSurface,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FriendlyInsertRunError {
+    InvalidInsertText,
+    InitializationFailed(i32),
+    MissingFocusedTarget,
+    UnsupportedTarget(FriendlyInsertFailure),
+    Access(String),
+    ReadbackMismatch,
 }
 
 impl fmt::Display for FriendlyInsertFailure {
@@ -70,6 +89,27 @@ impl fmt::Display for FriendlyInsertError {
             }
             Self::MissingCaretSurface => {
                 f.write_str("friendly insertion target is missing a caret surface")
+            }
+        }
+    }
+}
+
+impl fmt::Display for FriendlyInsertRunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInsertText => {
+                f.write_str("friendly insertion text contains an unsupported NUL byte")
+            }
+            Self::InitializationFailed(code) => {
+                write!(f, "AT-SPI initialization failed with code {code}")
+            }
+            Self::MissingFocusedTarget => {
+                f.write_str("friendly insertion could not find a focused target")
+            }
+            Self::UnsupportedTarget(error) => write!(f, "{error}"),
+            Self::Access(message) => f.write_str(message),
+            Self::ReadbackMismatch => {
+                f.write_str("friendly insertion readback did not match the requested text")
             }
         }
     }
@@ -273,12 +313,419 @@ pub fn select_friendly_insert_backend(
     })
 }
 
+pub fn insert_text_into_friendly_target(
+    text: &str,
+    policy: &FriendlyInsertPolicy,
+) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError> {
+    let insert_text = CString::new(text).map_err(|_| FriendlyInsertRunError::InvalidInsertText)?;
+    let insert_length = i32::try_from(text.chars().count())
+        .map_err(|_| FriendlyInsertRunError::InvalidInsertText)?;
+
+    unsafe {
+        let init_result = ffi::atspi_init();
+        if init_result < 0 {
+            return Err(FriendlyInsertRunError::InitializationFailed(init_result));
+        }
+    }
+
+    let target = focused_friendly_target(policy)?;
+
+    unsafe {
+        editable_text_insert_text(
+            target.editable_text.as_ptr(),
+            target.caret_offset,
+            insert_text.as_ptr(),
+            insert_length,
+        )?;
+    }
+
+    let after_text = unsafe { text_contents(target.text.as_ptr())? };
+    let expected_after_text = apply_insert_at_char_offset(
+        &target.before_text,
+        text,
+        usize::try_from(target.caret_offset)
+            .map_err(|_| FriendlyInsertRunError::ReadbackMismatch)?,
+    )
+    .ok_or(FriendlyInsertRunError::ReadbackMismatch)?;
+
+    if after_text != expected_after_text {
+        return Err(FriendlyInsertRunError::ReadbackMismatch);
+    }
+
+    Ok(FriendlyInsertOutcome {
+        selection: target.selection,
+        target_application_name: target.application_name,
+        caret_offset: target.caret_offset,
+        before_text: target.before_text,
+        after_text,
+    })
+}
+
 fn control_bit(keysym: u32) -> Option<u8> {
     match keysym {
         CONTROL_LEFT_KEYSYM => Some(0b01),
         CONTROL_RIGHT_KEYSYM => Some(0b10),
         _ => None,
     }
+}
+
+struct FocusedFriendlyTarget {
+    selection: FriendlyInsertSelection,
+    application_name: String,
+    text: OwnedGObject<ffi::AtspiText>,
+    editable_text: OwnedGObject<ffi::AtspiEditableText>,
+    before_text: String,
+    caret_offset: i32,
+}
+
+struct OwnedGObject<T> {
+    ptr: NonNull<T>,
+}
+
+impl<T> OwnedGObject<T> {
+    unsafe fn new(ptr: *mut T) -> Option<Self> {
+        Some(Self {
+            ptr: NonNull::new(ptr)?,
+        })
+    }
+
+    fn as_ptr(&self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+
+    unsafe fn clone_ref(&self) -> Self {
+        Self {
+            ptr: NonNull::new(glib::gobject_ffi::g_object_ref(self.ptr.as_ptr().cast()).cast())
+                .expect("g_object_ref returned null"),
+        }
+    }
+}
+
+impl<T> Drop for OwnedGObject<T> {
+    fn drop(&mut self) {
+        unsafe {
+            glib::gobject_ffi::g_object_unref(self.ptr.as_ptr().cast());
+        }
+    }
+}
+
+fn focused_friendly_target(
+    policy: &FriendlyInsertPolicy,
+) -> Result<FocusedFriendlyTarget, FriendlyInsertRunError> {
+    let focused = unsafe { find_focused_accessible()? };
+    let application = unsafe { accessible_application(focused.as_ptr())? };
+    let application_name = unsafe { accessible_name(application.as_ptr())? };
+    let application_id = unsafe { friendly_application_id_from_process_id(focused.as_ptr())? };
+    let is_editable = unsafe {
+        accessible_has_state(focused.as_ptr(), ffi::ATSPI_STATE_EDITABLE)
+            .map_err(FriendlyInsertRunError::Access)?
+    };
+    let text = unsafe { OwnedGObject::new(ffi::atspi_accessible_get_text_iface(focused.as_ptr())) };
+    let editable_text = unsafe {
+        OwnedGObject::new(ffi::atspi_accessible_get_editable_text_iface(
+            focused.as_ptr(),
+        ))
+    };
+    let caret_offset = match text.as_ref() {
+        Some(text) => unsafe { text_caret_offset(text.as_ptr())? },
+        None => -1,
+    };
+    let target = FriendlyFocusedTarget {
+        application_id,
+        is_editable,
+        supports_editable_text: editable_text.is_some(),
+        supports_caret: caret_offset >= 0,
+    };
+    let selection = select_friendly_insert_backend(&target, policy)
+        .map_err(FriendlyInsertRunError::UnsupportedTarget)?;
+    let text = text.ok_or_else(|| {
+        FriendlyInsertRunError::Access("friendly insertion target is missing Text support".into())
+    })?;
+    let editable_text = editable_text.ok_or_else(|| {
+        FriendlyInsertRunError::Access(
+            "friendly insertion target is missing EditableText support".into(),
+        )
+    })?;
+    let before_text = unsafe { text_contents(text.as_ptr())? };
+
+    Ok(FocusedFriendlyTarget {
+        selection,
+        application_name,
+        text,
+        editable_text,
+        before_text,
+        caret_offset,
+    })
+}
+
+fn friendly_application_id_from_executable_name(executable_name: &str) -> String {
+    match executable_name {
+        "gnome-text-editor" => "org.gnome.TextEditor".into(),
+        _ => executable_name.into(),
+    }
+}
+
+unsafe fn friendly_application_id_from_process_id(
+    accessible: *mut ffi::AtspiAccessible,
+) -> Result<String, FriendlyInsertRunError> {
+    let process_id = accessible_process_id(accessible)?;
+    let executable_path =
+        std::fs::read_link(format!("/proc/{process_id}/exe")).map_err(|error| {
+            FriendlyInsertRunError::Access(format!(
+                "failed to inspect focused target process {process_id}: {error}"
+            ))
+        })?;
+    let executable_name = executable_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            FriendlyInsertRunError::Access(format!(
+                "focused target executable path has no file name: {}",
+                executable_path.display()
+            ))
+        })?;
+
+    Ok(friendly_application_id_from_executable_name(
+        &executable_name,
+    ))
+}
+
+fn apply_insert_at_char_offset(
+    before_text: &str,
+    inserted_text: &str,
+    char_offset: usize,
+) -> Option<String> {
+    let byte_offset = byte_index_for_char_offset(before_text, char_offset)?;
+    let mut after_text =
+        String::with_capacity(before_text.len().saturating_add(inserted_text.len()));
+
+    after_text.push_str(&before_text[..byte_offset]);
+    after_text.push_str(inserted_text);
+    after_text.push_str(&before_text[byte_offset..]);
+
+    Some(after_text)
+}
+
+fn byte_index_for_char_offset(text: &str, char_offset: usize) -> Option<usize> {
+    if char_offset == text.chars().count() {
+        return Some(text.len());
+    }
+
+    text.char_indices()
+        .nth(char_offset)
+        .map(|(byte_offset, _)| byte_offset)
+}
+
+unsafe fn find_focused_accessible(
+) -> Result<OwnedGObject<ffi::AtspiAccessible>, FriendlyInsertRunError> {
+    let desktop_count = ffi::atspi_get_desktop_count();
+
+    for desktop_index in 0..desktop_count {
+        let Some(desktop) = OwnedGObject::new(ffi::atspi_get_desktop(desktop_index)) else {
+            continue;
+        };
+
+        if let Some(focused) = find_focused_descendant(&desktop)? {
+            return Ok(focused);
+        }
+    }
+
+    Err(FriendlyInsertRunError::MissingFocusedTarget)
+}
+
+unsafe fn find_focused_descendant(
+    accessible: &OwnedGObject<ffi::AtspiAccessible>,
+) -> Result<Option<OwnedGObject<ffi::AtspiAccessible>>, FriendlyInsertRunError> {
+    if accessible_has_state(accessible.as_ptr(), ffi::ATSPI_STATE_FOCUSED)
+        .map_err(FriendlyInsertRunError::Access)?
+    {
+        return Ok(Some(accessible.clone_ref()));
+    }
+
+    let child_count = accessible_child_count(accessible.as_ptr())?;
+    for child_index in 0..child_count {
+        let Some(child) = accessible_child_at_index(accessible.as_ptr(), child_index)? else {
+            continue;
+        };
+
+        if let Some(focused) = find_focused_descendant(&child)? {
+            return Ok(Some(focused));
+        }
+    }
+
+    Ok(None)
+}
+
+unsafe fn accessible_child_count(
+    accessible: *mut ffi::AtspiAccessible,
+) -> Result<i32, FriendlyInsertRunError> {
+    let mut error = std::ptr::null_mut();
+    let child_count = ffi::atspi_accessible_get_child_count(accessible, &mut error);
+
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to enumerate accessibility children: {message}"
+        )));
+    }
+
+    Ok(child_count)
+}
+
+unsafe fn accessible_child_at_index(
+    accessible: *mut ffi::AtspiAccessible,
+    child_index: i32,
+) -> Result<Option<OwnedGObject<ffi::AtspiAccessible>>, FriendlyInsertRunError> {
+    let mut error = std::ptr::null_mut();
+    let child = ffi::atspi_accessible_get_child_at_index(accessible, child_index, &mut error);
+
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to read accessibility child {child_index}: {message}"
+        )));
+    }
+
+    Ok(OwnedGObject::new(child))
+}
+
+unsafe fn accessible_has_state(
+    accessible: *mut ffi::AtspiAccessible,
+    state: ffi::AtspiStateType,
+) -> Result<bool, String> {
+    let Some(state_set) = OwnedGObject::new(ffi::atspi_accessible_get_state_set(accessible)) else {
+        return Err("failed to read accessibility state set".into());
+    };
+
+    Ok(ffi::atspi_state_set_contains(state_set.as_ptr(), state) != glib::ffi::GFALSE)
+}
+
+unsafe fn accessible_application(
+    accessible: *mut ffi::AtspiAccessible,
+) -> Result<OwnedGObject<ffi::AtspiAccessible>, FriendlyInsertRunError> {
+    let mut error = std::ptr::null_mut();
+    let application = ffi::atspi_accessible_get_application(accessible, &mut error);
+
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to resolve accessibility application object: {message}"
+        )));
+    }
+
+    OwnedGObject::new(application).ok_or_else(|| {
+        FriendlyInsertRunError::Access(
+            "focused accessibility target is missing an application object".into(),
+        )
+    })
+}
+
+unsafe fn accessible_name(
+    accessible: *mut ffi::AtspiAccessible,
+) -> Result<String, FriendlyInsertRunError> {
+    let mut error = std::ptr::null_mut();
+    let raw_name = ffi::atspi_accessible_get_name(accessible, &mut error);
+
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to read accessibility object name: {message}"
+        )));
+    }
+
+    Ok(take_glib_string(raw_name))
+}
+
+unsafe fn accessible_process_id(
+    accessible: *mut ffi::AtspiAccessible,
+) -> Result<u32, FriendlyInsertRunError> {
+    let mut error = std::ptr::null_mut();
+    let process_id = ffi::atspi_accessible_get_process_id(accessible, &mut error);
+
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to read focused target process id: {message}"
+        )));
+    }
+
+    Ok(process_id)
+}
+
+unsafe fn text_contents(text: *mut ffi::AtspiText) -> Result<String, FriendlyInsertRunError> {
+    let mut error = std::ptr::null_mut();
+    let character_count = ffi::atspi_text_get_character_count(text, &mut error);
+
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to read accessibility text length: {message}"
+        )));
+    }
+
+    let raw_text = ffi::atspi_text_get_text(text, 0, character_count, &mut error);
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to read accessibility text: {message}"
+        )));
+    }
+
+    Ok(take_glib_string(raw_text))
+}
+
+unsafe fn text_caret_offset(text: *mut ffi::AtspiText) -> Result<i32, FriendlyInsertRunError> {
+    let mut error = std::ptr::null_mut();
+    let caret_offset = ffi::atspi_text_get_caret_offset(text, &mut error);
+
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to read accessibility caret offset: {message}"
+        )));
+    }
+
+    Ok(caret_offset)
+}
+
+unsafe fn editable_text_insert_text(
+    editable_text: *mut ffi::AtspiEditableText,
+    position: i32,
+    text: *const c_char,
+    length: i32,
+) -> Result<(), FriendlyInsertRunError> {
+    let mut error = std::ptr::null_mut();
+    let inserted =
+        ffi::atspi_editable_text_insert_text(editable_text, position, text, length, &mut error);
+
+    if let Some(message) = take_glib_error_message(error) {
+        return Err(FriendlyInsertRunError::Access(format!(
+            "failed to insert accessibility text: {message}"
+        )));
+    }
+
+    if inserted == glib::ffi::GFALSE {
+        return Err(FriendlyInsertRunError::Access(
+            "AT-SPI editable text insertion returned FALSE".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+unsafe fn take_glib_error_message(error: *mut glib::ffi::GError) -> Option<String> {
+    let error = NonNull::new(error)?;
+    let message = if error.as_ref().message.is_null() {
+        "unknown GLib error".into()
+    } else {
+        CStr::from_ptr(error.as_ref().message)
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    glib::ffi::g_error_free(error.as_ptr());
+    Some(message)
+}
+
+unsafe fn take_glib_string(raw: *mut c_char) -> String {
+    let Some(raw) = NonNull::new(raw) else {
+        return String::new();
+    };
+    let text = CStr::from_ptr(raw.as_ptr()).to_string_lossy().into_owned();
+    glib::ffi::g_free(raw.as_ptr().cast());
+    text
 }
 
 unsafe extern "C" fn key_watcher_callback(
@@ -304,12 +751,31 @@ mod ffi {
     use super::c_void;
     use glib::ffi::{gboolean, gchar, gint, gpointer, guint, GDestroyNotify};
 
+    pub type AtspiStateType = gint;
+
     #[repr(C)]
     pub struct AtspiDevice(c_void);
+
+    #[repr(C)]
+    pub struct AtspiAccessible(c_void);
+
+    #[repr(C)]
+    pub struct AtspiEditableText(c_void);
+
+    #[repr(C)]
+    pub struct AtspiText(c_void);
+
+    #[repr(C)]
+    pub struct AtspiStateSet(c_void);
+
+    pub const ATSPI_STATE_EDITABLE: AtspiStateType = 7;
+    pub const ATSPI_STATE_FOCUSED: AtspiStateType = 12;
 
     #[link(name = "atspi")]
     unsafe extern "C" {
         pub fn atspi_init() -> gint;
+        pub fn atspi_get_desktop_count() -> gint;
+        pub fn atspi_get_desktop(i: gint) -> *mut AtspiAccessible;
         pub fn atspi_device_a11y_manager_try_new_full(app_id: *const gchar) -> *mut AtspiDevice;
         pub fn atspi_device_add_key_watcher(
             device: *mut AtspiDevice,
@@ -329,6 +795,55 @@ mod ffi {
         );
         pub fn atspi_device_grab_keyboard(device: *mut AtspiDevice) -> gboolean;
         pub fn atspi_device_ungrab_keyboard(device: *mut AtspiDevice);
+        pub fn atspi_accessible_get_name(
+            obj: *mut AtspiAccessible,
+            error: *mut *mut glib::ffi::GError,
+        ) -> *mut gchar;
+        pub fn atspi_accessible_get_child_count(
+            obj: *mut AtspiAccessible,
+            error: *mut *mut glib::ffi::GError,
+        ) -> gint;
+        pub fn atspi_accessible_get_child_at_index(
+            obj: *mut AtspiAccessible,
+            child_index: gint,
+            error: *mut *mut glib::ffi::GError,
+        ) -> *mut AtspiAccessible;
+        pub fn atspi_accessible_get_state_set(obj: *mut AtspiAccessible) -> *mut AtspiStateSet;
+        pub fn atspi_accessible_get_application(
+            obj: *mut AtspiAccessible,
+            error: *mut *mut glib::ffi::GError,
+        ) -> *mut AtspiAccessible;
+        pub fn atspi_accessible_get_editable_text_iface(
+            obj: *mut AtspiAccessible,
+        ) -> *mut AtspiEditableText;
+        pub fn atspi_accessible_get_text_iface(obj: *mut AtspiAccessible) -> *mut AtspiText;
+        pub fn atspi_accessible_get_process_id(
+            accessible: *mut AtspiAccessible,
+            error: *mut *mut glib::ffi::GError,
+        ) -> guint;
+        pub fn atspi_state_set_contains(set: *mut AtspiStateSet, state: AtspiStateType)
+            -> gboolean;
+        pub fn atspi_text_get_character_count(
+            obj: *mut AtspiText,
+            error: *mut *mut glib::ffi::GError,
+        ) -> gint;
+        pub fn atspi_text_get_text(
+            obj: *mut AtspiText,
+            start_offset: gint,
+            end_offset: gint,
+            error: *mut *mut glib::ffi::GError,
+        ) -> *mut gchar;
+        pub fn atspi_text_get_caret_offset(
+            obj: *mut AtspiText,
+            error: *mut *mut glib::ffi::GError,
+        ) -> gint;
+        pub fn atspi_editable_text_insert_text(
+            obj: *mut AtspiEditableText,
+            position: gint,
+            text: *const gchar,
+            length: gint,
+            error: *mut *mut glib::ffi::GError,
+        ) -> gboolean;
     }
 }
 
@@ -489,5 +1004,79 @@ mod friendly_insert_validation {
 
         assert_eq!(selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
         assert_eq!(selection.target_application_id, "org.gnome.TextEditor");
+    }
+}
+
+#[cfg(test)]
+mod friendly_insert_runtime_helpers {
+    use super::*;
+
+    #[test]
+    fn friendly_insert_runtime_helpers_map_text_editor_executable() {
+        assert_eq!(
+            friendly_application_id_from_executable_name("gnome-text-editor"),
+            "org.gnome.TextEditor"
+        );
+    }
+
+    #[test]
+    fn friendly_insert_runtime_helpers_preserve_unknown_executable_names() {
+        assert_eq!(
+            friendly_application_id_from_executable_name("ghostty"),
+            "ghostty"
+        );
+    }
+
+    #[test]
+    fn friendly_insert_runtime_helpers_apply_insert_at_char_offset() {
+        assert_eq!(
+            apply_insert_at_char_offset("ab🙂d", "X", 3),
+            Some("ab🙂Xd".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod friendly_insert_live {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a live GNOME Wayland session with GNOME Text Editor focused"]
+    fn friendly_insert_live_text_editor_round_trip() {
+        let inserted_text = std::env::var("PEPPERX_FRIENDLY_INSERT_TEXT").unwrap_or_else(|_| {
+            format!(
+                " pepperx-smoke-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock before unix epoch")
+                    .as_nanos()
+            )
+        });
+        let outcome = insert_text_into_friendly_target(
+            &inserted_text,
+            &FriendlyInsertPolicy {
+                target_application_id: "org.gnome.TextEditor",
+            },
+        )
+        .expect("friendly insertion should succeed in GNOME Text Editor");
+
+        assert_eq!(outcome.selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
+        assert_eq!(
+            outcome.selection.target_application_id,
+            "org.gnome.TextEditor"
+        );
+        assert!(
+            !outcome.target_application_name.is_empty(),
+            "friendly insertion should report the target application name"
+        );
+        assert_eq!(
+            outcome.after_text,
+            apply_insert_at_char_offset(
+                &outcome.before_text,
+                &inserted_text,
+                usize::try_from(outcome.caret_offset).expect("caret offset should be non-negative")
+            )
+            .expect("expected inserted text snapshot")
+        );
     }
 }
