@@ -68,6 +68,7 @@ verify_deb_uninstall() {
 
     for path in \
         usr/bin/pepper-x \
+        usr/libexec/pepper-x/pepperx-uinput-helper \
         usr/share/applications/com.obra.PepperX.desktop \
         etc/xdg/autostart/pepper-x-autostart.desktop \
         usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
@@ -84,6 +85,7 @@ verify_deb_uninstall() {
 
     for path in \
         usr/bin/pepper-x \
+        usr/libexec/pepper-x/pepperx-uinput-helper \
         usr/share/applications/com.obra.PepperX.desktop \
         etc/xdg/autostart/pepper-x-autostart.desktop \
         usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
@@ -114,6 +116,7 @@ verify_rpm_uninstall() {
 
     for path in \
         usr/bin/pepper-x \
+        usr/libexec/pepper-x/pepperx-uinput-helper \
         usr/share/applications/com.obra.PepperX.desktop \
         etc/xdg/autostart/pepper-x-autostart.desktop \
         usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
@@ -130,6 +133,7 @@ verify_rpm_uninstall() {
 
     for path in \
         usr/bin/pepper-x \
+        usr/libexec/pepper-x/pepperx-uinput-helper \
         usr/share/applications/com.obra.PepperX.desktop \
         etc/xdg/autostart/pepper-x-autostart.desktop \
         usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \
@@ -156,6 +160,7 @@ verify_host_is_clean() {
     fi
 
     for path in \
+        /usr/libexec/pepper-x/pepperx-uinput-helper \
         /usr/share/applications/com.obra.PepperX.desktop \
         /etc/xdg/autostart/pepper-x-autostart.desktop \
         /usr/share/gnome-shell/extensions/pepperx@obra/metadata.json \

@@ -12,6 +12,147 @@ mkdir -p "$workdir/bin" "$workdir/fixtures" "$workdir/logs" "$workdir/tmp"
 export TMPDIR="$workdir/tmp"
 export FAKE_LOG="$workdir/logs/calls.log"
 
+create_payload_tree() {
+    local root="$1"
+
+    mkdir -p \
+        "$root/usr/bin" \
+        "$root/usr/libexec/pepper-x" \
+        "$root/usr/share/applications" \
+        "$root/etc/xdg/autostart" \
+        "$root/usr/share/gnome-shell/extensions/pepperx@obra"
+
+    cat > "$root/usr/bin/pepper-x" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$root/usr/bin/pepper-x"
+
+    cat > "$root/usr/libexec/pepper-x/pepperx-uinput-helper" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$root/usr/libexec/pepper-x/pepperx-uinput-helper"
+
+    cp "$repo_root/packaging/deb/pepper-x.desktop" \
+        "$root/usr/share/applications/com.obra.PepperX.desktop"
+    cp "$repo_root/packaging/deb/pepper-x-autostart.desktop" \
+        "$root/etc/xdg/autostart/pepper-x-autostart.desktop"
+    cp \
+        "$repo_root/gnome-extension/metadata.json" \
+        "$repo_root/gnome-extension/extension.js" \
+        "$repo_root/gnome-extension/ipc.js" \
+        "$repo_root/gnome-extension/keybindings.js" \
+        "$repo_root/gnome-extension/README.md" \
+        "$root/usr/share/gnome-shell/extensions/pepperx@obra/"
+}
+
+build_real_deb() {
+    local version="$1"
+    local output_path="$2"
+    local package_root="$workdir/real-deb-${version}"
+
+    rm -rf "$package_root"
+    mkdir -p "$package_root/DEBIAN"
+    create_payload_tree "$package_root"
+
+    cat > "$package_root/DEBIAN/control" <<EOF
+Package: pepper-x
+Version: ${version}
+Architecture: amd64
+Maintainer: Pepper X Maintainers <pepper-x@obra>
+Description: Pepper X packaging smoke fixture
+EOF
+
+    dpkg-deb --build "$package_root" "$output_path" >/dev/null
+}
+
+build_real_rpm() {
+    local version="$1"
+    local release="$2"
+    local output_path="$3"
+    local topdir="$workdir/rpmbuild-${version}-${release}"
+    local source_root="$topdir/SOURCES/pepper-x-payload"
+    local spec_path="$topdir/SPECS/pepper-x.spec"
+
+    rm -rf "$topdir"
+    mkdir -p \
+        "$topdir/BUILD" \
+        "$topdir/BUILDROOT" \
+        "$topdir/RPMS" \
+        "$topdir/SOURCES" \
+        "$topdir/SPECS" \
+        "$topdir/SRPMS"
+
+    create_payload_tree "$source_root"
+    tar -czf "$topdir/SOURCES/pepper-x-payload.tar.gz" -C "$topdir/SOURCES" pepper-x-payload
+
+    cat > "$spec_path" <<EOF
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+Name:           pepper-x
+Version:        ${version}
+Release:        ${release}
+Summary:        Pepper X packaging smoke fixture
+License:        Proprietary
+BuildArch:      x86_64
+Source0:        pepper-x-payload.tar.gz
+
+%description
+Pepper X packaging smoke fixture.
+
+%prep
+%setup -q -n pepper-x-payload
+
+%build
+
+%install
+mkdir -p %{buildroot}
+cp -a usr %{buildroot}/
+cp -a etc %{buildroot}/
+
+%files
+/usr/bin/pepper-x
+/usr/libexec/pepper-x/pepperx-uinput-helper
+/usr/share/applications/com.obra.PepperX.desktop
+/etc/xdg/autostart/pepper-x-autostart.desktop
+/usr/share/gnome-shell/extensions/pepperx@obra/metadata.json
+/usr/share/gnome-shell/extensions/pepperx@obra/extension.js
+/usr/share/gnome-shell/extensions/pepperx@obra/ipc.js
+/usr/share/gnome-shell/extensions/pepperx@obra/keybindings.js
+/usr/share/gnome-shell/extensions/pepperx@obra/README.md
+EOF
+
+    rpmbuild --define "_topdir $topdir" -bb "$spec_path" >/dev/null
+    cp "$topdir/RPMS/x86_64"/pepper-x-"${version}"-"${release}".x86_64.rpm "$output_path"
+}
+
+if command -v dpkg-deb >/dev/null 2>&1 \
+    && command -v dpkg >/dev/null 2>&1 \
+    && command -v dpkg-query >/dev/null 2>&1 \
+    && command -v rpm >/dev/null 2>&1 \
+    && command -v rpmbuild >/dev/null 2>&1
+then
+    build_real_deb "1.0.0" "$workdir/fixtures/pepper-x-old.deb"
+    build_real_deb "1.1.0" "$workdir/fixtures/pepper-x-new.deb"
+    build_real_rpm "1.0.0" "1" "$workdir/fixtures/pepper-x-old.rpm"
+    build_real_rpm "1.1.0" "1" "$workdir/fixtures/pepper-x-new.rpm"
+
+    bash "$repo_root/scripts/verify-upgrade-ubuntu.sh" \
+        "$workdir/fixtures/pepper-x-old.deb" \
+        "$workdir/fixtures/pepper-x-new.deb"
+    bash "$repo_root/scripts/verify-upgrade-fedora.sh" \
+        "$workdir/fixtures/pepper-x-old.rpm" \
+        "$workdir/fixtures/pepper-x-new.rpm"
+    bash "$repo_root/scripts/verify-uninstall-cleanup.sh" \
+        "$workdir/fixtures/pepper-x-old.deb"
+    bash "$repo_root/scripts/verify-uninstall-cleanup.sh" \
+        "$workdir/fixtures/pepper-x-old.rpm"
+
+    echo "Packaged install, upgrade, and uninstall helpers passed with real .deb and .rpm fixtures."
+    exit 0
+fi
+
 create_package_fixture() {
     local path="$1"
     : > "$path"
@@ -56,6 +197,7 @@ def package_version(path: str) -> str:
 def required_payload_paths(root: pathlib.Path) -> list[pathlib.Path]:
     return [
         root / "usr/bin/pepper-x",
+        root / "usr/libexec/pepper-x/pepperx-uinput-helper",
         root / "usr/share/applications/com.obra.PepperX.desktop",
         root / "etc/xdg/autostart/pepper-x-autostart.desktop",
         root / "usr/share/gnome-shell/extensions/pepperx@obra/metadata.json",
@@ -355,7 +497,7 @@ for fragment in required_fragments:
         raise SystemExit(f"missing lifecycle command fragment: {fragment}")
 PY
 
-if find "$workdir/tmp" -type f | grep -Eq '(usr/bin/pepper-x|com.obra.PepperX.desktop|pepper-x-autostart.desktop|pepperx@obra/(metadata.json|extension.js|ipc.js|keybindings.js|README.md))'; then
+if find "$workdir/tmp" -type f | grep -Eq '(usr/bin/pepper-x|usr/libexec/pepper-x/pepperx-uinput-helper|com.obra.PepperX.desktop|pepper-x-autostart.desktop|pepperx@obra/(metadata.json|extension.js|ipc.js|keybindings.js|README.md))'; then
     echo "packaging lifecycle smoke left packaged files behind in the temp root" >&2
     exit 1
 fi

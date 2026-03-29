@@ -118,6 +118,7 @@ fi
 
 required_paths=(
     "usr/bin/pepper-x"
+    "usr/libexec/pepper-x/pepperx-uinput-helper"
     "usr/share/applications/com.obra.PepperX.desktop"
     "etc/xdg/autostart/pepper-x-autostart.desktop"
     "usr/share/gnome-shell/extensions/pepperx@obra/metadata.json"
