@@ -59,6 +59,8 @@
   - App composition root, background startup, runtime wiring.
 - `app/src/main.rs`
   - CLI/GUI entrypoint routing.
+- `app/src/lib.rs`
+  - Shared module declarations once the app grows beyond `main.rs`-only wiring.
 - `app/src/cli.rs`
   - Headless dev flows for recording, reruns, diagnostics, and model management.
 - `app/src/transcription.rs`
@@ -117,6 +119,14 @@
   - History rerun smoke.
 - `tests/smoke/test_packaging_install.sh`
   - Local package install smoke for Fedora and Ubuntu.
+- `scripts/verify-extension-install.sh`
+  - Packaged extension installation and enablement checks.
+- `scripts/verify-upgrade-ubuntu.sh`
+  - Ubuntu package upgrade verification.
+- `scripts/verify-upgrade-fedora.sh`
+  - Fedora package upgrade verification.
+- `scripts/verify-uninstall-cleanup.sh`
+  - Uninstall cleanup verification.
 
 ## Chunk 1: Shared Runtime Foundations
 
@@ -141,7 +151,8 @@ Add tests for:
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
-Run: `cargo test -p pepperx-models catalog_ cache_ -- --nocapture`
+Run: `cargo test -p pepperx-models catalog_ -- --nocapture`
+Run: `cargo test -p pepperx-models cache_ -- --nocapture`
 Expected: FAIL because the crate and APIs do not exist yet.
 
 - [ ] **Step 3: Implement the smallest shared model catalog**
@@ -153,7 +164,8 @@ Create:
 
 - [ ] **Step 4: Re-run the targeted tests**
 
-Run: `cargo test -p pepperx-models catalog_ cache_ -- --nocapture`
+Run: `cargo test -p pepperx-models catalog_ -- --nocapture`
+Run: `cargo test -p pepperx-models cache_ -- --nocapture`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -177,20 +189,22 @@ git commit -m "Add Pepper X model catalog and cache layer"
 Add tests for:
 - writing one archived run as a stable JSON record under a run-specific directory
 - loading runs newest-first for the history UI
-- preserving raw transcript, cleanup diagnostics, insertion diagnostics, and source media metadata together
+- preserving raw transcript, cleanup diagnostics, insertion diagnostics, source media metadata, model selection, prompt profile, and OCR/context artifacts together
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
-Run: `cargo test -p pepper-x-app transcript_archive_ history_store_ -- --nocapture`
+Run: `cargo test -p pepper-x-app transcript_archive_ -- --nocapture`
+Run: `cargo test -p pepper-x-app history_store_ -- --nocapture`
 Expected: FAIL because the archive store still assumes a flat loop-era JSONL file.
 
 - [ ] **Step 3: Implement the smallest archive upgrade**
 
-Keep the existing JSONL reader compatible if already needed for migration, but make new writes create first-class archived run records with stable IDs and dedicated metadata files.
+Keep the existing JSONL reader compatible if already needed for migration, but make new writes create first-class archived run records with stable IDs, dedicated metadata files, and enough stored configuration/context state to make reruns and comparisons reproducible.
 
 - [ ] **Step 4: Re-run the targeted tests**
 
-Run: `cargo test -p pepper-x-app transcript_archive_ history_store_ -- --nocapture`
+Run: `cargo test -p pepper-x-app transcript_archive_ -- --nocapture`
+Run: `cargo test -p pepper-x-app history_store_ -- --nocapture`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -224,6 +238,7 @@ Add tests for:
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
 Run: `cargo test -p pepperx-audio device_ -- --nocapture`
+Run: `cargo test -p pepper-x-app settings_ -- --nocapture`
 Expected: FAIL because the audio crate does not exist yet.
 
 - [ ] **Step 3: Implement the smallest live-device inventory**
@@ -233,6 +248,7 @@ Create the audio crate and a device inventory API that the app can call without 
 - [ ] **Step 4: Re-run the targeted tests**
 
 Run: `cargo test -p pepperx-audio device_ -- --nocapture`
+Run: `cargo test -p pepper-x-app settings_ -- --nocapture`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -247,6 +263,8 @@ git commit -m "Add Pepper X microphone inventory"
 **Files:**
 - Create: `crates/pepperx-audio/src/recording.rs`
 - Create: `app/src/session_runtime.rs`
+- Modify: `app/src/main.rs`
+- Create if needed: `app/src/lib.rs`
 - Modify: `app/src/transcription.rs`
 - Modify: `app/src/cli.rs`
 - Test: `crates/pepperx-audio/src/recording.rs`
@@ -342,6 +360,9 @@ git commit -m "Connect Pepper X hold-to-talk to live dictation runtime"
 Add tests for:
 - reporting ASR and cleanup readiness separately
 - surfacing cache paths and installed model names in app diagnostics
+- selecting the default ASR and cleanup model without env-only control
+- persisting an editable cleanup prompt profile for ordinary dictation
+- continuing to report ready cached models when network access is unavailable
 - refusing a live run when the requested model is not ready
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
@@ -354,7 +375,10 @@ Expected: FAIL because there is no shared readiness/bootstrap layer yet.
 
 Add:
 - a headless CLI path to list supported models and cache status
+- a headless CLI path to set the default ASR and cleanup model
+- persisted prompt-profile storage for ordinary cleanup runs
 - download/bootstrap for the supported catalog entries
+- an offline-ready check that uses only the local cache after the first model download
 - diagnostics shown in the app history/settings surfaces
 
 - [ ] **Step 4: Re-run the targeted tests and smoke**
@@ -362,6 +386,7 @@ Add:
 Run: `cargo test -p pepperx-models download_ -- --nocapture`
 Run: `cargo test -p pepper-x-app model_status_ -- --nocapture`
 Run: `tests/smoke/test_model_management.sh`
+Run: `tests/smoke/test_model_management.sh --offline`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -380,6 +405,8 @@ git commit -m "Add Pepper X model readiness and bootstrap flows"
 - Create: `crates/pepperx-platform-gnome/src/screenshot.rs`
 - Modify: `crates/pepperx-platform-gnome/src/lib.rs`
 - Modify: `app/src/transcription.rs`
+- Modify: `app/src/main.rs`
+- Create if needed: `app/src/lib.rs`
 - Test: `crates/pepperx-platform-gnome/src/context.rs`
 - Test: `app/src/transcription.rs`
 - Test: `tests/smoke/test_ocr_cleanup.sh`
@@ -388,7 +415,8 @@ git commit -m "Add Pepper X model readiness and bootstrap flows"
 
 Add tests for:
 - preferring AT-SPI text context when the focused target exposes it
-- falling back to screenshot-backed OCR when AT-SPI text is unavailable
+- validating the GNOME Shell screenshot contract before relying on it
+- falling back to screenshot-backed OCR when AT-SPI text is unavailable and screenshot capture is available
 - bounding supporting context before it reaches cleanup
 - recording `used_ocr` only when screenshot OCR actually contributed
 
@@ -402,7 +430,8 @@ Expected: FAIL because supporting context is currently only a shape in the clean
 
 Add:
 - AT-SPI text context around the focused caret when available
-- GNOME Shell focused-window capture as the fallback
+- a narrow screenshot-capture contract around `org.gnome.Shell.Screenshot`
+- GNOME Shell focused-window capture as the fallback only after that contract is proven in tests
 - local Tesseract OCR only for the screenshot fallback
 - bounded OCR text fed into the existing cleanup runtime
 
@@ -510,6 +539,8 @@ git commit -m "Add Pepper X conservative post-paste learning"
 **Files:**
 - Modify: `app/src/history_store.rs`
 - Create: `app/src/history_view.rs`
+- Modify: `app/src/main.rs`
+- Create if needed: `app/src/lib.rs`
 - Modify: `app/src/window.rs`
 - Test: `app/src/history_store.rs`
 - Test: `app/src/history_view.rs`
@@ -523,7 +554,8 @@ Add tests for:
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
-Run: `cargo test -p pepper-x-app history_store_ history_view_ -- --nocapture`
+Run: `cargo test -p pepper-x-app history_store_ -- --nocapture`
+Run: `cargo test -p pepper-x-app history_view_ -- --nocapture`
 Expected: FAIL because the History page is still summary text only.
 
 - [ ] **Step 3: Implement the smallest real history browser**
@@ -536,7 +568,8 @@ Keep the UI focused:
 
 - [ ] **Step 4: Re-run the targeted tests**
 
-Run: `cargo test -p pepper-x-app history_store_ history_view_ -- --nocapture`
+Run: `cargo test -p pepper-x-app history_store_ -- --nocapture`
+Run: `cargo test -p pepper-x-app history_view_ -- --nocapture`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -546,7 +579,7 @@ git add app/src/history_store.rs app/src/history_view.rs app/src/window.rs
 git commit -m "Add Pepper X history browser"
 ```
 
-### Task 11: Add reruns with alternate models and prompts
+### Task 11: Add reruns with alternate ASR and cleanup models and prompts
 
 **Files:**
 - Modify: `app/src/cli.rs`
@@ -560,9 +593,11 @@ git commit -m "Add Pepper X history browser"
 - [ ] **Step 1: Write failing rerun tests**
 
 Add tests for:
+- rerunning an archived recording with a different ASR model
 - rerunning an archived recording with a different cleanup model
 - rerunning with a modified cleanup prompt
 - preserving the original run and storing the rerun as a new archived run linked to its parent
+- comparing the original run and rerun side by side by ASR model, cleanup model, and prompt choice
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
@@ -575,6 +610,7 @@ Support:
 - headless rerun CLI for one archived run ID
 - UI action from the history browser
 - parent/child linkage in archive metadata
+- a side-by-side comparison view for one run and one rerun across ASR model, cleanup model, and prompt
 
 - [ ] **Step 4: Re-run the targeted tests and smoke**
 
@@ -603,6 +639,7 @@ git commit -m "Add Pepper X archived reruns"
 Add tests for:
 - rendering model readiness and cache paths
 - rendering insertion backend and OCR usage
+- rendering the selected ASR model, cleanup model, and active cleanup prompt profile
 - rendering session timings and failure reasons without collapsing them into a single blob
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
@@ -641,7 +678,10 @@ git commit -m "Add Pepper X runtime diagnostics surfaces"
 - Modify: `packaging/rpm/pepper-x.spec`
 - Modify: `packaging/tests/test_metadata.py`
 - Modify: `README.md`
+- Create: `tests/smoke/test_packaging_install.sh`
+- Create: `scripts/verify-extension-install.sh`
 - Test: `packaging/tests/test_metadata.py`
+- Test: `tests/smoke/test_packaging_install.sh`
 
 - [ ] **Step 1: Write failing packaging-metadata tests**
 
@@ -649,25 +689,30 @@ Add tests for:
 - package dependencies required by live audio, OCR, and model runtimes
 - shipping all installed binaries/assets
 - matching desktop/autostart metadata across package formats
+- installing the package on fresh Ubuntu and Fedora roots with the extension assets present
 
 - [ ] **Step 2: Run the packaging tests and verify they fail**
 
 Run: `python3 -m pytest packaging/tests -q`
+Run: `tests/smoke/test_packaging_install.sh`
+Run: `./scripts/verify-extension-install.sh`
 Expected: FAIL because the current skeleton only covers the initial shell/runtime pieces.
 
 - [ ] **Step 3: Implement the smallest complete metadata update**
 
-Update both package formats for the real runtime dependencies and installed assets the app now needs.
+Update both package formats for the real runtime dependencies and installed assets the app now needs, then add fresh-install and packaged-extension verification helpers.
 
 - [ ] **Step 4: Re-run the packaging tests**
 
 Run: `python3 -m pytest packaging/tests -q`
+Run: `tests/smoke/test_packaging_install.sh`
+Run: `./scripts/verify-extension-install.sh`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packaging/deb/control packaging/rpm/pepper-x.spec packaging/tests/test_metadata.py README.md
+git add packaging/deb/control packaging/rpm/pepper-x.spec packaging/tests/test_metadata.py README.md tests/smoke/test_packaging_install.sh scripts/verify-extension-install.sh
 git commit -m "Complete Pepper X package metadata"
 ```
 
@@ -678,6 +723,9 @@ git commit -m "Complete Pepper X package metadata"
 - Modify: `app/src/settings.rs`
 - Modify: `README.md`
 - Create: `docs/release/pepper-x-v1.md`
+- Create: `scripts/verify-upgrade-ubuntu.sh`
+- Create: `scripts/verify-upgrade-fedora.sh`
+- Create: `scripts/verify-uninstall-cleanup.sh`
 - Test: `app/src/background.rs`
 
 - [ ] **Step 1: Write failing startup-behavior tests**
@@ -685,26 +733,35 @@ git commit -m "Complete Pepper X package metadata"
 Add tests for:
 - launch-at-login toggles reflecting real installed assets
 - background startup preserving the app runtime without forcing the window open
-- documenting upgrade/install flows for supported distros
+- documenting install, upgrade, and uninstall flows for supported distros
+- verifying Ubuntu and Fedora package upgrades plus uninstall cleanup
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
-Run: `cargo test -p pepper-x-app background_ settings_ -- --nocapture`
+Run: `cargo test -p pepper-x-app background_ -- --nocapture`
+Run: `cargo test -p pepper-x-app settings_ -- --nocapture`
+Run: `./scripts/verify-upgrade-ubuntu.sh <old.deb> <new.deb>`
+Run: `./scripts/verify-upgrade-fedora.sh <old.rpm> <new.rpm>`
+Run: `./scripts/verify-uninstall-cleanup.sh`
 Expected: FAIL because startup behavior is still shell-scaffold level.
 
 - [ ] **Step 3: Implement the smallest operational polish**
 
-Make launch-at-login and background behavior honest for packaged installs, then document install, upgrade, and release steps.
+Make launch-at-login and background behavior honest for packaged installs, then document install, upgrade, uninstall, and release steps.
 
 - [ ] **Step 4: Re-run the targeted tests**
 
-Run: `cargo test -p pepper-x-app background_ settings_ -- --nocapture`
+Run: `cargo test -p pepper-x-app background_ -- --nocapture`
+Run: `cargo test -p pepper-x-app settings_ -- --nocapture`
+Run: `./scripts/verify-upgrade-ubuntu.sh <old.deb> <new.deb>`
+Run: `./scripts/verify-upgrade-fedora.sh <old.rpm> <new.rpm>`
+Run: `./scripts/verify-uninstall-cleanup.sh`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/background.rs app/src/settings.rs README.md docs/release/pepper-x-v1.md
+git add app/src/background.rs app/src/settings.rs README.md docs/release/pepper-x-v1.md scripts/verify-upgrade-ubuntu.sh scripts/verify-upgrade-fedora.sh scripts/verify-uninstall-cleanup.sh
 git commit -m "Add Pepper X startup and release docs"
 ```
 
@@ -723,12 +780,24 @@ cargo fmt --check
 cargo test --workspace
 cargo check --workspace
 bash tests/smoke/test_extension_ipc.sh
+tests/smoke/test_prerecorded_asr.sh
+tests/smoke/test_cleanup_pipeline.sh
 ./scripts/smoke-hotkey.sh
+./scripts/smoke-insert-friendly.sh
+./scripts/smoke-insert-accessible.sh text-editor
+./scripts/smoke-insert-accessible.sh browser-textarea
+./scripts/smoke-insert-terminal.sh
 tests/smoke/test_live_recording.sh
 tests/smoke/test_model_management.sh
+tests/smoke/test_model_management.sh --offline
 tests/smoke/test_ocr_cleanup.sh
 tests/smoke/test_rerun_pipeline.sh
+tests/smoke/test_packaging_install.sh
 python3 -m pytest packaging/tests -q
+./scripts/verify-extension-install.sh
+./scripts/verify-upgrade-ubuntu.sh <old.deb> <new.deb>
+./scripts/verify-upgrade-fedora.sh <old.rpm> <new.rpm>
+./scripts/verify-uninstall-cleanup.sh
 ```
 
 Expected: PASS
