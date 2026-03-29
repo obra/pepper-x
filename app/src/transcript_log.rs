@@ -43,6 +43,8 @@ pub struct InsertionDiagnostics {
     pub target_application_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempted_backends: Vec<String>,
     pub succeeded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
@@ -57,6 +59,7 @@ impl InsertionDiagnostics {
             backend_name: backend_name.into(),
             target_application_name: target_application_name.into(),
             target_class: None,
+            attempted_backends: Vec::new(),
             succeeded: true,
             failure_reason: None,
         }
@@ -71,6 +74,7 @@ impl InsertionDiagnostics {
             backend_name: backend_name.into(),
             target_application_name: target_application_name.into(),
             target_class: None,
+            attempted_backends: Vec::new(),
             succeeded: false,
             failure_reason: Some(failure_reason.into()),
         }
@@ -78,6 +82,15 @@ impl InsertionDiagnostics {
 
     pub fn with_target_class(mut self, target_class: impl Into<String>) -> Self {
         self.target_class = Some(target_class.into());
+        self
+    }
+
+    pub fn with_attempted_backends<I, S>(mut self, attempted_backends: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.attempted_backends = attempted_backends.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -363,5 +376,40 @@ mod tests {
         set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
         set_or_remove_env_var("XDG_STATE_HOME", previous_xdg_state_home);
         set_or_remove_env_var("HOME", previous_home);
+    }
+
+    #[test]
+    fn transcript_log_round_trips_attempted_backends_from_jsonl() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(
+                br#"{"source_wav_path":"loop4.wav","transcript_text":"hello","backend_name":"sherpa-onnx","model_name":"nemo-parakeet-tdt-0.6b-v2-int8","elapsed_ms":7,"insertion":{"backend_name":"clipboard-paste","target_application_name":"Firefox","target_class":"browser-textarea","attempted_backends":["atspi-editable-text","clipboard-paste"],"succeeded":true}}"#,
+            )
+            .expect("append loop4 entry");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(b"\n")
+            .expect("append newline");
+
+        let entry = log
+            .recent_entries()
+            .expect("load entries")
+            .into_iter()
+            .next()
+            .expect("load loop4 entry");
+        let copy_root = temp_root();
+        let copy_log = TranscriptLog::open(&copy_root).expect("open copy log");
+
+        copy_log.append(&entry).expect("append copied entry");
+
+        let copied = std::fs::read_to_string(copy_log.log_path()).expect("read copied log");
+        assert!(copied.contains("\"attempted_backends\":[\"atspi-editable-text\",\"clipboard-paste\"]"));
     }
 }

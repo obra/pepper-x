@@ -8,6 +8,28 @@ const CONTROL_LEFT_KEYSYM: u32 = 65_507;
 const CONTROL_RIGHT_KEYSYM: u32 = 65_508;
 
 pub const FRIENDLY_INSERT_BACKEND_NAME: &str = "atspi-editable-text";
+pub const STRING_INJECTION_BACKEND_NAME: &str = "atspi-key-string";
+pub const CLIPBOARD_PASTE_BACKEND_NAME: &str = "clipboard-paste";
+pub const UINPUT_TEXT_BACKEND_NAME: &str = "uinput-text";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FriendlyInsertBackend {
+    EditableText,
+    StringInjection,
+    ClipboardPaste,
+    UinputText,
+}
+
+impl FriendlyInsertBackend {
+    fn backend_name(self) -> &'static str {
+        match self {
+            Self::EditableText => FRIENDLY_INSERT_BACKEND_NAME,
+            Self::StringInjection => STRING_INJECTION_BACKEND_NAME,
+            Self::ClipboardPaste => CLIPBOARD_PASTE_BACKEND_NAME,
+            Self::UinputText => UINPUT_TEXT_BACKEND_NAME,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FriendlyInsertPolicy {
@@ -18,6 +40,8 @@ pub struct FriendlyInsertPolicy {
 enum FriendlyInsertTargetClass {
     TextEditor,
     BrowserTextarea,
+    Terminal,
+    Hostile,
     Unsupported,
 }
 
@@ -33,6 +57,8 @@ pub struct FriendlyFocusedTarget {
 pub struct FriendlyInsertSelection {
     pub backend_name: &'static str,
     pub target_application_id: String,
+    pub target_class: &'static str,
+    pub attempted_backends: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +75,9 @@ pub struct FriendlyInsertOutcome {
 pub struct FriendlyInsertFailure {
     pub backend_name: &'static str,
     pub reason: FriendlyInsertError,
+    pub target_application_name: Option<String>,
+    pub target_class: Option<&'static str>,
+    pub attempted_backends: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +97,11 @@ pub enum FriendlyInsertRunError {
     InitializationFailed(i32),
     MissingFocusedTarget,
     UnsupportedTarget(FriendlyInsertFailure),
+    SelectedBackendFailure {
+        selection: FriendlyInsertSelection,
+        target_application_name: String,
+        reason: Box<FriendlyInsertRunError>,
+    },
     Access(String),
     ReadbackMismatch,
 }
@@ -115,11 +149,55 @@ impl fmt::Display for FriendlyInsertRunError {
                 f.write_str("friendly insertion could not find a focused target")
             }
             Self::UnsupportedTarget(error) => write!(f, "{error}"),
+            Self::SelectedBackendFailure { reason, .. } => write!(f, "{reason}"),
             Self::Access(message) => f.write_str(message),
             Self::ReadbackMismatch => {
                 f.write_str("friendly insertion readback did not match the requested text")
             }
         }
+    }
+}
+
+impl FriendlyInsertRunError {
+    pub fn selected_backend(&self) -> Option<&FriendlyInsertSelection> {
+        match self {
+            Self::SelectedBackendFailure { selection, .. } => Some(selection),
+            _ => None,
+        }
+    }
+
+    pub fn target_application_name(&self) -> Option<&str> {
+        match self {
+            Self::SelectedBackendFailure {
+                target_application_name,
+                ..
+            } => Some(target_application_name),
+            Self::UnsupportedTarget(error) => error.target_application_name.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn target_class(&self) -> Option<&'static str> {
+        match self {
+            Self::SelectedBackendFailure { selection, .. } => Some(selection.target_class),
+            Self::UnsupportedTarget(error) => error.target_class,
+            _ => None,
+        }
+    }
+
+    pub fn attempted_backends(&self) -> &[&'static str] {
+        match self {
+            Self::SelectedBackendFailure { selection, .. } => &selection.attempted_backends,
+            Self::UnsupportedTarget(error) => &error.attempted_backends,
+            _ => &[],
+        }
+    }
+}
+
+impl FriendlyInsertFailure {
+    fn with_target_application_name(mut self, target_application_name: impl Into<String>) -> Self {
+        self.target_application_name = Some(target_application_name.into());
+        self
     }
 }
 
@@ -141,17 +219,19 @@ fn friendly_insert_target_class_from_application_id(
         | "com.microsoft.Edge"
         | "vivaldi"
         | "com.vivaldi.Vivaldi" => FriendlyInsertTargetClass::BrowserTextarea,
+        "ghostty" | "xterm" => FriendlyInsertTargetClass::Terminal,
+        "wine" | "wine64-preloader" => FriendlyInsertTargetClass::Hostile,
         _ => FriendlyInsertTargetClass::Unsupported,
     }
 }
 
-fn friendly_insert_target_class_name(
-    target_class: FriendlyInsertTargetClass,
-) -> Option<&'static str> {
+fn friendly_insert_target_class_name(target_class: FriendlyInsertTargetClass) -> &'static str {
     match target_class {
-        FriendlyInsertTargetClass::TextEditor => Some("text-editor"),
-        FriendlyInsertTargetClass::BrowserTextarea => Some("browser-textarea"),
-        FriendlyInsertTargetClass::Unsupported => None,
+        FriendlyInsertTargetClass::TextEditor => "text-editor",
+        FriendlyInsertTargetClass::BrowserTextarea => "browser-textarea",
+        FriendlyInsertTargetClass::Terminal => "terminal",
+        FriendlyInsertTargetClass::Hostile => "hostile",
+        FriendlyInsertTargetClass::Unsupported => "unsupported",
     }
 }
 
@@ -320,6 +400,12 @@ pub fn select_friendly_insert_backend(
         friendly_insert_target_class_from_application_id(policy.target_application_id);
     let actual_target_class =
         friendly_insert_target_class_from_application_id(&target.application_id);
+    let target_class = friendly_insert_target_class_name(actual_target_class);
+    let fallback_chain = fallback_chain_for_target_class(actual_target_class);
+    let attempted_backends = fallback_chain
+        .iter()
+        .map(|backend| backend.backend_name())
+        .collect::<Vec<_>>();
 
     if expected_target_class == FriendlyInsertTargetClass::Unsupported
         || actual_target_class == FriendlyInsertTargetClass::Unsupported
@@ -331,33 +417,29 @@ pub fn select_friendly_insert_backend(
                 expected_application_id: policy.target_application_id.into(),
                 actual_application_id: target.application_id.clone(),
             },
+            target_application_name: None,
+            target_class: Some(target_class),
+            attempted_backends: Vec::new(),
         });
     }
-
-    if !target.is_editable {
-        return Err(FriendlyInsertFailure {
-            backend_name: FRIENDLY_INSERT_BACKEND_NAME,
-            reason: FriendlyInsertError::TargetNotEditable,
-        });
-    }
-
-    if !target.supports_editable_text {
-        return Err(FriendlyInsertFailure {
-            backend_name: FRIENDLY_INSERT_BACKEND_NAME,
-            reason: FriendlyInsertError::MissingEditableText,
-        });
-    }
-
-    if !target.supports_caret {
-        return Err(FriendlyInsertFailure {
-            backend_name: FRIENDLY_INSERT_BACKEND_NAME,
-            reason: FriendlyInsertError::MissingCaretSurface,
-        });
-    }
+    let selected_backend = fallback_chain
+        .iter()
+        .copied()
+        .find(|backend| backend_matches_target(*backend, actual_target_class, target))
+        .ok_or_else(|| fallback_selection_failure(target, target_class, attempted_backends.clone()))?;
+    let attempted_backends = fallback_chain
+        .iter()
+        .copied()
+        .take_while(|backend| *backend != selected_backend)
+        .chain(std::iter::once(selected_backend))
+        .map(FriendlyInsertBackend::backend_name)
+        .collect::<Vec<_>>();
 
     Ok(FriendlyInsertSelection {
-        backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+        backend_name: selected_backend.backend_name(),
         target_application_id: target.application_id.clone(),
+        target_class,
+        attempted_backends,
     })
 }
 
@@ -384,20 +466,50 @@ pub fn insert_text_into_friendly_target(
             target.caret_offset,
             insert_text.as_ptr(),
             insert_length,
-        )?;
+        )
+        .map_err(|error| {
+            with_selected_backend_failure(
+                &target.selection,
+                &target.application_name,
+                error,
+            )
+        })?;
     }
 
-    let after_text = unsafe { text_contents(target.text.as_ptr())? };
+    let after_text = unsafe { text_contents(target.text.as_ptr()) }
+        .map_err(|error| {
+            with_selected_backend_failure(
+                &target.selection,
+                &target.application_name,
+                error,
+            )
+        })?;
     let expected_after_text = apply_insert_at_char_offset(
         &target.before_text,
         text,
         usize::try_from(target.caret_offset)
-            .map_err(|_| FriendlyInsertRunError::ReadbackMismatch)?,
+            .map_err(|_| {
+                with_selected_backend_failure(
+                    &target.selection,
+                    &target.application_name,
+                    FriendlyInsertRunError::ReadbackMismatch,
+                )
+            })?,
     )
-    .ok_or(FriendlyInsertRunError::ReadbackMismatch)?;
+    .ok_or_else(|| {
+        with_selected_backend_failure(
+            &target.selection,
+            &target.application_name,
+            FriendlyInsertRunError::ReadbackMismatch,
+        )
+    })?;
 
     if after_text != expected_after_text {
-        return Err(FriendlyInsertRunError::ReadbackMismatch);
+        return Err(with_selected_backend_failure(
+            &target.selection,
+            &target.application_name,
+            FriendlyInsertRunError::ReadbackMismatch,
+        ));
     }
 
     Ok(FriendlyInsertOutcome {
@@ -416,6 +528,110 @@ fn control_bit(keysym: u32) -> Option<u8> {
         CONTROL_RIGHT_KEYSYM => Some(0b10),
         _ => None,
     }
+}
+
+fn fallback_chain_for_target_class(
+    target_class: FriendlyInsertTargetClass,
+) -> &'static [FriendlyInsertBackend] {
+    match target_class {
+        FriendlyInsertTargetClass::TextEditor => &[FriendlyInsertBackend::EditableText],
+        FriendlyInsertTargetClass::BrowserTextarea => &[
+            FriendlyInsertBackend::EditableText,
+            FriendlyInsertBackend::ClipboardPaste,
+        ],
+        FriendlyInsertTargetClass::Terminal => &[
+            FriendlyInsertBackend::EditableText,
+            FriendlyInsertBackend::StringInjection,
+            FriendlyInsertBackend::ClipboardPaste,
+        ],
+        FriendlyInsertTargetClass::Hostile => &[
+            FriendlyInsertBackend::EditableText,
+            FriendlyInsertBackend::StringInjection,
+            FriendlyInsertBackend::ClipboardPaste,
+            FriendlyInsertBackend::UinputText,
+        ],
+        FriendlyInsertTargetClass::Unsupported => &[],
+    }
+}
+
+fn backend_matches_target(
+    backend: FriendlyInsertBackend,
+    target_class: FriendlyInsertTargetClass,
+    target: &FriendlyFocusedTarget,
+) -> bool {
+    match backend {
+        FriendlyInsertBackend::EditableText => {
+            target.is_editable && target.supports_editable_text && target.supports_caret
+        }
+        FriendlyInsertBackend::StringInjection => target_class == FriendlyInsertTargetClass::Terminal,
+        FriendlyInsertBackend::ClipboardPaste => {
+            target.is_editable
+                && matches!(
+                    target_class,
+                    FriendlyInsertTargetClass::BrowserTextarea
+                        | FriendlyInsertTargetClass::Terminal
+                        | FriendlyInsertTargetClass::Hostile
+                )
+        }
+        FriendlyInsertBackend::UinputText => target_class == FriendlyInsertTargetClass::Hostile,
+    }
+}
+
+fn fallback_selection_failure(
+    target: &FriendlyFocusedTarget,
+    target_class: &'static str,
+    attempted_backends: Vec<&'static str>,
+) -> FriendlyInsertFailure {
+    let reason = if !target.is_editable {
+        FriendlyInsertError::TargetNotEditable
+    } else if !target.supports_editable_text {
+        FriendlyInsertError::MissingEditableText
+    } else if !target.supports_caret {
+        FriendlyInsertError::MissingCaretSurface
+    } else {
+        FriendlyInsertError::MissingEditableText
+    };
+
+    FriendlyInsertFailure {
+        backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+        reason,
+        target_application_name: None,
+        target_class: Some(target_class),
+        attempted_backends,
+    }
+}
+
+fn with_selected_backend_failure(
+    selection: &FriendlyInsertSelection,
+    target_application_name: &str,
+    error: FriendlyInsertRunError,
+) -> FriendlyInsertRunError {
+    match error {
+        FriendlyInsertRunError::SelectedBackendFailure { .. } => error,
+        _ => FriendlyInsertRunError::SelectedBackendFailure {
+            selection: selection.clone(),
+            target_application_name: target_application_name.into(),
+            reason: Box::new(error),
+        },
+    }
+}
+
+fn ensure_runtime_supported_backend(
+    selection: &FriendlyInsertSelection,
+    target_application_name: &str,
+) -> Result<(), FriendlyInsertRunError> {
+    if selection.backend_name == FRIENDLY_INSERT_BACKEND_NAME {
+        return Ok(());
+    }
+
+    Err(FriendlyInsertRunError::SelectedBackendFailure {
+        selection: selection.clone(),
+        target_application_name: target_application_name.into(),
+        reason: Box::new(FriendlyInsertRunError::Access(format!(
+            "friendly insertion backend {} is not implemented yet",
+            selection.backend_name
+        ))),
+    })
 }
 
 struct FocusedFriendlyTarget {
@@ -466,6 +682,7 @@ fn focused_friendly_target(
     let application = unsafe { accessible_application(focused.as_ptr())? };
     let application_name = unsafe { accessible_name(application.as_ptr())? };
     let application_id = unsafe { friendly_application_id_from_process_id(focused.as_ptr())? };
+    let actual_target_class = friendly_insert_target_class_from_application_id(&application_id);
     let is_editable = unsafe {
         accessible_has_state(focused.as_ptr(), ffi::ATSPI_STATE_EDITABLE)
             .map_err(FriendlyInsertRunError::Access)?
@@ -476,9 +693,16 @@ fn focused_friendly_target(
             focused.as_ptr(),
         ))
     };
-    let caret_offset = match text.as_ref() {
-        Some(text) => unsafe { text_caret_offset(text.as_ptr())? },
-        None => -1,
+    let caret_offset = match actual_target_class {
+        FriendlyInsertTargetClass::TextEditor | FriendlyInsertTargetClass::BrowserTextarea => {
+            match text.as_ref() {
+                Some(text) => unsafe { text_caret_offset(text.as_ptr())? },
+                None => -1,
+            }
+        }
+        FriendlyInsertTargetClass::Terminal
+        | FriendlyInsertTargetClass::Hostile
+        | FriendlyInsertTargetClass::Unsupported => -1,
     };
     let target = FriendlyFocusedTarget {
         application_id,
@@ -486,23 +710,33 @@ fn focused_friendly_target(
         supports_editable_text: editable_text.is_some(),
         supports_caret: caret_offset >= 0,
     };
-    let target_class = friendly_insert_target_class_name(
-        friendly_insert_target_class_from_application_id(&target.application_id),
-    )
-    .ok_or_else(|| {
-        FriendlyInsertRunError::Access("friendly insertion target class is unsupported".into())
-    })?;
-    let selection = select_friendly_insert_backend(&target, policy)
-        .map_err(FriendlyInsertRunError::UnsupportedTarget)?;
-    let text = text.ok_or_else(|| {
-        FriendlyInsertRunError::Access("friendly insertion target is missing Text support".into())
-    })?;
-    let editable_text = editable_text.ok_or_else(|| {
-        FriendlyInsertRunError::Access(
-            "friendly insertion target is missing EditableText support".into(),
+    let target_class = friendly_insert_target_class_name(actual_target_class);
+    let selection = select_friendly_insert_backend(&target, policy).map_err(|error| {
+        FriendlyInsertRunError::UnsupportedTarget(
+            error.with_target_application_name(application_name.clone()),
         )
     })?;
-    let before_text = unsafe { text_contents(text.as_ptr())? };
+    ensure_runtime_supported_backend(&selection, &application_name)?;
+    let text = text.ok_or_else(|| {
+        with_selected_backend_failure(
+            &selection,
+            &application_name,
+            FriendlyInsertRunError::Access(
+                "friendly insertion target is missing Text support".into(),
+            ),
+        )
+    })?;
+    let editable_text = editable_text.ok_or_else(|| {
+        with_selected_backend_failure(
+            &selection,
+            &application_name,
+            FriendlyInsertRunError::Access(
+                "friendly insertion target is missing EditableText support".into(),
+            ),
+        )
+    })?;
+    let before_text = unsafe { text_contents(text.as_ptr()) }
+        .map_err(|error| with_selected_backend_failure(&selection, &application_name, error))?;
 
     Ok(FocusedFriendlyTarget {
         selection,
@@ -518,6 +752,7 @@ fn focused_friendly_target(
 fn friendly_application_id_from_executable_name(executable_name: &str) -> String {
     match executable_name {
         "gnome-text-editor" => "org.gnome.TextEditor".into(),
+        "wine64-preloader" => "wine".into(),
         _ => executable_name.into(),
     }
 }
@@ -985,6 +1220,8 @@ mod accessible_insert_validation {
                 actual_application_id: "org.gnome.Calculator".into(),
             }
         );
+        assert_eq!(error.target_class, Some("unsupported"));
+        assert!(error.attempted_backends.is_empty());
     }
 
     #[test]
@@ -1004,6 +1241,8 @@ mod accessible_insert_validation {
 
         assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
         assert_eq!(error.reason, FriendlyInsertError::TargetNotEditable);
+        assert_eq!(error.target_class, Some("text-editor"));
+        assert_eq!(error.attempted_backends, vec![FRIENDLY_INSERT_BACKEND_NAME]);
     }
 
     #[test]
@@ -1081,6 +1320,124 @@ mod accessible_insert_validation {
         assert_eq!(selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
         assert_eq!(selection.target_application_id, "firefox");
     }
+
+    #[test]
+    fn fallback_insert_prefers_semantic_insertion_for_text_editor_targets() {
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "org.gnome.TextEditor".into(),
+                is_editable: true,
+                supports_editable_text: true,
+                supports_caret: true,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "org.gnome.TextEditor",
+            },
+        )
+        .unwrap();
+
+        let snapshot = format!("{selection:?}");
+
+        assert!(snapshot.contains("backend_name: \"atspi-editable-text\""));
+        assert!(snapshot.contains("target_class: \"text-editor\""));
+        assert!(snapshot.contains("attempted_backends: [\"atspi-editable-text\"]"));
+    }
+
+    #[test]
+    fn fallback_insert_promotes_terminal_targets_to_string_injection() {
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "ghostty".into(),
+                is_editable: false,
+                supports_editable_text: false,
+                supports_caret: false,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "ghostty",
+            },
+        )
+        .unwrap();
+
+        let snapshot = format!("{selection:?}");
+
+        assert!(snapshot.contains("backend_name: \"atspi-key-string\""));
+        assert!(snapshot.contains("target_class: \"terminal\""));
+        assert!(snapshot.contains(
+            "attempted_backends: [\"atspi-editable-text\", \"atspi-key-string\"]"
+        ));
+    }
+
+    #[test]
+    fn fallback_insert_selects_clipboard_after_text_paths_fail() {
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "firefox".into(),
+                is_editable: true,
+                supports_editable_text: false,
+                supports_caret: false,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "browser-textarea",
+            },
+        )
+        .unwrap();
+
+        let snapshot = format!("{selection:?}");
+
+        assert!(snapshot.contains("backend_name: \"clipboard-paste\""));
+        assert!(snapshot.contains("target_class: \"browser-textarea\""));
+        assert!(snapshot.contains(
+            "attempted_backends: [\"atspi-editable-text\", \"clipboard-paste\"]"
+        ));
+    }
+
+    #[test]
+    fn fallback_insert_keeps_uinput_last_for_hostile_targets() {
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "wine".into(),
+                is_editable: false,
+                supports_editable_text: false,
+                supports_caret: false,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "wine",
+            },
+        )
+        .unwrap();
+
+        let snapshot = format!("{selection:?}");
+
+        assert!(snapshot.contains("backend_name: \"uinput-text\""));
+        assert!(snapshot.contains("target_class: \"hostile\""));
+        assert!(snapshot.contains(
+            "attempted_backends: [\"atspi-editable-text\", \"atspi-key-string\", \"clipboard-paste\", \"uinput-text\"]"
+        ));
+    }
+
+    #[test]
+    fn fallback_insert_prefers_clipboard_before_uinput_for_editable_hostile_targets() {
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "wine".into(),
+                is_editable: true,
+                supports_editable_text: false,
+                supports_caret: false,
+            },
+            &FriendlyInsertPolicy {
+                target_application_id: "wine",
+            },
+        )
+        .unwrap();
+
+        let snapshot = format!("{selection:?}");
+
+        assert!(snapshot.contains("backend_name: \"clipboard-paste\""));
+        assert!(snapshot.contains("target_class: \"hostile\""));
+        assert!(snapshot.contains(
+            "attempted_backends: [\"atspi-editable-text\", \"atspi-key-string\", \"clipboard-paste\"]"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1132,6 +1489,35 @@ mod accessible_insert_runtime_helpers {
         assert_eq!(
             apply_insert_at_char_offset("ab🙂d", "X", 3),
             Some("ab🙂Xd".into())
+        );
+    }
+
+    #[test]
+    fn accessible_insert_runtime_helpers_reject_unimplemented_selected_backends() {
+        let error = ensure_runtime_supported_backend(&FriendlyInsertSelection {
+            backend_name: STRING_INJECTION_BACKEND_NAME,
+            target_application_id: "ghostty".into(),
+            target_class: "terminal",
+            attempted_backends: vec![FRIENDLY_INSERT_BACKEND_NAME, STRING_INJECTION_BACKEND_NAME],
+        }, "Ghostty")
+        .unwrap_err();
+
+        assert_eq!(
+            error.selected_backend().expect("selected backend"),
+            &FriendlyInsertSelection {
+                backend_name: STRING_INJECTION_BACKEND_NAME,
+                target_application_id: "ghostty".into(),
+                target_class: "terminal",
+                attempted_backends: vec![
+                    FRIENDLY_INSERT_BACKEND_NAME,
+                    STRING_INJECTION_BACKEND_NAME,
+                ],
+            }
+        );
+        assert_eq!(error.target_application_name(), Some("Ghostty"));
+        assert_eq!(
+            error.to_string(),
+            "friendly insertion backend atspi-key-string is not implemented yet"
         );
     }
 }
