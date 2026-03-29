@@ -2,6 +2,7 @@
 members = [
     "app",
     "crates/pepperx-asr",
+    "crates/pepperx-audio",
     "crates/pepperx-ipc",
     "crates/pepperx-session",
     "crates/pepperx-platform-gnome",
