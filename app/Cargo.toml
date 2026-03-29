@@ -15,6 +15,7 @@ pepperx-asr = { path = "../crates/pepperx-asr" }
 pepperx-audio = { path = "../crates/pepperx-audio" }
 pepperx-cleanup = { path = "../crates/pepperx-cleanup" }
 pepperx-ipc = { path = "../crates/pepperx-ipc" }
+pepperx-models = { path = "../crates/pepperx-models" }
 pepperx-platform-gnome = { path = "../crates/pepperx-platform-gnome" }
 pepperx-session = { path = "../crates/pepperx-session" }
 serde = { version = "1.0.228", features = ["derive"] }
