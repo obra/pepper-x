@@ -60,6 +60,7 @@ impl AppSettings {
         })
     }
 
+    #[cfg(test)]
     pub fn save(&self) -> io::Result<()> {
         let settings_path = settings_path();
         if let Some(parent) = settings_path.parent() {

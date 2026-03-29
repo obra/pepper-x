@@ -220,6 +220,7 @@ where
         }
     }
 
+    #[cfg(test)]
     pub fn session_state(&self) -> SessionState {
         self.session.state()
     }
