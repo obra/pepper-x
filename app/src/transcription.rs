@@ -12,9 +12,9 @@ use pepperx_platform_gnome::atspi::{
     FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME, UINPUT_TEXT_BACKEND_NAME,
 };
 
+use crate::history_store::{ArchiveWriteRequest, HistoryStore};
 use crate::transcript_log::{
     nonempty_env_path, state_root, CleanupDiagnostics, InsertionDiagnostics, TranscriptEntry,
-    TranscriptLog,
 };
 
 const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
@@ -389,8 +389,8 @@ fn transcript_entry_from_result(result: TranscriptionResult) -> TranscriptEntry 
 fn archive_transcript_entry(
     entry: TranscriptEntry,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
-    let log = TranscriptLog::open(state_root())?;
-    log.append(&entry)?;
+    let store = HistoryStore::open(state_root())?;
+    store.archive_run(&ArchiveWriteRequest::new(entry.clone()))?;
     Ok(entry)
 }
 

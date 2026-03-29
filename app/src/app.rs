@@ -8,9 +8,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use crate::background::BackgroundController;
+use crate::history_store::HistoryStore;
 use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::AppSettings;
-use crate::transcript_log::{state_root, TranscriptEntry, TranscriptLog};
+use crate::transcript_log::{state_root, TranscriptEntry};
 use crate::window::MainWindow;
 
 pub const APPLICATION_ID: &str = "com.obra.PepperX";
@@ -71,7 +72,7 @@ fn run_headless() {
 }
 
 pub fn load_history_entries() -> io::Result<Vec<TranscriptEntry>> {
-    TranscriptLog::open(state_root())?.recent_entries()
+    HistoryStore::open(state_root())?.recent_entries()
 }
 
 fn build_live_runtime(settings: &AppSettings) -> std::sync::Arc<LiveRuntimeHandle> {

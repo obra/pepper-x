@@ -1,6 +1,7 @@
 mod app;
 mod background;
 mod cli;
+mod history_store;
 mod session_runtime;
 mod settings;
 mod transcript_log;
