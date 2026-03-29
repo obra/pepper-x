@@ -124,3 +124,21 @@ For the live-session insertion smoke, start a GNOME Text Editor document, focus 
 ```
 
 Run that helper inside the live GNOME 48+ Wayland session, or export that session's `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, and `XDG_SESSION_TYPE=wayland` first. The helper is only meant for a real in-session GNOME client; SSH into the VM is not an authoritative AT-SPI insertion surface.
+
+## Loop 3 Common Accessible Insertion
+
+Loop 3 broadens the semantic AT-SPI insertion path to a small declared set of accessible target classes:
+
+- `text-editor`
+- `browser-textarea`
+
+This loop is still semantic insertion only. Pepper X does not promise clipboard fallback, AT-SPI string injection, or `uinput` behavior here yet.
+
+Use the accessible-target smoke helper inside a live GNOME 48+ Wayland session:
+
+```sh
+./scripts/smoke-insert-accessible.sh text-editor
+./scripts/smoke-insert-accessible.sh browser-textarea
+```
+
+For the browser smoke, focus a normal textarea or contenteditable field in Firefox before running the helper.
