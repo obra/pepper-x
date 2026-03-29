@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-test_path="atspi::friendly_insert_live::friendly_insert_live_text_editor_round_trip"
+test_path="atspi::accessible_insert_live::accessible_insert_live_text_editor_round_trip"
 
 if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     echo "Run this helper inside the live GNOME session or export that session's DBUS_SESSION_BUS_ADDRESS first" >&2

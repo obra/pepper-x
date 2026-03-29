@@ -270,6 +270,13 @@ OCR is there to improve cleanup confidence, not to become a separate feature tra
 
 Loop 5 is not complete until the cleanup tests and the raw-versus-cleaned smoke checks pass while preserving raw transcript artifacts.
 
+Current loop-5 surface:
+- prerecorded WAV cleanup via `--transcribe-wav-and-cleanup`
+- cleaned friendly insertion via `--transcribe-wav-and-cleanup-and-insert-friendly`
+- raw transcript archived separately from `cleanup.cleaned_text`
+- optional OCR text carried only as bounded cleanup-supporting context
+- insertion failures surfaced after the archive is written, not hidden by cleanup success
+
 ---
 
 ## Chunk 3: Cross-Loop Guardrails

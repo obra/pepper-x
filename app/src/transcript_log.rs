@@ -472,7 +472,9 @@ mod tests {
         copy_log.append(&entry).expect("append copied entry");
 
         let copied = std::fs::read_to_string(copy_log.log_path()).expect("read copied log");
-        assert!(copied.contains("\"attempted_backends\":[\"atspi-editable-text\",\"clipboard-paste\"]"));
+        assert!(
+            copied.contains("\"attempted_backends\":[\"atspi-editable-text\",\"clipboard-paste\"]")
+        );
     }
 
     #[test]

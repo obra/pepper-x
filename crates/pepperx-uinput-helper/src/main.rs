@@ -46,8 +46,12 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("failed to remove stale helper socket: {error}"))?;
     }
 
-    let listener = UnixListener::bind(&socket_path)
-        .map_err(|error| format!("failed to bind helper socket {}: {error}", socket_path.display()))?;
+    let listener = UnixListener::bind(&socket_path).map_err(|error| {
+        format!(
+            "failed to bind helper socket {}: {error}",
+            socket_path.display()
+        )
+    })?;
     let mut device = create_virtual_keyboard()?;
 
     loop {
@@ -65,7 +69,9 @@ fn configured_socket_path() -> Result<PathBuf, String> {
 
     let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .ok_or_else(|| "PEPPERX_UINPUT_HELPER_SOCKET or XDG_RUNTIME_DIR must be set".to_string())?;
-    Ok(PathBuf::from(runtime_dir).join("pepper-x").join("uinput-helper.sock"))
+    Ok(PathBuf::from(runtime_dir)
+        .join("pepper-x")
+        .join("uinput-helper.sock"))
 }
 
 fn create_virtual_keyboard() -> Result<VirtualDevice, String> {
@@ -87,15 +93,13 @@ fn create_virtual_keyboard() -> Result<VirtualDevice, String> {
     Ok(device)
 }
 
-fn handle_connection(
-    mut stream: UnixStream,
-    device: &mut VirtualDevice,
-) -> Result<(), String> {
-    let request: UinputInsertRequest =
-        serde_json::from_reader(BufReader::new(stream.try_clone().map_err(|error| {
-            format!("failed to clone helper stream: {error}")
-        })?))
-        .map_err(|error| format!("failed to parse helper request: {error}"))?;
+fn handle_connection(mut stream: UnixStream, device: &mut VirtualDevice) -> Result<(), String> {
+    let request: UinputInsertRequest = serde_json::from_reader(BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|error| format!("failed to clone helper stream: {error}"))?,
+    ))
+    .map_err(|error| format!("failed to parse helper request: {error}"))?;
 
     let response = match type_text(device, &request.text) {
         Ok(()) => UinputInsertResponse {
@@ -214,103 +218,394 @@ fn keystroke_for_char(ch: char) -> Result<KeyStroke, String> {
     use evdev::KeyCode as K;
 
     let stroke = match ch {
-        'a' => KeyStroke { key: K::KEY_A, shift: false },
-        'b' => KeyStroke { key: K::KEY_B, shift: false },
-        'c' => KeyStroke { key: K::KEY_C, shift: false },
-        'd' => KeyStroke { key: K::KEY_D, shift: false },
-        'e' => KeyStroke { key: K::KEY_E, shift: false },
-        'f' => KeyStroke { key: K::KEY_F, shift: false },
-        'g' => KeyStroke { key: K::KEY_G, shift: false },
-        'h' => KeyStroke { key: K::KEY_H, shift: false },
-        'i' => KeyStroke { key: K::KEY_I, shift: false },
-        'j' => KeyStroke { key: K::KEY_J, shift: false },
-        'k' => KeyStroke { key: K::KEY_K, shift: false },
-        'l' => KeyStroke { key: K::KEY_L, shift: false },
-        'm' => KeyStroke { key: K::KEY_M, shift: false },
-        'n' => KeyStroke { key: K::KEY_N, shift: false },
-        'o' => KeyStroke { key: K::KEY_O, shift: false },
-        'p' => KeyStroke { key: K::KEY_P, shift: false },
-        'q' => KeyStroke { key: K::KEY_Q, shift: false },
-        'r' => KeyStroke { key: K::KEY_R, shift: false },
-        's' => KeyStroke { key: K::KEY_S, shift: false },
-        't' => KeyStroke { key: K::KEY_T, shift: false },
-        'u' => KeyStroke { key: K::KEY_U, shift: false },
-        'v' => KeyStroke { key: K::KEY_V, shift: false },
-        'w' => KeyStroke { key: K::KEY_W, shift: false },
-        'x' => KeyStroke { key: K::KEY_X, shift: false },
-        'y' => KeyStroke { key: K::KEY_Y, shift: false },
-        'z' => KeyStroke { key: K::KEY_Z, shift: false },
-        'A' => KeyStroke { key: K::KEY_A, shift: true },
-        'B' => KeyStroke { key: K::KEY_B, shift: true },
-        'C' => KeyStroke { key: K::KEY_C, shift: true },
-        'D' => KeyStroke { key: K::KEY_D, shift: true },
-        'E' => KeyStroke { key: K::KEY_E, shift: true },
-        'F' => KeyStroke { key: K::KEY_F, shift: true },
-        'G' => KeyStroke { key: K::KEY_G, shift: true },
-        'H' => KeyStroke { key: K::KEY_H, shift: true },
-        'I' => KeyStroke { key: K::KEY_I, shift: true },
-        'J' => KeyStroke { key: K::KEY_J, shift: true },
-        'K' => KeyStroke { key: K::KEY_K, shift: true },
-        'L' => KeyStroke { key: K::KEY_L, shift: true },
-        'M' => KeyStroke { key: K::KEY_M, shift: true },
-        'N' => KeyStroke { key: K::KEY_N, shift: true },
-        'O' => KeyStroke { key: K::KEY_O, shift: true },
-        'P' => KeyStroke { key: K::KEY_P, shift: true },
-        'Q' => KeyStroke { key: K::KEY_Q, shift: true },
-        'R' => KeyStroke { key: K::KEY_R, shift: true },
-        'S' => KeyStroke { key: K::KEY_S, shift: true },
-        'T' => KeyStroke { key: K::KEY_T, shift: true },
-        'U' => KeyStroke { key: K::KEY_U, shift: true },
-        'V' => KeyStroke { key: K::KEY_V, shift: true },
-        'W' => KeyStroke { key: K::KEY_W, shift: true },
-        'X' => KeyStroke { key: K::KEY_X, shift: true },
-        'Y' => KeyStroke { key: K::KEY_Y, shift: true },
-        'Z' => KeyStroke { key: K::KEY_Z, shift: true },
-        '0' => KeyStroke { key: K::KEY_0, shift: false },
-        '1' => KeyStroke { key: K::KEY_1, shift: false },
-        '2' => KeyStroke { key: K::KEY_2, shift: false },
-        '3' => KeyStroke { key: K::KEY_3, shift: false },
-        '4' => KeyStroke { key: K::KEY_4, shift: false },
-        '5' => KeyStroke { key: K::KEY_5, shift: false },
-        '6' => KeyStroke { key: K::KEY_6, shift: false },
-        '7' => KeyStroke { key: K::KEY_7, shift: false },
-        '8' => KeyStroke { key: K::KEY_8, shift: false },
-        '9' => KeyStroke { key: K::KEY_9, shift: false },
-        '!' => KeyStroke { key: K::KEY_1, shift: true },
-        '@' => KeyStroke { key: K::KEY_2, shift: true },
-        '#' => KeyStroke { key: K::KEY_3, shift: true },
-        '$' => KeyStroke { key: K::KEY_4, shift: true },
-        '%' => KeyStroke { key: K::KEY_5, shift: true },
-        '^' => KeyStroke { key: K::KEY_6, shift: true },
-        '&' => KeyStroke { key: K::KEY_7, shift: true },
-        '*' => KeyStroke { key: K::KEY_8, shift: true },
-        '(' => KeyStroke { key: K::KEY_9, shift: true },
-        ')' => KeyStroke { key: K::KEY_0, shift: true },
-        ' ' => KeyStroke { key: K::KEY_SPACE, shift: false },
-        '\n' => KeyStroke { key: K::KEY_ENTER, shift: false },
-        '\t' => KeyStroke { key: K::KEY_TAB, shift: false },
-        '-' => KeyStroke { key: K::KEY_MINUS, shift: false },
-        '_' => KeyStroke { key: K::KEY_MINUS, shift: true },
-        '=' => KeyStroke { key: K::KEY_EQUAL, shift: false },
-        '+' => KeyStroke { key: K::KEY_EQUAL, shift: true },
-        '[' => KeyStroke { key: K::KEY_LEFTBRACE, shift: false },
-        '{' => KeyStroke { key: K::KEY_LEFTBRACE, shift: true },
-        ']' => KeyStroke { key: K::KEY_RIGHTBRACE, shift: false },
-        '}' => KeyStroke { key: K::KEY_RIGHTBRACE, shift: true },
-        ';' => KeyStroke { key: K::KEY_SEMICOLON, shift: false },
-        ':' => KeyStroke { key: K::KEY_SEMICOLON, shift: true },
-        '\'' => KeyStroke { key: K::KEY_APOSTROPHE, shift: false },
-        '"' => KeyStroke { key: K::KEY_APOSTROPHE, shift: true },
-        '`' => KeyStroke { key: K::KEY_GRAVE, shift: false },
-        '~' => KeyStroke { key: K::KEY_GRAVE, shift: true },
-        '\\' => KeyStroke { key: K::KEY_BACKSLASH, shift: false },
-        '|' => KeyStroke { key: K::KEY_BACKSLASH, shift: true },
-        ',' => KeyStroke { key: K::KEY_COMMA, shift: false },
-        '<' => KeyStroke { key: K::KEY_COMMA, shift: true },
-        '.' => KeyStroke { key: K::KEY_DOT, shift: false },
-        '>' => KeyStroke { key: K::KEY_DOT, shift: true },
-        '/' => KeyStroke { key: K::KEY_SLASH, shift: false },
-        '?' => KeyStroke { key: K::KEY_SLASH, shift: true },
+        'a' => KeyStroke {
+            key: K::KEY_A,
+            shift: false,
+        },
+        'b' => KeyStroke {
+            key: K::KEY_B,
+            shift: false,
+        },
+        'c' => KeyStroke {
+            key: K::KEY_C,
+            shift: false,
+        },
+        'd' => KeyStroke {
+            key: K::KEY_D,
+            shift: false,
+        },
+        'e' => KeyStroke {
+            key: K::KEY_E,
+            shift: false,
+        },
+        'f' => KeyStroke {
+            key: K::KEY_F,
+            shift: false,
+        },
+        'g' => KeyStroke {
+            key: K::KEY_G,
+            shift: false,
+        },
+        'h' => KeyStroke {
+            key: K::KEY_H,
+            shift: false,
+        },
+        'i' => KeyStroke {
+            key: K::KEY_I,
+            shift: false,
+        },
+        'j' => KeyStroke {
+            key: K::KEY_J,
+            shift: false,
+        },
+        'k' => KeyStroke {
+            key: K::KEY_K,
+            shift: false,
+        },
+        'l' => KeyStroke {
+            key: K::KEY_L,
+            shift: false,
+        },
+        'm' => KeyStroke {
+            key: K::KEY_M,
+            shift: false,
+        },
+        'n' => KeyStroke {
+            key: K::KEY_N,
+            shift: false,
+        },
+        'o' => KeyStroke {
+            key: K::KEY_O,
+            shift: false,
+        },
+        'p' => KeyStroke {
+            key: K::KEY_P,
+            shift: false,
+        },
+        'q' => KeyStroke {
+            key: K::KEY_Q,
+            shift: false,
+        },
+        'r' => KeyStroke {
+            key: K::KEY_R,
+            shift: false,
+        },
+        's' => KeyStroke {
+            key: K::KEY_S,
+            shift: false,
+        },
+        't' => KeyStroke {
+            key: K::KEY_T,
+            shift: false,
+        },
+        'u' => KeyStroke {
+            key: K::KEY_U,
+            shift: false,
+        },
+        'v' => KeyStroke {
+            key: K::KEY_V,
+            shift: false,
+        },
+        'w' => KeyStroke {
+            key: K::KEY_W,
+            shift: false,
+        },
+        'x' => KeyStroke {
+            key: K::KEY_X,
+            shift: false,
+        },
+        'y' => KeyStroke {
+            key: K::KEY_Y,
+            shift: false,
+        },
+        'z' => KeyStroke {
+            key: K::KEY_Z,
+            shift: false,
+        },
+        'A' => KeyStroke {
+            key: K::KEY_A,
+            shift: true,
+        },
+        'B' => KeyStroke {
+            key: K::KEY_B,
+            shift: true,
+        },
+        'C' => KeyStroke {
+            key: K::KEY_C,
+            shift: true,
+        },
+        'D' => KeyStroke {
+            key: K::KEY_D,
+            shift: true,
+        },
+        'E' => KeyStroke {
+            key: K::KEY_E,
+            shift: true,
+        },
+        'F' => KeyStroke {
+            key: K::KEY_F,
+            shift: true,
+        },
+        'G' => KeyStroke {
+            key: K::KEY_G,
+            shift: true,
+        },
+        'H' => KeyStroke {
+            key: K::KEY_H,
+            shift: true,
+        },
+        'I' => KeyStroke {
+            key: K::KEY_I,
+            shift: true,
+        },
+        'J' => KeyStroke {
+            key: K::KEY_J,
+            shift: true,
+        },
+        'K' => KeyStroke {
+            key: K::KEY_K,
+            shift: true,
+        },
+        'L' => KeyStroke {
+            key: K::KEY_L,
+            shift: true,
+        },
+        'M' => KeyStroke {
+            key: K::KEY_M,
+            shift: true,
+        },
+        'N' => KeyStroke {
+            key: K::KEY_N,
+            shift: true,
+        },
+        'O' => KeyStroke {
+            key: K::KEY_O,
+            shift: true,
+        },
+        'P' => KeyStroke {
+            key: K::KEY_P,
+            shift: true,
+        },
+        'Q' => KeyStroke {
+            key: K::KEY_Q,
+            shift: true,
+        },
+        'R' => KeyStroke {
+            key: K::KEY_R,
+            shift: true,
+        },
+        'S' => KeyStroke {
+            key: K::KEY_S,
+            shift: true,
+        },
+        'T' => KeyStroke {
+            key: K::KEY_T,
+            shift: true,
+        },
+        'U' => KeyStroke {
+            key: K::KEY_U,
+            shift: true,
+        },
+        'V' => KeyStroke {
+            key: K::KEY_V,
+            shift: true,
+        },
+        'W' => KeyStroke {
+            key: K::KEY_W,
+            shift: true,
+        },
+        'X' => KeyStroke {
+            key: K::KEY_X,
+            shift: true,
+        },
+        'Y' => KeyStroke {
+            key: K::KEY_Y,
+            shift: true,
+        },
+        'Z' => KeyStroke {
+            key: K::KEY_Z,
+            shift: true,
+        },
+        '0' => KeyStroke {
+            key: K::KEY_0,
+            shift: false,
+        },
+        '1' => KeyStroke {
+            key: K::KEY_1,
+            shift: false,
+        },
+        '2' => KeyStroke {
+            key: K::KEY_2,
+            shift: false,
+        },
+        '3' => KeyStroke {
+            key: K::KEY_3,
+            shift: false,
+        },
+        '4' => KeyStroke {
+            key: K::KEY_4,
+            shift: false,
+        },
+        '5' => KeyStroke {
+            key: K::KEY_5,
+            shift: false,
+        },
+        '6' => KeyStroke {
+            key: K::KEY_6,
+            shift: false,
+        },
+        '7' => KeyStroke {
+            key: K::KEY_7,
+            shift: false,
+        },
+        '8' => KeyStroke {
+            key: K::KEY_8,
+            shift: false,
+        },
+        '9' => KeyStroke {
+            key: K::KEY_9,
+            shift: false,
+        },
+        '!' => KeyStroke {
+            key: K::KEY_1,
+            shift: true,
+        },
+        '@' => KeyStroke {
+            key: K::KEY_2,
+            shift: true,
+        },
+        '#' => KeyStroke {
+            key: K::KEY_3,
+            shift: true,
+        },
+        '$' => KeyStroke {
+            key: K::KEY_4,
+            shift: true,
+        },
+        '%' => KeyStroke {
+            key: K::KEY_5,
+            shift: true,
+        },
+        '^' => KeyStroke {
+            key: K::KEY_6,
+            shift: true,
+        },
+        '&' => KeyStroke {
+            key: K::KEY_7,
+            shift: true,
+        },
+        '*' => KeyStroke {
+            key: K::KEY_8,
+            shift: true,
+        },
+        '(' => KeyStroke {
+            key: K::KEY_9,
+            shift: true,
+        },
+        ')' => KeyStroke {
+            key: K::KEY_0,
+            shift: true,
+        },
+        ' ' => KeyStroke {
+            key: K::KEY_SPACE,
+            shift: false,
+        },
+        '\n' => KeyStroke {
+            key: K::KEY_ENTER,
+            shift: false,
+        },
+        '\t' => KeyStroke {
+            key: K::KEY_TAB,
+            shift: false,
+        },
+        '-' => KeyStroke {
+            key: K::KEY_MINUS,
+            shift: false,
+        },
+        '_' => KeyStroke {
+            key: K::KEY_MINUS,
+            shift: true,
+        },
+        '=' => KeyStroke {
+            key: K::KEY_EQUAL,
+            shift: false,
+        },
+        '+' => KeyStroke {
+            key: K::KEY_EQUAL,
+            shift: true,
+        },
+        '[' => KeyStroke {
+            key: K::KEY_LEFTBRACE,
+            shift: false,
+        },
+        '{' => KeyStroke {
+            key: K::KEY_LEFTBRACE,
+            shift: true,
+        },
+        ']' => KeyStroke {
+            key: K::KEY_RIGHTBRACE,
+            shift: false,
+        },
+        '}' => KeyStroke {
+            key: K::KEY_RIGHTBRACE,
+            shift: true,
+        },
+        ';' => KeyStroke {
+            key: K::KEY_SEMICOLON,
+            shift: false,
+        },
+        ':' => KeyStroke {
+            key: K::KEY_SEMICOLON,
+            shift: true,
+        },
+        '\'' => KeyStroke {
+            key: K::KEY_APOSTROPHE,
+            shift: false,
+        },
+        '"' => KeyStroke {
+            key: K::KEY_APOSTROPHE,
+            shift: true,
+        },
+        '`' => KeyStroke {
+            key: K::KEY_GRAVE,
+            shift: false,
+        },
+        '~' => KeyStroke {
+            key: K::KEY_GRAVE,
+            shift: true,
+        },
+        '\\' => KeyStroke {
+            key: K::KEY_BACKSLASH,
+            shift: false,
+        },
+        '|' => KeyStroke {
+            key: K::KEY_BACKSLASH,
+            shift: true,
+        },
+        ',' => KeyStroke {
+            key: K::KEY_COMMA,
+            shift: false,
+        },
+        '<' => KeyStroke {
+            key: K::KEY_COMMA,
+            shift: true,
+        },
+        '.' => KeyStroke {
+            key: K::KEY_DOT,
+            shift: false,
+        },
+        '>' => KeyStroke {
+            key: K::KEY_DOT,
+            shift: true,
+        },
+        '/' => KeyStroke {
+            key: K::KEY_SLASH,
+            shift: false,
+        },
+        '?' => KeyStroke {
+            key: K::KEY_SLASH,
+            shift: true,
+        },
         _ => {
             return Err(format!(
                 "Pepper X uinput helper cannot type unsupported character {:?}",

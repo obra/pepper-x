@@ -42,10 +42,12 @@ fi
 echo "Focus a GNOME Text Editor document before running this helper." >&2
 
 state_root="$(mktemp -d)"
-trap 'rm -rf "${state_root}"' EXIT
+readback_log="$(mktemp)"
+trap 'rm -rf "${state_root}"; rm -f "${readback_log}"' EXIT
 
 fixture_path="${repo_root}/tests/fixtures/loop1-hello.wav"
 log_path="${state_root}/transcript-log.jsonl"
+readback_test_path="atspi::accessible_insert_live::accessible_insert_live_text_editor_contains_expected_text"
 
 cleanup_output="$(
     PEPPERX_PARAKEET_MODEL_DIR="${PEPPERX_PARAKEET_MODEL_DIR}" \
@@ -102,6 +104,12 @@ if stdout_cleanup != cleanup["cleaned_text"]:
         f"{stdout_cleanup!r} != {cleanup['cleaned_text']!r}"
     )
 
+if entry["transcript_text"].strip() == cleanup["cleaned_text"].strip():
+    raise SystemExit(
+        "Pepper X cleaned insertion smoke requires the archived raw transcript to remain "
+        "distinct from the cleaned transcript"
+    )
+
 insertion = entry.get("insertion")
 if not insertion:
     raise SystemExit(f"Transcript log entry is missing insertion diagnostics: {entry}")
@@ -112,11 +120,35 @@ if insertion.get("succeeded") is not True:
 if not insertion.get("backend_name", "").strip():
     raise SystemExit(f"Insertion diagnostics are missing backend_name: {insertion}")
 
-if insertion.get("target_application_name") != "Text Editor":
+if insertion["backend_name"] != "atspi-editable-text":
     raise SystemExit(
-        "Pepper X cleaned insertion targeted the wrong application: "
-        f"{insertion.get('target_application_name')!r}"
+        "Pepper X cleaned insertion smoke requires atspi-editable-text success because that "
+        "backend only reports success after live readback matches the inserted text: "
+        f"{insertion['backend_name']!r}"
+    )
+
+if insertion.get("target_class") != "text-editor":
+    raise SystemExit(
+        "Pepper X cleaned insertion targeted the wrong target class: "
+        f"{insertion.get('target_class')!r}"
     )
 PY
 
-echo "Pepper X archived cleaned text and reported successful friendly insertion." >&2
+(
+    cd "${repo_root}"
+    PEPPERX_FRIENDLY_EXPECTED_TEXT="${cleanup_output}" \
+        cargo test -p pepperx-platform-gnome "${readback_test_path}" \
+        -- --ignored --exact --nocapture
+) 2>&1 | tee "${readback_log}"
+
+if ! grep -q "running 1 test" "${readback_log}"; then
+    echo "Pepper X cleaned insertion smoke did not run ${readback_test_path}" >&2
+    exit 1
+fi
+
+if ! grep -q "test ${readback_test_path} ... ok" "${readback_log}"; then
+    echo "Pepper X cleaned insertion smoke failed live readback verification" >&2
+    exit 1
+fi
+
+echo "Pepper X archived distinct raw and cleaned transcripts and verified live cleaned-text insertion." >&2

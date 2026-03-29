@@ -433,7 +433,9 @@ pub fn select_friendly_insert_backend(
         .iter()
         .copied()
         .find(|backend| backend_matches_target(*backend, actual_target_class, target))
-        .ok_or_else(|| fallback_selection_failure(target, target_class, attempted_backends.clone()))?;
+        .ok_or_else(|| {
+            fallback_selection_failure(target, target_class, attempted_backends.clone())
+        })?;
     let attempted_backends = fallback_chain
         .iter()
         .copied()
@@ -501,25 +503,19 @@ pub fn insert_text_into_friendly_target(
                 })?;
             }
 
-            let after_text = unsafe { text_contents(text_iface.as_ptr()) }
-                .map_err(|error| {
-                    with_selected_backend_failure(
-                        &target.selection,
-                        &target.application_name,
-                        error,
-                    )
-                })?;
+            let after_text = unsafe { text_contents(text_iface.as_ptr()) }.map_err(|error| {
+                with_selected_backend_failure(&target.selection, &target.application_name, error)
+            })?;
             let expected_after_text = apply_insert_at_char_offset(
                 before_text,
                 text,
-                usize::try_from(caret_offset)
-                    .map_err(|_| {
-                        with_selected_backend_failure(
-                            &target.selection,
-                            &target.application_name,
-                            FriendlyInsertRunError::ReadbackMismatch,
-                        )
-                    })?,
+                usize::try_from(caret_offset).map_err(|_| {
+                    with_selected_backend_failure(
+                        &target.selection,
+                        &target.application_name,
+                        FriendlyInsertRunError::ReadbackMismatch,
+                    )
+                })?,
             )
             .ok_or_else(|| {
                 with_selected_backend_failure(
@@ -568,11 +564,7 @@ pub fn insert_text_into_friendly_target(
         }
         CLIPBOARD_PASTE_BACKEND_NAME => {
             let mut adapter = clipboard_paste_adapter().map_err(|error| {
-                with_selected_backend_failure(
-                    &target.selection,
-                    &target.application_name,
-                    error,
-                )
+                with_selected_backend_failure(&target.selection, &target.application_name, error)
             })?;
 
             run_clipboard_paste_with_adapter(
@@ -583,11 +575,7 @@ pub fn insert_text_into_friendly_target(
                 &mut adapter,
             )
             .map_err(|error| {
-                with_selected_backend_failure(
-                    &target.selection,
-                    &target.application_name,
-                    error,
-                )
+                with_selected_backend_failure(&target.selection, &target.application_name, error)
             })
         }
         _ => Err(FriendlyInsertRunError::Access(format!(
@@ -748,9 +736,7 @@ fn ensure_runtime_supported_backend(
 ) -> Result<(), FriendlyInsertRunError> {
     if matches!(
         selection.backend_name,
-        FRIENDLY_INSERT_BACKEND_NAME
-            | STRING_INJECTION_BACKEND_NAME
-            | CLIPBOARD_PASTE_BACKEND_NAME
+        FRIENDLY_INSERT_BACKEND_NAME | STRING_INJECTION_BACKEND_NAME | CLIPBOARD_PASTE_BACKEND_NAME
     ) {
         return Ok(());
     }
@@ -1196,7 +1182,9 @@ unsafe fn generate_keyboard_string(text: *const c_char) -> Result<(), FriendlyIn
     generate_keyboard_event(0, text, ffi::ATSPI_KEY_STRING)
 }
 
-unsafe fn generate_keyboard_key_press(keyval: glib::ffi::glong) -> Result<(), FriendlyInsertRunError> {
+unsafe fn generate_keyboard_key_press(
+    keyval: glib::ffi::glong,
+) -> Result<(), FriendlyInsertRunError> {
     generate_keyboard_event(keyval, std::ptr::null(), ffi::ATSPI_KEY_PRESS)
 }
 
@@ -1619,9 +1607,8 @@ mod accessible_insert_validation {
 
         assert!(snapshot.contains("backend_name: \"atspi-key-string\""));
         assert!(snapshot.contains("target_class: \"terminal\""));
-        assert!(snapshot.contains(
-            "attempted_backends: [\"atspi-editable-text\", \"atspi-key-string\"]"
-        ));
+        assert!(snapshot
+            .contains("attempted_backends: [\"atspi-editable-text\", \"atspi-key-string\"]"));
     }
 
     #[test]
@@ -1644,9 +1631,9 @@ mod accessible_insert_validation {
 
         assert!(snapshot.contains("backend_name: \"clipboard-paste\""));
         assert!(snapshot.contains("target_class: \"browser-textarea\""));
-        assert!(snapshot.contains(
-            "attempted_backends: [\"atspi-editable-text\", \"clipboard-paste\"]"
-        ));
+        assert!(
+            snapshot.contains("attempted_backends: [\"atspi-editable-text\", \"clipboard-paste\"]")
+        );
     }
 
     #[test]
@@ -1767,7 +1754,10 @@ mod accessible_insert_runtime_helpers {
             Ok(())
         }
 
-        fn restore(&mut self, snapshot: Option<Self::Snapshot>) -> Result<(), FriendlyInsertRunError> {
+        fn restore(
+            &mut self,
+            snapshot: Option<Self::Snapshot>,
+        ) -> Result<(), FriendlyInsertRunError> {
             match snapshot {
                 Some(snapshot) => {
                     self.calls.push(format!("restore:{snapshot}"));
@@ -1845,12 +1835,18 @@ mod accessible_insert_runtime_helpers {
 
     #[test]
     fn clipboard_insert_accepts_selected_backend() {
-        ensure_runtime_supported_backend(&FriendlyInsertSelection {
-            backend_name: CLIPBOARD_PASTE_BACKEND_NAME,
-            target_application_id: "firefox".into(),
-            target_class: "browser-textarea",
-            attempted_backends: vec![FRIENDLY_INSERT_BACKEND_NAME, CLIPBOARD_PASTE_BACKEND_NAME],
-        }, "Firefox")
+        ensure_runtime_supported_backend(
+            &FriendlyInsertSelection {
+                backend_name: CLIPBOARD_PASTE_BACKEND_NAME,
+                target_application_id: "firefox".into(),
+                target_class: "browser-textarea",
+                attempted_backends: vec![
+                    FRIENDLY_INSERT_BACKEND_NAME,
+                    CLIPBOARD_PASTE_BACKEND_NAME,
+                ],
+            },
+            "Firefox",
+        )
         .expect("clipboard backend should be supported");
     }
 
@@ -1913,6 +1909,15 @@ mod accessible_insert_live {
     }
 
     #[test]
+    #[ignore = "requires a live GNOME Wayland session with GNOME Text Editor focused"]
+    fn accessible_insert_live_text_editor_contains_expected_text() {
+        let expected_text = std::env::var("PEPPERX_FRIENDLY_EXPECTED_TEXT")
+            .expect("PEPPERX_FRIENDLY_EXPECTED_TEXT must contain the cleaned transcript");
+
+        assert_accessible_insert_live_contains_text("org.gnome.TextEditor", &expected_text);
+    }
+
+    #[test]
     #[ignore = "requires a live GNOME Wayland session with a browser textarea focused"]
     fn accessible_insert_live_browser_textarea_round_trip() {
         let inserted_text = std::env::var("PEPPERX_FRIENDLY_INSERT_TEXT").unwrap_or_else(|_| {
@@ -1952,10 +1957,8 @@ mod accessible_insert_live {
                         .as_nanos()
                 )
             });
-        let inserted_text =
-            std::env::var("PEPPERX_TERMINAL_INSERT_TEXT").unwrap_or_else(|_| {
-                terminal_smoke_command(&smoke_file, &expected_marker)
-            });
+        let inserted_text = std::env::var("PEPPERX_TERMINAL_INSERT_TEXT")
+            .unwrap_or_else(|_| terminal_smoke_command(&smoke_file, &expected_marker));
 
         assert_accessible_insert_live_terminal_round_trip(
             "gnome-terminal-server",
@@ -1994,6 +1997,31 @@ mod accessible_insert_live {
         );
     }
 
+    fn assert_accessible_insert_live_contains_text(
+        target_application_id: &'static str,
+        expected_text: &str,
+    ) {
+        let target = focused_friendly_target(&FriendlyInsertPolicy {
+            target_application_id,
+        })
+        .expect("focused target should be inspectable");
+
+        assert_eq!(
+            target.selection.target_application_id,
+            target_application_id
+        );
+        assert_eq!(target.target_class, "text-editor");
+
+        let current_text = target
+            .before_text
+            .expect("focused target should expose current text contents");
+
+        assert!(
+            current_text.contains(expected_text),
+            "focused target text should contain the expected cleaned transcript"
+        );
+    }
+
     fn assert_accessible_insert_live_terminal_round_trip(
         target_application_id: &'static str,
         inserted_text: &str,
@@ -2010,7 +2038,10 @@ mod accessible_insert_live {
         )
         .expect("terminal insertion should succeed");
 
-        assert_eq!(outcome.selection.backend_name, STRING_INJECTION_BACKEND_NAME);
+        assert_eq!(
+            outcome.selection.backend_name,
+            STRING_INJECTION_BACKEND_NAME
+        );
         assert_eq!(
             wait_for_terminal_smoke_file(smoke_file),
             expected_marker,

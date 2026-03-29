@@ -174,3 +174,41 @@ Use the terminal smoke helper inside a live GNOME 48+ Wayland session:
 ```
 
 Run that helper inside the live GNOME session, or export that session's `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, and `XDG_SESSION_TYPE=wayland` first. As with the accessible-target smokes, SSH into the VM is not an authoritative AT-SPI insertion surface.
+
+## Loop 5 Cleanup
+
+Loop 5 adds a real local cleanup backend on top of the existing ASR and insertion path:
+
+- `llama.cpp` cleanup with `PEPPERX_CLEANUP_MODEL_PATH=/path/to/model.gguf`
+- raw ASR transcript archived as `transcript_text`
+- cleaned transcript archived separately under `cleanup.cleaned_text`
+- cleanup diagnostics that preserve backend/model metadata and `used_ocr`
+- optional OCR text treated as bounded supporting context, not a separate mode
+
+Useful loop-5 entrypoints:
+
+```sh
+PEPPERX_PARAKEET_MODEL_DIR=/path/to/parakeet \
+PEPPERX_CLEANUP_MODEL_PATH=/path/to/model.gguf \
+cargo run -p pepper-x-app -- --transcribe-wav-and-cleanup tests/fixtures/loop1-hello.wav
+```
+
+```sh
+PEPPERX_PARAKEET_MODEL_DIR=/path/to/parakeet \
+PEPPERX_CLEANUP_MODEL_PATH=/path/to/model.gguf \
+cargo run -p pepper-x-app -- --transcribe-wav-and-cleanup-and-insert-friendly tests/fixtures/loop1-hello.wav
+```
+
+For the live cleaned-insertion smoke, focus a GNOME Text Editor document and run:
+
+```sh
+PEPPERX_PARAKEET_MODEL_DIR=/path/to/parakeet \
+PEPPERX_CLEANUP_MODEL_PATH=/path/to/model.gguf \
+./scripts/smoke-insert-cleaned-friendly.sh
+```
+
+That helper verifies three things together on a real GNOME Wayland session:
+
+- the archived raw transcript remains distinct from the cleaned transcript
+- the cleanup CLI stdout matches the archived cleaned transcript
+- the focused Text Editor buffer contains the cleaned transcript after the app insertion path runs
