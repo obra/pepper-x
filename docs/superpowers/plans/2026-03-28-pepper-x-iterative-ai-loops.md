@@ -1,5 +1,7 @@
 # Pepper X Iterative AI Loops Implementation Plan
 
+> **Status:** This document records the loop-by-loop backend work that produced the current ASR, cleanup, insertion, and rerun slices. It does not describe the authoritative parity roadmap anymore. Use `docs/superpowers/plans/2026-03-30-pepper-x-ghost-pepper-parity.md` for release-critical sequencing.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver Pepper X's AI stack in small, testable loops that move from logged local dictation to reliable insertion and only then into cleanup.

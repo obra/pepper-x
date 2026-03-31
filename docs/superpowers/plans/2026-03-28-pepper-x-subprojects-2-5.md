@@ -1,5 +1,7 @@
 # Pepper X Subprojects 2-5 Implementation Plan
 
+> **Status:** This remains useful historical context for the subsystem slices that landed, but it is no longer the authoritative release roadmap. Use `docs/superpowers/plans/2026-03-30-pepper-x-ghost-pepper-parity.md` for the parity-driven product plan.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Finish Pepper X's remaining V1 product work after the shell/GNOME foundation by adding live audio/runtime behavior, cleanup/OCR/corrections, first-class history and reruns, and real packaging/operational polish.
