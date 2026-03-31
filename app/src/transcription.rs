@@ -28,7 +28,6 @@ use crate::transcript_log::{
 
 #[cfg(test)]
 const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
-const FRIENDLY_TARGET_APPLICATION_ID: &str = "org.gnome.TextEditor";
 const DEFAULT_UINPUT_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-uinput-helper";
 const UINPUT_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
 const UINPUT_HELPER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -206,9 +205,7 @@ fn transcribe_recorded_wav_to_log_with_live_status(
                 |transcript_text| {
                     insert_text_into_friendly_target(
                         transcript_text,
-                        &FriendlyInsertPolicy {
-                            target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
-                        },
+                        &FriendlyInsertPolicy::live_supported(),
                     )
                 },
                 request_uinput_text_insertion,
@@ -269,9 +266,7 @@ pub fn transcribe_wav_and_insert_friendly_to_log(
             |transcript_text| {
                 insert_text_into_friendly_target(
                     transcript_text,
-                    &FriendlyInsertPolicy {
-                        target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
-                    },
+                    &FriendlyInsertPolicy::live_supported(),
                 )
             },
             request_uinput_text_insertion,
@@ -744,9 +739,7 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
                 |transcript_text| {
                     insert_text_into_friendly_target(
                         transcript_text,
-                        &FriendlyInsertPolicy {
-                            target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
-                        },
+                        &FriendlyInsertPolicy::live_supported(),
                     )
                 },
                 request_uinput_text_insertion,
@@ -2765,6 +2758,198 @@ mod app_shell {
         .expect("archive cleanup plus insert entry");
 
         assert_eq!(entry.display_text(), "Hello from Pepper X.");
+        let archived_run = HistoryStore::open(&state_root)
+            .expect("history store")
+            .recent_runs()
+            .expect("load runs")
+            .into_iter()
+            .next()
+            .expect("archived live run");
+        assert_eq!(archived_run.runtime_metadata, runtime_metadata);
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_insert_runtime_archives_live_browser_targets_honestly() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-live-browser-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let wav_path = state_root.join("live-browser.wav");
+        std::fs::write(&wav_path, b"pepper-x-live-audio").unwrap();
+        let runtime_metadata = RunRuntimeMetadata::for_live_recording(
+            TriggerSource::ModifierOnly,
+            &RecordingArtifact::new(&wav_path, None, Duration::from_millis(275)),
+        );
+
+        let entry = archive_transcription_result_with_cleanup_and_friendly_insert_request(
+            TranscriptionResult {
+                wav_path: wav_path.clone(),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext::default(),
+            runtime_metadata.clone(),
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |_| {
+                Ok(FriendlyInsertOutcome {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                        target_application_id: "firefox".into(),
+                        target_class: "browser-textarea",
+                        attempted_backends: vec![
+                            pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                            pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                        ],
+                    },
+                    target_application_name: "Firefox".into(),
+                    target_class: "browser-textarea".into(),
+                    caret_offset: -1,
+                    before_text: String::new(),
+                    after_text: String::new(),
+                })
+            },
+        )
+        .expect("archive cleanup plus browser insert entry");
+
+        assert_eq!(entry.display_text(), "Hello from Pepper X.");
+        assert_eq!(
+            entry.insertion,
+            Some(
+                InsertionDiagnostics::succeeded(
+                    pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                    "Firefox",
+                )
+                .with_target_class("browser-textarea")
+                .with_attempted_backends([
+                    pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                    pepperx_platform_gnome::atspi::CLIPBOARD_PASTE_BACKEND_NAME,
+                ])
+            )
+        );
+        let archived_run = HistoryStore::open(&state_root)
+            .expect("history store")
+            .recent_runs()
+            .expect("load runs")
+            .into_iter()
+            .next()
+            .expect("archived live run");
+        assert_eq!(archived_run.runtime_metadata, runtime_metadata);
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_insert_runtime_archives_live_terminal_fallback_honestly() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-live-terminal-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let wav_path = state_root.join("live-terminal.wav");
+        std::fs::write(&wav_path, b"pepper-x-live-audio").unwrap();
+        let runtime_metadata = RunRuntimeMetadata::for_live_recording(
+            TriggerSource::ShellAction,
+            &RecordingArtifact::new(&wav_path, None, Duration::from_millis(150)),
+        );
+
+        let entry = archive_transcription_result_with_cleanup_and_friendly_insert_request(
+            TranscriptionResult {
+                wav_path: wav_path.clone(),
+                transcript_text: "echo pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext::default(),
+            runtime_metadata.clone(),
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "echo Pepper X".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |_| {
+                Ok(FriendlyInsertOutcome {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: pepperx_platform_gnome::atspi::STRING_INJECTION_BACKEND_NAME,
+                        target_application_id: "ghostty".into(),
+                        target_class: "terminal",
+                        attempted_backends: vec![
+                            pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                            pepperx_platform_gnome::atspi::STRING_INJECTION_BACKEND_NAME,
+                        ],
+                    },
+                    target_application_name: "Ghostty".into(),
+                    target_class: "terminal".into(),
+                    caret_offset: -1,
+                    before_text: String::new(),
+                    after_text: String::new(),
+                })
+            },
+        )
+        .expect("archive cleanup plus terminal insert entry");
+
+        assert_eq!(entry.display_text(), "echo Pepper X");
+        assert_eq!(
+            entry.insertion,
+            Some(
+                InsertionDiagnostics::succeeded(
+                    pepperx_platform_gnome::atspi::STRING_INJECTION_BACKEND_NAME,
+                    "Ghostty",
+                )
+                .with_target_class("terminal")
+                .with_attempted_backends([
+                    pepperx_platform_gnome::atspi::FRIENDLY_INSERT_BACKEND_NAME,
+                    pepperx_platform_gnome::atspi::STRING_INJECTION_BACKEND_NAME,
+                ])
+            )
+        );
         let archived_run = HistoryStore::open(&state_root)
             .expect("history store")
             .recent_runs()

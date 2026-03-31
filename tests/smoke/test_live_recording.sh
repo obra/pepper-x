@@ -46,6 +46,8 @@ fi
 
 stop_delay_seconds="${PEPPERX_LIVE_RECORDING_STOP_DELAY_SECONDS:-2}"
 log_path="${PEPPERX_STATE_ROOT}/transcript-log.jsonl"
+expected_insertion_target_class="${PEPPERX_EXPECT_INSERTION_TARGET_CLASS:-}"
+expected_insertion_backend="${PEPPERX_EXPECT_INSERTION_BACKEND:-}"
 
 echo "Pepper X live recording smoke: speak now; stopping in ${stop_delay_seconds}s" >&2
 
@@ -68,13 +70,19 @@ if [[ ! -f "${log_path}" ]]; then
     exit 1
 fi
 
-python3 - "${log_path}" "${transcript_output}" <<'PY'
+python3 - \
+    "${log_path}" \
+    "${transcript_output}" \
+    "${expected_insertion_target_class}" \
+    "${expected_insertion_backend}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 log_path = Path(sys.argv[1])
 stdout_transcript = sys.argv[2].strip()
+expected_target_class = sys.argv[3].strip()
+expected_backend = sys.argv[4].strip()
 lines = [line for line in log_path.read_text().splitlines() if line.strip()]
 if not lines:
     raise SystemExit(f"Transcript log is empty: {log_path}")
@@ -98,4 +106,24 @@ if stdout_transcript != entry["transcript_text"]:
         "Pepper X live recording stdout must match the archived transcript: "
         f"{stdout_transcript!r} != {entry['transcript_text']!r}"
     )
+
+if expected_target_class or expected_backend:
+    insertion = entry.get("insertion")
+    if not insertion:
+        raise SystemExit(
+            "Pepper X live recording entry is missing insertion diagnostics "
+            "for the requested target assertions"
+        )
+
+    if expected_target_class and insertion.get("target_class") != expected_target_class:
+        raise SystemExit(
+            "Pepper X live recording archived the wrong target class: "
+            f"{insertion.get('target_class')!r} != {expected_target_class!r}"
+        )
+
+    if expected_backend and insertion.get("backend_name") != expected_backend:
+        raise SystemExit(
+            "Pepper X live recording archived the wrong insertion backend: "
+            f"{insertion.get('backend_name')!r} != {expected_backend!r}"
+        )
 PY

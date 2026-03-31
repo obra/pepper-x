@@ -91,7 +91,36 @@ impl FriendlyInsertBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FriendlyInsertPolicy {
-    pub target_application_id: &'static str,
+    expectation: FriendlyInsertExpectation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FriendlyInsertExpectation {
+    ExactApplication(&'static str),
+    LiveSupported,
+}
+
+impl FriendlyInsertPolicy {
+    pub const fn exact(target_application_id: &'static str) -> Self {
+        Self {
+            expectation: FriendlyInsertExpectation::ExactApplication(target_application_id),
+        }
+    }
+
+    pub const fn live_supported() -> Self {
+        Self {
+            expectation: FriendlyInsertExpectation::LiveSupported,
+        }
+    }
+
+    fn expected_application_id(self) -> &'static str {
+        match self.expectation {
+            FriendlyInsertExpectation::ExactApplication(target_application_id) => {
+                target_application_id
+            }
+            FriendlyInsertExpectation::LiveSupported => "supported-live-target",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -504,8 +533,6 @@ pub fn select_friendly_insert_backend(
     target: &FriendlyFocusedTarget,
     policy: &FriendlyInsertPolicy,
 ) -> Result<FriendlyInsertSelection, FriendlyInsertFailure> {
-    let expected_target_class =
-        friendly_insert_target_class_from_application_id(policy.target_application_id);
     let actual_target_class =
         friendly_insert_target_class_from_application_id(&target.application_id);
     let target_class = friendly_insert_target_class_name(actual_target_class);
@@ -515,21 +542,47 @@ pub fn select_friendly_insert_backend(
         .map(|backend| backend.backend_name())
         .collect::<Vec<_>>();
 
-    if expected_target_class == FriendlyInsertTargetClass::Unsupported
-        || actual_target_class == FriendlyInsertTargetClass::Unsupported
-        || expected_target_class != actual_target_class
-    {
-        return Err(FriendlyInsertFailure {
-            backend_name: FRIENDLY_INSERT_BACKEND_NAME,
-            reason: FriendlyInsertError::UnsupportedApplication {
-                expected_application_id: policy.target_application_id.into(),
-                actual_application_id: target.application_id.clone(),
-            },
-            target_application_name: None,
-            target_class: Some(target_class),
-            attempted_backends: Vec::new(),
-        });
+    match policy.expectation {
+        FriendlyInsertExpectation::ExactApplication(target_application_id) => {
+            let expected_target_class =
+                friendly_insert_target_class_from_application_id(target_application_id);
+            if expected_target_class == FriendlyInsertTargetClass::Unsupported
+                || actual_target_class == FriendlyInsertTargetClass::Unsupported
+                || expected_target_class != actual_target_class
+            {
+                return Err(FriendlyInsertFailure {
+                    backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+                    reason: FriendlyInsertError::UnsupportedApplication {
+                        expected_application_id: target_application_id.into(),
+                        actual_application_id: target.application_id.clone(),
+                    },
+                    target_application_name: None,
+                    target_class: Some(target_class),
+                    attempted_backends: Vec::new(),
+                });
+            }
+        }
+        FriendlyInsertExpectation::LiveSupported => {
+            if !matches!(
+                actual_target_class,
+                FriendlyInsertTargetClass::TextEditor
+                    | FriendlyInsertTargetClass::BrowserTextarea
+                    | FriendlyInsertTargetClass::Terminal
+            ) {
+                return Err(FriendlyInsertFailure {
+                    backend_name: FRIENDLY_INSERT_BACKEND_NAME,
+                    reason: FriendlyInsertError::UnsupportedApplication {
+                        expected_application_id: policy.expected_application_id().into(),
+                        actual_application_id: target.application_id.clone(),
+                    },
+                    target_application_name: None,
+                    target_class: Some(target_class),
+                    attempted_backends: Vec::new(),
+                });
+            }
+        }
     }
+
     let selected_backend = fallback_chain
         .iter()
         .copied()
@@ -1597,9 +1650,7 @@ mod accessible_insert_validation {
                 supports_editable_text: true,
                 supports_caret: true,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "org.gnome.TextEditor",
-            },
+            &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
         .unwrap_err();
 
@@ -1625,9 +1676,7 @@ mod accessible_insert_validation {
                 supports_editable_text: true,
                 supports_caret: true,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "org.gnome.TextEditor",
-            },
+            &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
         .unwrap_err();
 
@@ -1647,9 +1696,7 @@ mod accessible_insert_validation {
                 supports_editable_text: false,
                 supports_caret: true,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "org.gnome.TextEditor",
-            },
+            &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
         .unwrap_err();
 
@@ -1667,9 +1714,7 @@ mod accessible_insert_validation {
                 supports_editable_text: true,
                 supports_caret: false,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "org.gnome.TextEditor",
-            },
+            &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
         .unwrap_err();
 
@@ -1687,9 +1732,7 @@ mod accessible_insert_validation {
                 supports_editable_text: true,
                 supports_caret: true,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "org.gnome.TextEditor",
-            },
+            &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
         .unwrap();
 
@@ -1707,9 +1750,7 @@ mod accessible_insert_validation {
                 supports_editable_text: true,
                 supports_caret: true,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "browser-textarea",
-            },
+            &FriendlyInsertPolicy::exact("browser-textarea"),
         )
         .unwrap();
 
@@ -1727,9 +1768,7 @@ mod accessible_insert_validation {
                 supports_editable_text: true,
                 supports_caret: true,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "org.gnome.TextEditor",
-            },
+            &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
         .unwrap();
 
@@ -1750,9 +1789,7 @@ mod accessible_insert_validation {
                 supports_editable_text: false,
                 supports_caret: false,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "ghostty",
-            },
+            &FriendlyInsertPolicy::exact("ghostty"),
         )
         .unwrap();
 
@@ -1774,9 +1811,7 @@ mod accessible_insert_validation {
                 supports_editable_text: false,
                 supports_caret: false,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "browser-textarea",
-            },
+            &FriendlyInsertPolicy::exact("browser-textarea"),
         )
         .unwrap();
 
@@ -1799,9 +1834,7 @@ mod accessible_insert_validation {
                 supports_editable_text: false,
                 supports_caret: false,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "wine",
-            },
+            &FriendlyInsertPolicy::exact("wine"),
         )
         .unwrap();
 
@@ -1824,9 +1857,7 @@ mod accessible_insert_validation {
                 supports_editable_text: false,
                 supports_caret: false,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "wine",
-            },
+            &FriendlyInsertPolicy::exact("wine"),
         )
         .unwrap();
 
@@ -1849,9 +1880,7 @@ mod accessible_insert_validation {
                 supports_editable_text: false,
                 supports_caret: false,
             },
-            &FriendlyInsertPolicy {
-                target_application_id: "gnome-terminal-server",
-            },
+            &FriendlyInsertPolicy::exact("gnome-terminal-server"),
         )
         .unwrap_err();
 
@@ -1866,6 +1895,66 @@ mod accessible_insert_validation {
                 CLIPBOARD_PASTE_BACKEND_NAME,
             ]
         );
+    }
+
+    #[test]
+    fn accessible_insert_live_policy_accepts_browser_targets() {
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "firefox".into(),
+                is_editable: true,
+                supports_text: true,
+                supports_editable_text: true,
+                supports_caret: true,
+            },
+            &FriendlyInsertPolicy::live_supported(),
+        )
+        .unwrap();
+
+        assert_eq!(selection.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
+        assert_eq!(selection.target_class, "browser-textarea");
+    }
+
+    #[test]
+    fn accessible_insert_live_policy_accepts_terminal_targets() {
+        let selection = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "ghostty".into(),
+                is_editable: false,
+                supports_text: true,
+                supports_editable_text: false,
+                supports_caret: false,
+            },
+            &FriendlyInsertPolicy::live_supported(),
+        )
+        .unwrap();
+
+        assert_eq!(selection.backend_name, STRING_INJECTION_BACKEND_NAME);
+        assert_eq!(selection.target_class, "terminal");
+    }
+
+    #[test]
+    fn accessible_insert_live_policy_rejects_hostile_targets() {
+        let error = select_friendly_insert_backend(
+            &FriendlyFocusedTarget {
+                application_id: "wine".into(),
+                is_editable: false,
+                supports_text: false,
+                supports_editable_text: false,
+                supports_caret: false,
+            },
+            &FriendlyInsertPolicy::live_supported(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.reason,
+            FriendlyInsertError::UnsupportedApplication {
+                expected_application_id: "supported-live-target".into(),
+                actual_application_id: "wine".into(),
+            }
+        );
+        assert_eq!(error.target_class, Some("hostile"));
     }
 }
 
@@ -2166,9 +2255,7 @@ mod accessible_insert_live {
     ) {
         let outcome = insert_text_into_friendly_target(
             inserted_text,
-            &FriendlyInsertPolicy {
-                target_application_id,
-            },
+            &FriendlyInsertPolicy::exact(target_application_id),
         )
         .expect("friendly insertion should succeed");
 
@@ -2193,10 +2280,8 @@ mod accessible_insert_live {
         target_application_id: &'static str,
         expected_text: &str,
     ) {
-        let target = focused_friendly_target(&FriendlyInsertPolicy {
-            target_application_id,
-        })
-        .expect("focused target should be inspectable");
+        let target = focused_friendly_target(&FriendlyInsertPolicy::exact(target_application_id))
+            .expect("focused target should be inspectable");
 
         assert_eq!(
             target.selection.target_application_id,
@@ -2224,9 +2309,7 @@ mod accessible_insert_live {
 
         let outcome = insert_text_into_friendly_target(
             inserted_text,
-            &FriendlyInsertPolicy {
-                target_application_id,
-            },
+            &FriendlyInsertPolicy::exact(target_application_id),
         )
         .expect("terminal insertion should succeed");
 
