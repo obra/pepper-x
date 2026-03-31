@@ -1,10 +1,12 @@
 use crate::SelectedMicrophone;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use crate::devices::stable_pipewire_microphone_id;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 #[cfg(target_os = "linux")]
 use pipewire as pw;
 #[cfg(target_os = "linux")]
@@ -138,7 +140,6 @@ impl SignalLevelSample {
         Self::from_normalized_samples(&normalized_samples)
     }
 
-    #[cfg(any(test, target_os = "linux"))]
     fn from_normalized_samples(normalized_samples: &[f32]) -> Self {
         let normalized_level = normalized_samples
             .iter()
@@ -915,6 +916,14 @@ mod recording_runtime {
         let sample = SignalLevelSample::from_pcm_samples(&[0, 16_384, -16_384, 0]);
 
         assert!(sample.normalized_level() > 0.45);
+        assert!(sample.signal_present());
+    }
+
+    #[test]
+    fn device_signal_level_supports_interleaved_float_samples_on_all_platforms() {
+        let sample = SignalLevelSample::from_interleaved_samples(&[0.0, 0.5, -0.25, 0.0]);
+
+        assert_eq!(sample.normalized_level(), 0.5);
         assert!(sample.signal_present());
     }
 
