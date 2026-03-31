@@ -101,8 +101,12 @@ impl LiveRuntimeHandle {
             .start_recording(trigger_source, self.selected_microphone.clone())
             .map(|_| ());
 
-        if result.is_ok() {
-            self.live_status.replace(LiveStatus::recording());
+        match &result {
+            Ok(()) => self.live_status.replace(LiveStatus::recording()),
+            Err(SessionRuntimeError::Session(SessionError::AlreadyRecording)) => {}
+            Err(error) => self
+                .live_status
+                .replace(LiveStatus::error(error.to_string())),
         }
 
         result
@@ -127,11 +131,22 @@ impl LiveRuntimeHandle {
     }
 
     fn stop_recording_in_background(&self) -> Result<(), SessionRuntimeError> {
-        let request = self
+        let request = match self
             .runtime
             .lock()
             .expect("live runtime lock poisoned")
-            .finish_recording()?;
+            .finish_recording()
+        {
+            Ok(request) => request,
+            Err(error @ SessionRuntimeError::Session(SessionError::NotRecording)) => {
+                return Err(error)
+            }
+            Err(error) => {
+                self.live_status
+                    .replace(LiveStatus::error(error.to_string()));
+                return Err(error);
+            }
+        };
         self.live_status.replace(LiveStatus::transcribing());
         let live_status = self.live_status.clone();
         std::thread::Builder::new()
@@ -143,7 +158,11 @@ impl LiveRuntimeHandle {
                     live_status.replace(LiveStatus::error(error.to_string()));
                 }
             })
-            .map_err(SessionRuntimeError::BackgroundSpawn)?;
+            .map_err(|error| {
+                self.live_status
+                    .replace(LiveStatus::error(error.to_string()));
+                SessionRuntimeError::BackgroundSpawn(error)
+            })?;
         Ok(())
     }
 }
