@@ -1,8 +1,6 @@
 use adw::prelude::*;
 use gtk::gio;
-
-use crate::app_model::{AppModel, InitialSurface};
-use crate::window::MainWindow;
+use std::rc::Rc;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BackgroundController;
@@ -14,26 +12,27 @@ impl BackgroundController {
         Self
     }
 
-    pub fn install(&self, app: &adw::Application, window: &MainWindow, app_model: &AppModel) {
+    pub fn install(
+        &self,
+        app: &adw::Application,
+        show_settings_callback: Rc<dyn Fn()>,
+        show_history_callback: Rc<dyn Fn()>,
+    ) {
         if app.lookup_action(Self::ACTION_NAMES[0]).is_some() {
             return;
         }
 
         let show_settings = gio::SimpleAction::new(Self::ACTION_NAMES[0], None);
-        let settings_window = window.clone();
-        let settings_app_model = app_model.clone();
+        let show_settings_handler = show_settings_callback.clone();
         show_settings.connect_activate(move |_, _| {
-            match settings_app_model.requested_surface() {
-                InitialSurface::Setup => settings_window.present_setup(&settings_app_model),
-                InitialSurface::Settings => settings_window.present_settings(),
-            }
+            show_settings_handler();
         });
         app.add_action(&show_settings);
 
         let show_history = gio::SimpleAction::new(Self::ACTION_NAMES[1], None);
-        let history_window = window.clone();
+        let show_history_handler = show_history_callback.clone();
         show_history.connect_activate(move |_, _| {
-            history_window.present_history();
+            show_history_handler();
         });
         app.add_action(&show_history);
 

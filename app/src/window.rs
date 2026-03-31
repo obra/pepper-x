@@ -1,10 +1,10 @@
 use adw::prelude::*;
-use gtk::{Align, Orientation};
+use gtk::Orientation;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::app_model::{AppModel, RuntimeReadinessSummary};
+use crate::app_model::RuntimeReadinessSummary;
 use crate::diagnostics_view::DiagnosticsView;
 use crate::history_view::build_history_browser;
 use crate::settings_view::SettingsView;
@@ -13,15 +13,12 @@ use pepperx_models::{ModelInventoryEntry, ModelKind};
 use crate::history_store::ArchivedRun;
 use crate::settings::AppSettings;
 
-const SETUP_PAGE_NAME: &str = "setup";
-const SHELL_PAGE_NAME: &str = "shell";
 const SETTINGS_PAGE_NAME: &str = "settings";
 const HISTORY_PAGE_NAME: &str = "history";
 const DIAGNOSTICS_PAGE_NAME: &str = "diagnostics";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PageScaffoldKind {
-    Status,
     Form,
     Browser,
     CardList,
@@ -29,7 +26,6 @@ enum PageScaffoldKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowPage {
-    Setup,
     Settings,
     History,
     Diagnostics,
@@ -38,7 +34,6 @@ enum WindowPage {
 impl WindowPage {
     fn page_name(self) -> &'static str {
         match self {
-            Self::Setup => SETUP_PAGE_NAME,
             Self::Settings => SETTINGS_PAGE_NAME,
             Self::History => HISTORY_PAGE_NAME,
             Self::Diagnostics => DIAGNOSTICS_PAGE_NAME,
@@ -47,7 +42,6 @@ impl WindowPage {
 
     fn container_kind(self) -> PageScaffoldKind {
         match self {
-            Self::Setup => PageScaffoldKind::Status,
             Self::Settings => PageScaffoldKind::Form,
             Self::History => PageScaffoldKind::Browser,
             Self::Diagnostics => PageScaffoldKind::CardList,
@@ -78,10 +72,7 @@ pub struct MainWindow {
 
 struct WindowState {
     window: adw::ApplicationWindow,
-    root_stack: gtk::Stack,
     shell_stack: gtk::Stack,
-    setup_title_label: gtk::Label,
-    setup_label: gtk::Label,
     settings_view: SettingsView,
     diagnostics_view: DiagnosticsView,
     history_container: gtk::Box,
@@ -185,18 +176,6 @@ impl MainWindow {
         self.present_page(WindowPage::Settings);
     }
 
-    pub fn present_setup(&self, app_model: &AppModel) {
-        self.ensure_window();
-        self.refresh_content();
-
-        if let Some(state) = self.state.borrow().as_ref() {
-            state.setup_title_label.set_label(app_model.setup_title());
-            state.setup_label.set_label(&app_model.setup_description());
-        }
-
-        self.present_page(WindowPage::Setup);
-    }
-
     pub fn present_history(&self) {
         self.present_page(WindowPage::History);
     }
@@ -210,12 +189,7 @@ impl MainWindow {
         self.refresh_content();
 
         if let Some(state) = self.state.borrow().as_ref() {
-            if page == WindowPage::Setup {
-                state.root_stack.set_visible_child_name(SETUP_PAGE_NAME);
-            } else {
-                state.root_stack.set_visible_child_name(SHELL_PAGE_NAME);
-                state.shell_stack.set_visible_child_name(page.page_name());
-            }
+            state.shell_stack.set_visible_child_name(page.page_name());
             state.window.present();
         }
     }
@@ -226,25 +200,13 @@ impl MainWindow {
         }
 
         let snapshot = self.current_content_snapshot();
-        let root_stack = gtk::Stack::builder()
-            .hexpand(true)
-            .vexpand(true)
-            .transition_type(gtk::StackTransitionType::Crossfade)
-            .build();
         let shell_stack = gtk::Stack::builder()
             .hexpand(true)
             .vexpand(true)
             .transition_type(gtk::StackTransitionType::Crossfade)
             .build();
-        let (setup_page, setup_title_label, setup_label) =
-            build_page("Finish Pepper X setup", "Pepper X setup will appear here.");
-        root_stack.add_named(&setup_page, Some(SETUP_PAGE_NAME));
         let settings_view = SettingsView::new(snapshot.settings_summary.as_str());
-        shell_stack.add_titled(
-            settings_view.widget(),
-            Some(SETTINGS_PAGE_NAME),
-            "Settings",
-        );
+        shell_stack.add_titled(settings_view.widget(), Some(SETTINGS_PAGE_NAME), "Settings");
         let history_container = gtk::Box::new(Orientation::Vertical, 0);
         history_container.set_hexpand(true);
         history_container.set_vexpand(true);
@@ -259,7 +221,6 @@ impl MainWindow {
             Some(DIAGNOSTICS_PAGE_NAME),
             "Diagnostics",
         );
-        root_stack.add_named(&shell_stack, Some(SHELL_PAGE_NAME));
 
         let stack_switcher = gtk::StackSwitcher::new();
         stack_switcher.set_stack(Some(&shell_stack));
@@ -274,7 +235,7 @@ impl MainWindow {
 
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header_bar);
-        view.set_content(Some(&root_stack));
+        view.set_content(Some(&shell_stack));
 
         let window = adw::ApplicationWindow::builder()
             .application(&self.app)
@@ -286,10 +247,7 @@ impl MainWindow {
 
         *self.state.borrow_mut() = Some(WindowState {
             window,
-            root_stack,
             shell_stack,
-            setup_title_label,
-            setup_label,
             settings_view,
             diagnostics_view,
             history_container,
@@ -304,7 +262,9 @@ impl MainWindow {
         };
 
         state.settings_view.set_summary(&snapshot.settings_summary);
-        state.diagnostics_view.set_summary(&snapshot.diagnostics_summary);
+        state
+            .diagnostics_view
+            .set_summary(&snapshot.diagnostics_summary);
         replace_history_browser(
             &state.history_container,
             &snapshot.history_runs,
@@ -503,30 +463,6 @@ fn default_diagnostics_summary() -> String {
     String::from("Pepper X runtime diagnostics surface lives here.")
 }
 
-fn build_page(title: &str, description: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
-    let container = gtk::Box::new(Orientation::Vertical, 12);
-    container.set_margin_top(24);
-    container.set_margin_bottom(24);
-    container.set_margin_start(24);
-    container.set_margin_end(24);
-    container.set_valign(Align::Start);
-
-    let title_label = gtk::Label::builder()
-        .label(title)
-        .xalign(0.0)
-        .css_classes(["title-2"])
-        .build();
-    let description_label = gtk::Label::builder()
-        .label(description)
-        .wrap(true)
-        .xalign(0.0)
-        .build();
-
-    container.append(&title_label);
-    container.append(&description_label);
-    (container, title_label, description_label)
-}
-
 fn replace_history_browser(
     container: &gtk::Box,
     runs: &[ArchivedRun],
@@ -542,8 +478,8 @@ fn replace_history_browser(
 mod app_shell {
     use super::*;
     use crate::diagnostics_view::{diagnostics_page_scaffold, DiagnosticsContainerKind};
-    use crate::settings_view::{settings_page_scaffold, SettingsContainerKind};
     use crate::settings::AppSettings;
+    use crate::settings_view::{settings_page_scaffold, SettingsContainerKind};
     use crate::transcript_log::{InsertionDiagnostics, LearningDiagnostics, TranscriptEntry};
     use pepperx_ipc::Capabilities;
     use pepperx_models::{ModelInventoryEntry, ModelKind, ModelReadiness};
@@ -750,11 +686,17 @@ mod app_shell {
 
     #[test]
     fn window_page_routes_cover_all_shell_states() {
-        assert_eq!(WindowPage::Setup.page_name(), SETUP_PAGE_NAME);
         assert_eq!(WindowPage::Settings.page_name(), SETTINGS_PAGE_NAME);
         assert_eq!(WindowPage::History.page_name(), HISTORY_PAGE_NAME);
         assert_eq!(WindowPage::Diagnostics.page_name(), DIAGNOSTICS_PAGE_NAME);
-        assert_eq!(WindowPage::Settings.container_kind(), PageScaffoldKind::Form);
+        assert_eq!(
+            WindowPage::Settings.container_kind(),
+            PageScaffoldKind::Form
+        );
+        assert_eq!(
+            WindowPage::History.container_kind(),
+            PageScaffoldKind::Browser
+        );
         assert_eq!(
             WindowPage::Diagnostics.container_kind(),
             PageScaffoldKind::CardList

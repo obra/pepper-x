@@ -1,6 +1,8 @@
-use crate::settings::{AppSettings, AppSetupState};
+use crate::settings::{AppSettings, AppSetupState, RecordingTriggerMode};
 use crate::startup_policy::StartupLaunchPolicy;
 use pepperx_ipc::Capabilities;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeReadinessSummary {
@@ -10,8 +12,14 @@ pub struct RuntimeReadinessSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupChecklist {
+    pub trigger_ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppModel {
-    pub setup_state: SetupState,
+    setup_state: Rc<RefCell<SetupState>>,
+    trigger_ready: bool,
     pub readiness: RuntimeReadinessSummary,
 }
 
@@ -40,17 +48,22 @@ impl AppModel {
         capabilities: &Capabilities,
     ) -> Self {
         Self {
-            setup_state: startup_setup_state(
+            trigger_ready: trigger_path_ready(settings, capabilities.modifier_only_supported),
+            setup_state: Rc::new(RefCell::new(startup_setup_state(
                 setup_state,
                 settings,
                 capabilities.modifier_only_supported,
-            ),
+            ))),
             readiness: RuntimeReadinessSummary::from_capabilities(capabilities),
         }
     }
 
+    pub fn setup_state(&self) -> SetupState {
+        self.setup_state.borrow().clone()
+    }
+
     pub fn setup_title(&self) -> &'static str {
-        match self.setup_state {
+        match self.setup_state() {
             SetupState::SetupRequired => "Finish Pepper X setup",
             SetupState::NeedsAttention(_) => "Fix Pepper X setup",
             SetupState::Ready => "Pepper X is ready",
@@ -58,12 +71,11 @@ impl AppModel {
     }
 
     pub fn setup_description(&self) -> String {
-        match &self.setup_state {
+        match self.setup_state() {
             SetupState::SetupRequired => {
-                "Pepper X still needs first-run setup before it can stay in the background."
-                    .into()
+                "Pepper X still needs first-run setup before it can stay in the background.".into()
             }
-            SetupState::NeedsAttention(issues) => {
+            SetupState::NeedsAttention(ref issues) => {
                 let mut details = Vec::new();
                 if issues.contains(&SetupIssue::ModifierCaptureUnavailable) {
                     details.push(
@@ -82,10 +94,18 @@ impl AppModel {
     }
 
     pub fn requested_surface(&self) -> InitialSurface {
-        match self.setup_state {
+        match self.setup_state() {
             SetupState::Ready => InitialSurface::Settings,
             SetupState::SetupRequired | SetupState::NeedsAttention(_) => InitialSurface::Setup,
         }
+    }
+
+    pub fn setup_checklist(&self) -> SetupChecklist {
+        SetupChecklist::new(self.trigger_ready)
+    }
+
+    pub fn mark_onboarding_completed(&self) {
+        *self.setup_state.borrow_mut() = SetupState::Ready;
     }
 }
 
@@ -96,6 +116,24 @@ impl RuntimeReadinessSummary {
             extension_connected: capabilities.extension_connected,
             service_version: capabilities.version.clone(),
         }
+    }
+}
+
+impl SetupChecklist {
+    pub fn new(trigger_ready: bool) -> Self {
+        Self { trigger_ready }
+    }
+
+    pub fn completed_items(&self) -> usize {
+        usize::from(self.trigger_ready)
+    }
+
+    pub fn total_items(&self) -> usize {
+        1
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.trigger_ready
     }
 }
 
@@ -122,6 +160,17 @@ pub fn startup_setup_state(
     } else {
         SetupState::NeedsAttention(issues)
     }
+}
+
+fn trigger_path_ready(settings: &AppSettings, modifier_capture_supported: bool) -> bool {
+    !matches!(
+        (
+            settings.enable_gnome_extension_integration,
+            &settings.preferred_recording_trigger_mode,
+            modifier_capture_supported,
+        ),
+        (true, RecordingTriggerMode::ModifierOnly, false)
+    )
 }
 
 pub fn initial_surface(

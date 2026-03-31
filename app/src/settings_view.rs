@@ -90,7 +90,10 @@ pub fn settings_page_scaffold(summary: &str) -> SettingsPageScaffold {
 }
 
 pub fn settings_form_sections(summary: &str) -> Vec<SettingsFormSection> {
-    let rows = summary.lines().filter_map(parse_summary_row).collect::<Vec<_>>();
+    let rows = summary
+        .lines()
+        .filter_map(parse_summary_row)
+        .collect::<Vec<_>>();
 
     vec![SettingsFormSection {
         title: "Configuration".into(),

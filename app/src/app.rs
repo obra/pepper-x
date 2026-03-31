@@ -13,6 +13,7 @@ use std::time::Duration;
 use crate::app_model::{initial_surface, AppModel, InitialSurface};
 use crate::background::BackgroundController;
 use crate::history_store::{ArchivedRun, HistoryStore};
+use crate::onboarding::show_onboarding_window;
 use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::{AppSettings, AppSetupState};
 use crate::startup_policy::startup_launch_policy;
@@ -39,6 +40,7 @@ pub fn run() {
     let settings = AppSettings::load_or_default();
     let setup_state = AppSetupState::load_or_default();
     let app = build_application();
+    let _background_hold = app.hold();
     let cache_root = default_cache_root();
     let (command_sender, command_receiver) = mpsc::channel();
     let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))
@@ -53,6 +55,7 @@ pub fn run() {
     let diagnostics_cache_root = cache_root.clone();
     let settings_cache_root = cache_root.clone();
     let diagnostics_app_model = app_model.clone();
+    let onboarding_window = Rc::new(RefCell::new(None::<adw::ApplicationWindow>));
     let rerun_window = Rc::new(RefCell::new(None::<MainWindow>));
     let rerun_window_handle = rerun_window.clone();
     let window = MainWindow::new_with_providers_and_rerun(
@@ -99,7 +102,14 @@ pub fn run() {
     let startup_launch_policy = startup_launch_policy();
     let skipped_initial_activation = Rc::new(Cell::new(false));
     let app_model = app_model.clone();
-    install_command_pump(window.clone(), app_model.clone(), command_receiver);
+    let onboarding_window_handle = onboarding_window.clone();
+    install_command_pump(
+        app.clone(),
+        window.clone(),
+        app_model.clone(),
+        onboarding_window.clone(),
+        command_receiver,
+    );
     app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
             window.present();
@@ -107,15 +117,30 @@ pub fn run() {
         }
 
         let controller = BackgroundController::new();
+        let show_settings = {
+            let app = app.clone();
+            let window = window.clone();
+            let app_model = app_model.clone();
+            let onboarding_window = onboarding_window_handle.clone();
+            Rc::new(move || {
+                present_primary_surface(&app, &window, &app_model, &onboarding_window);
+            })
+        };
+        let show_history = {
+            let window = window.clone();
+            Rc::new(move || {
+                window.present_history();
+            })
+        };
 
-        controller.install(app, &window, &app_model);
+        controller.install(app, show_settings, show_history);
         match initial_surface(
             startup_launch_policy,
             skipped_initial_activation.replace(true),
-            app_model.setup_state.clone(),
+            app_model.setup_state(),
         ) {
             Some(InitialSurface::Setup) => {
-                window.present_setup(&app_model);
+                present_primary_surface(app, &window, &app_model, &onboarding_window_handle);
             }
             Some(InitialSurface::Settings) => {
                 window.present_settings();
@@ -173,14 +198,52 @@ fn start_modifier_capture(service: PepperXService) -> Option<ModifierCaptureHand
     }
 }
 
-fn install_command_pump(window: MainWindow, app_model: Rc<AppModel>, receiver: Receiver<AppCommand>) {
+fn present_primary_surface(
+    app: &adw::Application,
+    window: &MainWindow,
+    app_model: &AppModel,
+    onboarding_window: &Rc<RefCell<Option<adw::ApplicationWindow>>>,
+) {
+    match app_model.requested_surface() {
+        InitialSurface::Setup => {
+            if let Some(existing_window) = onboarding_window.borrow().as_ref() {
+                existing_window.present();
+                return;
+            }
+
+            let onboarding_window_slot = onboarding_window.clone();
+            let onboarding_model = app_model.clone();
+            let onboarding = show_onboarding_window(app, app_model, move || {
+                onboarding_model.mark_onboarding_completed();
+                onboarding_window_slot.borrow_mut().take();
+            });
+            onboarding.connect_hide({
+                let onboarding_window = onboarding_window.clone();
+                move |_| {
+                    onboarding_window.borrow_mut().take();
+                }
+            });
+            *onboarding_window.borrow_mut() = Some(onboarding);
+        }
+        InitialSurface::Settings => {
+            window.present_settings();
+        }
+    }
+}
+
+fn install_command_pump(
+    app: adw::Application,
+    window: MainWindow,
+    app_model: Rc<AppModel>,
+    onboarding_window: Rc<RefCell<Option<adw::ApplicationWindow>>>,
+    receiver: Receiver<AppCommand>,
+) {
     gtk::glib::timeout_add_local(Duration::from_millis(50), move || {
         while let Ok(command) = receiver.try_recv() {
             match command {
-                AppCommand::ShowSettings => match app_model.requested_surface() {
-                    InitialSurface::Setup => window.present_setup(&app_model),
-                    InitialSurface::Settings => window.present_settings(),
-                },
+                AppCommand::ShowSettings => {
+                    present_primary_surface(&app, &window, &app_model, &onboarding_window)
+                }
                 AppCommand::ShowHistory => window.present_history(),
             }
         }
@@ -241,13 +304,20 @@ mod app_shell {
         let app = build_application();
         let window = MainWindow::new(&app);
         let controller = BackgroundController::new();
-        let app_model = AppModel::for_startup(
-            &AppSetupState::default(),
-            &AppSettings::default(),
-            &Capabilities::shell_default("0.1.0"),
-        );
+        let show_settings = {
+            let window = window.clone();
+            Rc::new(move || {
+                window.present_settings();
+            })
+        };
+        let show_history = {
+            let window = window.clone();
+            Rc::new(move || {
+                window.present_history();
+            })
+        };
 
-        controller.install(&app, &window, &app_model);
+        controller.install(&app, show_settings, show_history);
 
         for action_name in BackgroundController::ACTION_NAMES {
             assert!(app.lookup_action(action_name).is_some());
@@ -286,7 +356,7 @@ mod app_shell {
             initial_surface(
                 StartupLaunchPolicy::Interactive,
                 false,
-                app_model.setup_state.clone()
+                app_model.setup_state()
             ),
             Some(InitialSurface::Setup)
         );
@@ -294,6 +364,22 @@ mod app_shell {
         assert!(app_model
             .setup_description()
             .contains("first-run setup before it can stay in the background"));
+    }
+
+    #[test]
+    fn app_shell_first_run_blocks_modifier_only_try_it_when_capture_is_unavailable() {
+        let settings = AppSettings::default();
+        let setup_state = AppSetupState::default();
+        let app_model = AppModel::for_startup(
+            &setup_state,
+            &settings,
+            &Capabilities::shell_default("0.1.0"),
+        );
+
+        assert_eq!(app_model.setup_state(), SetupState::SetupRequired);
+        assert_eq!(app_model.requested_surface(), InitialSurface::Setup);
+        assert_eq!(app_model.setup_checklist().completed_items(), 0);
+        assert!(!app_model.setup_checklist().trigger_ready);
     }
 
     #[test]
@@ -316,7 +402,7 @@ mod app_shell {
             initial_surface(
                 StartupLaunchPolicy::Background,
                 false,
-                app_model.setup_state.clone()
+                app_model.setup_state()
             ),
             None
         );
@@ -324,7 +410,7 @@ mod app_shell {
             initial_surface(
                 StartupLaunchPolicy::Background,
                 true,
-                app_model.setup_state.clone()
+                app_model.setup_state()
             ),
             Some(InitialSurface::Settings)
         );
@@ -345,7 +431,7 @@ mod app_shell {
         );
 
         assert_eq!(
-            app_model.setup_state,
+            app_model.setup_state(),
             SetupState::NeedsAttention(vec![SetupIssue::ModifierCaptureUnavailable])
         );
         assert_eq!(app_model.setup_title(), "Fix Pepper X setup");
@@ -369,7 +455,7 @@ mod app_shell {
             &Capabilities::shell_default("0.1.0"),
         );
 
-        assert_eq!(app_model.setup_state, SetupState::Ready);
+        assert_eq!(app_model.setup_state(), SetupState::Ready);
         assert_eq!(app_model.requested_surface(), InitialSurface::Settings);
     }
 
