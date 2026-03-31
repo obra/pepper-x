@@ -5,16 +5,55 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::app_model::{AppModel, RuntimeReadinessSummary};
+use crate::diagnostics_view::DiagnosticsView;
 use crate::history_view::build_history_browser;
+use crate::settings_view::SettingsView;
 use pepperx_models::{ModelInventoryEntry, ModelKind};
 
 use crate::history_store::ArchivedRun;
 use crate::settings::AppSettings;
 
 const SETUP_PAGE_NAME: &str = "setup";
+const SHELL_PAGE_NAME: &str = "shell";
 const SETTINGS_PAGE_NAME: &str = "settings";
 const HISTORY_PAGE_NAME: &str = "history";
 const DIAGNOSTICS_PAGE_NAME: &str = "diagnostics";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageScaffoldKind {
+    Status,
+    Form,
+    Browser,
+    CardList,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowPage {
+    Setup,
+    Settings,
+    History,
+    Diagnostics,
+}
+
+impl WindowPage {
+    fn page_name(self) -> &'static str {
+        match self {
+            Self::Setup => SETUP_PAGE_NAME,
+            Self::Settings => SETTINGS_PAGE_NAME,
+            Self::History => HISTORY_PAGE_NAME,
+            Self::Diagnostics => DIAGNOSTICS_PAGE_NAME,
+        }
+    }
+
+    fn container_kind(self) -> PageScaffoldKind {
+        match self {
+            Self::Setup => PageScaffoldKind::Status,
+            Self::Settings => PageScaffoldKind::Form,
+            Self::History => PageScaffoldKind::Browser,
+            Self::Diagnostics => PageScaffoldKind::CardList,
+        }
+    }
+}
 
 struct WindowContentProviders {
     history_runs: Rc<dyn Fn() -> Vec<ArchivedRun>>,
@@ -39,11 +78,12 @@ pub struct MainWindow {
 
 struct WindowState {
     window: adw::ApplicationWindow,
-    stack: gtk::Stack,
+    root_stack: gtk::Stack,
+    shell_stack: gtk::Stack,
     setup_title_label: gtk::Label,
     setup_label: gtk::Label,
-    settings_label: gtk::Label,
-    diagnostics_label: gtk::Label,
+    settings_view: SettingsView,
+    diagnostics_view: DiagnosticsView,
     history_container: gtk::Box,
 }
 
@@ -142,7 +182,7 @@ impl MainWindow {
     }
 
     pub fn present_settings(&self) {
-        self.present_page(SETTINGS_PAGE_NAME);
+        self.present_page(WindowPage::Settings);
     }
 
     pub fn present_setup(&self, app_model: &AppModel) {
@@ -152,25 +192,30 @@ impl MainWindow {
         if let Some(state) = self.state.borrow().as_ref() {
             state.setup_title_label.set_label(app_model.setup_title());
             state.setup_label.set_label(&app_model.setup_description());
-            state.stack.set_visible_child_name(SETUP_PAGE_NAME);
-            state.window.present();
         }
+
+        self.present_page(WindowPage::Setup);
     }
 
     pub fn present_history(&self) {
-        self.present_page(HISTORY_PAGE_NAME);
+        self.present_page(WindowPage::History);
     }
 
     fn current_content_snapshot(&self) -> WindowContentSnapshot {
         self.content_providers.snapshot()
     }
 
-    fn present_page(&self, page_name: &str) {
+    fn present_page(&self, page: WindowPage) {
         self.ensure_window();
         self.refresh_content();
 
         if let Some(state) = self.state.borrow().as_ref() {
-            state.stack.set_visible_child_name(page_name);
+            if page == WindowPage::Setup {
+                state.root_stack.set_visible_child_name(SETUP_PAGE_NAME);
+            } else {
+                state.root_stack.set_visible_child_name(SHELL_PAGE_NAME);
+                state.shell_stack.set_visible_child_name(page.page_name());
+            }
             state.window.present();
         }
     }
@@ -181,17 +226,25 @@ impl MainWindow {
         }
 
         let snapshot = self.current_content_snapshot();
-        let stack = gtk::Stack::builder()
+        let root_stack = gtk::Stack::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .build();
+        let shell_stack = gtk::Stack::builder()
             .hexpand(true)
             .vexpand(true)
             .transition_type(gtk::StackTransitionType::Crossfade)
             .build();
         let (setup_page, setup_title_label, setup_label) =
             build_page("Finish Pepper X setup", "Pepper X setup will appear here.");
-        stack.add_titled(&setup_page, Some(SETUP_PAGE_NAME), "Setup");
-        let (settings_page, _, settings_label) =
-            build_page("Settings", snapshot.settings_summary.as_str());
-        stack.add_titled(&settings_page, Some(SETTINGS_PAGE_NAME), "Settings");
+        root_stack.add_named(&setup_page, Some(SETUP_PAGE_NAME));
+        let settings_view = SettingsView::new(snapshot.settings_summary.as_str());
+        shell_stack.add_titled(
+            settings_view.widget(),
+            Some(SETTINGS_PAGE_NAME),
+            "Settings",
+        );
         let history_container = gtk::Box::new(Orientation::Vertical, 0);
         history_container.set_hexpand(true);
         history_container.set_vexpand(true);
@@ -199,17 +252,17 @@ impl MainWindow {
             &snapshot.history_runs,
             self.rerun_archived_run.clone(),
         ));
-        stack.add_titled(&history_container, Some(HISTORY_PAGE_NAME), "History");
-        let (diagnostics_page, _, diagnostics_label) =
-            build_page("Diagnostics", snapshot.diagnostics_summary.as_str());
-        stack.add_titled(
-            &diagnostics_page,
+        shell_stack.add_titled(&history_container, Some(HISTORY_PAGE_NAME), "History");
+        let diagnostics_view = DiagnosticsView::new(snapshot.diagnostics_summary.as_str());
+        shell_stack.add_titled(
+            diagnostics_view.widget(),
             Some(DIAGNOSTICS_PAGE_NAME),
             "Diagnostics",
         );
+        root_stack.add_named(&shell_stack, Some(SHELL_PAGE_NAME));
 
         let stack_switcher = gtk::StackSwitcher::new();
-        stack_switcher.set_stack(Some(&stack));
+        stack_switcher.set_stack(Some(&shell_stack));
 
         let header_bar = adw::HeaderBar::builder()
             .title_widget(&adw::WindowTitle::new(
@@ -221,7 +274,7 @@ impl MainWindow {
 
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header_bar);
-        view.set_content(Some(&stack));
+        view.set_content(Some(&root_stack));
 
         let window = adw::ApplicationWindow::builder()
             .application(&self.app)
@@ -233,11 +286,12 @@ impl MainWindow {
 
         *self.state.borrow_mut() = Some(WindowState {
             window,
-            stack,
+            root_stack,
+            shell_stack,
             setup_title_label,
             setup_label,
-            settings_label,
-            diagnostics_label,
+            settings_view,
+            diagnostics_view,
             history_container,
         });
     }
@@ -249,10 +303,8 @@ impl MainWindow {
             return;
         };
 
-        state.settings_label.set_label(&snapshot.settings_summary);
-        state
-            .diagnostics_label
-            .set_label(&snapshot.diagnostics_summary);
+        state.settings_view.set_summary(&snapshot.settings_summary);
+        state.diagnostics_view.set_summary(&snapshot.diagnostics_summary);
         replace_history_browser(
             &state.history_container,
             &snapshot.history_runs,
@@ -489,6 +541,8 @@ fn replace_history_browser(
 #[cfg(test)]
 mod app_shell {
     use super::*;
+    use crate::diagnostics_view::{diagnostics_page_scaffold, DiagnosticsContainerKind};
+    use crate::settings_view::{settings_page_scaffold, SettingsContainerKind};
     use crate::settings::AppSettings;
     use crate::transcript_log::{InsertionDiagnostics, LearningDiagnostics, TranscriptEntry};
     use pepperx_ipc::Capabilities;
@@ -692,6 +746,46 @@ mod app_shell {
         assert_eq!(refreshed.settings_summary, "settings v2");
         assert_eq!(refreshed.diagnostics_summary, "diagnostics v2");
         assert!(refreshed.history_runs.is_empty());
+    }
+
+    #[test]
+    fn window_page_routes_cover_all_shell_states() {
+        assert_eq!(WindowPage::Setup.page_name(), SETUP_PAGE_NAME);
+        assert_eq!(WindowPage::Settings.page_name(), SETTINGS_PAGE_NAME);
+        assert_eq!(WindowPage::History.page_name(), HISTORY_PAGE_NAME);
+        assert_eq!(WindowPage::Diagnostics.page_name(), DIAGNOSTICS_PAGE_NAME);
+        assert_eq!(WindowPage::Settings.container_kind(), PageScaffoldKind::Form);
+        assert_eq!(
+            WindowPage::Diagnostics.container_kind(),
+            PageScaffoldKind::CardList
+        );
+    }
+
+    #[test]
+    fn window_settings_page_scaffold_builds_structured_rows() {
+        let scaffold = settings_page_scaffold(
+            "Model cache: /tmp/pepper-x-models\nDefault ASR model: nemo-parakeet-tdt",
+        );
+
+        assert_eq!(scaffold.container_kind, SettingsContainerKind::Form);
+        assert_eq!(scaffold.sections.len(), 1);
+        assert_eq!(scaffold.sections[0].title, "Configuration");
+        assert_eq!(scaffold.sections[0].rows.len(), 2);
+        assert_eq!(scaffold.sections[0].rows[0].title, "Model cache");
+        assert_eq!(scaffold.sections[0].rows[0].value, "/tmp/pepper-x-models");
+    }
+
+    #[test]
+    fn window_diagnostics_page_scaffold_builds_card_entries() {
+        let scaffold = diagnostics_page_scaffold(
+            "Modifier-only capture supported: true\nExtension connected: false\nService version: 0.1.0",
+        );
+
+        assert_eq!(scaffold.container_kind, DiagnosticsContainerKind::CardList);
+        assert_eq!(scaffold.cards.len(), 3);
+        assert_eq!(scaffold.cards[0].title, "Modifier-only capture supported");
+        assert_eq!(scaffold.cards[0].body, "true");
+        assert_eq!(scaffold.cards[2].title, "Service version");
     }
 
     #[test]
