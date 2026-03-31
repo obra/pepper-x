@@ -346,6 +346,9 @@ where
         } => rerun_archived_run(ArchivedRunRerunRequest {
             run_id,
             asr_model_id,
+            cleanup_enabled: cleanup_model_id.is_some()
+                || cleanup_prompt_profile.is_some()
+                || AppSettings::load_or_default().cleanup_enabled,
             cleanup_model_id,
             cleanup_prompt_profile,
         })
@@ -472,6 +475,7 @@ fn model_kind_label(kind: ModelKind) -> &'static str {
 #[cfg(test)]
 mod cli_mode {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     #[test]
@@ -637,11 +641,77 @@ mod cli_mode {
             Some(ArchivedRunRerunRequest {
                 run_id: "run-123".into(),
                 asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_enabled: true,
                 cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             })
         );
         assert_eq!(result, Some(expected));
+    }
+
+    #[test]
+    fn rerun_cli_mode_uses_saved_cleanup_setting_when_no_cleanup_overrides_are_given() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = temp_state_root();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        AppSettings {
+            cleanup_enabled: true,
+            ..AppSettings::default()
+        }
+        .save()
+        .expect("settings should save");
+
+        let wav_path = PathBuf::from("/tmp/rerun.wav");
+        let expected = TranscriptEntry::new(
+            &wav_path,
+            "hello from rerun pepper x",
+            "sherpa-onnx",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
+            Duration::from_millis(41),
+        );
+        let mut observed_request = None;
+
+        let result = run_with(
+            StartupMode::RerunArchivedRun {
+                run_id: "run-123".into(),
+                asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_model_id: None,
+                cleanup_prompt_profile: None,
+            },
+            || unreachable!(),
+            |request| {
+                observed_request = Some(request);
+                Ok(expected.clone())
+            },
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |_| unreachable!(),
+        )
+        .expect("rerun mode should succeed");
+
+        assert_eq!(
+            observed_request,
+            Some(ArchivedRunRerunRequest {
+                run_id: "run-123".into(),
+                asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_enabled: true,
+                cleanup_model_id: None,
+                cleanup_prompt_profile: None,
+            })
+        );
+        assert_eq!(result, Some(expected));
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
     }
 
     #[test]
@@ -942,5 +1012,21 @@ mod cli_mode {
                 wav_path: PathBuf::from(wav_path),
             }
         );
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_state_root() -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "pepper-x-cli-state-{}-{unique}",
+            std::process::id()
+        ))
     }
 }

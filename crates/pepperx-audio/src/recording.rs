@@ -6,8 +6,6 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use crate::devices::stable_pipewire_microphone_id;
 #[cfg(target_os = "linux")]
-use std::time::Instant;
-#[cfg(target_os = "linux")]
 use pipewire as pw;
 #[cfg(target_os = "linux")]
 use pw::{properties::properties, spa};
@@ -25,6 +23,8 @@ use std::rc::Rc;
 use std::sync::mpsc;
 #[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 const APP_ID: &str = "com.obra.PepperX";

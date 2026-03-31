@@ -20,6 +20,7 @@ mod cleanup_runtime {
             ocr_text: None,
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: None,
         })
         .unwrap_err();
 
@@ -38,6 +39,7 @@ mod cleanup_runtime {
             ocr_text: None,
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: None,
         };
 
         assert_eq!(cleanup_prompt(&request), cleanup_prompt(&request));
@@ -52,6 +54,7 @@ mod cleanup_runtime {
             ocr_text: None,
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: None,
         });
         let literal_prompt = cleanup_prompt(&CleanupRequest {
             transcript_text: "hello from pepper x".into(),
@@ -60,6 +63,7 @@ mod cleanup_runtime {
             ocr_text: None,
             correction_memory_text: None,
             prompt_profile: "literal-dictation".into(),
+            custom_prompt_text: None,
         });
 
         assert_ne!(ordinary_prompt, literal_prompt);
@@ -75,6 +79,7 @@ mod cleanup_runtime {
             ocr_text: None,
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: None,
         });
 
         assert!(!prompt.contains("Optional OCR context:"));
@@ -90,6 +95,7 @@ mod cleanup_runtime {
             ocr_text: Some(oversized_ocr.clone()),
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: None,
         });
 
         let bounded_ocr = "A".repeat(512);
@@ -108,6 +114,7 @@ mod cleanup_runtime {
             ocr_text: None,
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: None,
         });
 
         assert!(prompt.contains("Optional supporting context:\nline before\nline after"));
@@ -125,6 +132,7 @@ mod cleanup_runtime {
                 "When the raw transcript is `pepper x`, prefer `Pepper X`.".into(),
             ),
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: None,
         });
 
         assert!(prompt.contains("Saved correction memory:\n"));
@@ -145,9 +153,43 @@ mod cleanup_runtime {
             ocr_text: None,
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: None,
         })
         .expect("real cleanup run should succeed");
 
         assert!(!result.cleaned_text.trim().is_empty());
+    }
+
+    #[test]
+    fn cleanup_runtime_custom_prompt_layers_on_top_of_selected_profile() {
+        let prompt = cleanup_prompt(&CleanupRequest {
+            transcript_text: "hello from pepper x".into(),
+            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
+            supporting_context_text: None,
+            ocr_text: None,
+            correction_memory_text: None,
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: Some("Return SHOUTING ONLY.".into()),
+        });
+
+        assert!(prompt.contains("Preserve wording and meaning."));
+        assert!(prompt.contains("Additional cleanup instructions:\nReturn SHOUTING ONLY.\n"));
+    }
+
+    #[test]
+    fn cleanup_runtime_custom_prompt_preserves_user_whitespace() {
+        let custom_prompt = "\n  Keep product names verbatim.\n\nDo not normalize punctuation.\n";
+        let prompt = cleanup_prompt(&CleanupRequest {
+            transcript_text: "hello from pepper x".into(),
+            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
+            supporting_context_text: None,
+            ocr_text: None,
+            correction_memory_text: None,
+            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
+            custom_prompt_text: Some(custom_prompt.into()),
+        });
+
+        assert!(prompt.contains("Additional cleanup instructions:\n"));
+        assert!(prompt.contains(custom_prompt));
     }
 }

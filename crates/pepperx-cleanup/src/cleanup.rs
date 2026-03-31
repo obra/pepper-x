@@ -11,6 +11,7 @@ const CLEANUP_MAX_TOKENS: usize = 128;
 const CLEANUP_OUTPUT_LIMIT: usize = 512;
 const CLEANUP_OCR_CONTEXT_LIMIT: usize = 512;
 const CLEANUP_CORRECTION_MEMORY_LIMIT: usize = 2048;
+const CLEANUP_CUSTOM_PROMPT_LIMIT: usize = 2048;
 const CLEANUP_SESSION_CTX: u32 = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +22,7 @@ pub struct CleanupRequest {
     pub ocr_text: Option<String>,
     pub correction_memory_text: Option<String>,
     pub prompt_profile: String,
+    pub custom_prompt_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +122,11 @@ impl fmt::Display for CleanupError {
 
 pub fn cleanup_prompt(request: &CleanupRequest) -> String {
     let mut prompt = prompt_preamble(&request.prompt_profile).to_string();
+
+    if let Some(custom_prompt_text) = custom_prompt_text(request.custom_prompt_text.as_deref()) {
+        prompt.push_str("Additional cleanup instructions:\n");
+        prompt.push_str(&custom_prompt_text);
+    }
 
     if let Some(correction_memory_text) =
         bounded_correction_memory_text(request.correction_memory_text.as_deref())
@@ -264,6 +271,25 @@ fn bounded_correction_memory_text(correction_memory_text: Option<&str>) -> Optio
             .take(CLEANUP_CORRECTION_MEMORY_LIMIT)
             .collect(),
     )
+}
+
+fn custom_prompt_text(custom_prompt_text: Option<&str>) -> Option<String> {
+    let custom_prompt_text = custom_prompt_text?;
+    if !custom_prompt_text
+        .chars()
+        .any(|character| !character.is_whitespace())
+    {
+        return None;
+    }
+
+    let mut prompt: String = custom_prompt_text
+        .chars()
+        .take(CLEANUP_CUSTOM_PROMPT_LIMIT)
+        .collect();
+    if !prompt.ends_with('\n') {
+        prompt.push('\n');
+    }
+    Some(prompt)
 }
 
 fn bounded_ocr_text(ocr_text: Option<&str>) -> Option<String> {

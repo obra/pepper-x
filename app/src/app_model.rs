@@ -29,6 +29,15 @@ pub struct ModelBootstrapSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsSurfaceState {
+    pub cleanup_enabled: bool,
+    pub cleanup_prompt_profile: String,
+    pub cleanup_custom_prompt: String,
+    pub launch_at_login: bool,
+    pub feedback_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppModel {
     setup_state: Rc<RefCell<SetupState>>,
     trigger_ready: bool,
@@ -147,6 +156,10 @@ impl AppModel {
     pub fn set_model_bootstrap_summary(&self, summary: ModelBootstrapSummary) {
         *self.model_bootstrap.borrow_mut() = summary;
     }
+
+    pub fn settings_surface_state(&self, settings: &AppSettings) -> SettingsSurfaceState {
+        SettingsSurfaceState::from_settings(settings)
+    }
 }
 
 impl RuntimeReadinessSummary {
@@ -249,6 +262,18 @@ impl ModelBootstrapSummary {
             progress_label,
             failure_message: progress.failure_message.clone(),
             retry_available: progress.failure_message.is_some(),
+        }
+    }
+}
+
+impl SettingsSurfaceState {
+    pub fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            cleanup_enabled: settings.cleanup_enabled,
+            cleanup_prompt_profile: settings.cleanup_prompt_profile.clone(),
+            cleanup_custom_prompt: settings.cleanup_custom_prompt.clone(),
+            launch_at_login: settings.launch_at_login,
+            feedback_message: None,
         }
     }
 }

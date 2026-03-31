@@ -54,6 +54,7 @@ struct UinputInsertResponse {
 pub struct ArchivedRunRerunRequest {
     pub run_id: String,
     pub asr_model_id: Option<String>,
+    pub cleanup_enabled: bool,
     pub cleanup_model_id: Option<String>,
     pub cleanup_prompt_profile: Option<String>,
 }
@@ -175,43 +176,65 @@ fn transcribe_recorded_wav_to_log_with_live_status(
     }
 
     let settings = AppSettings::load_or_default();
-    let prompt_profile = settings.cleanup_prompt_profile.clone();
-    let cache_root = default_cache_root();
-    let supporting_context = capture_cleanup_context();
-    let result = archive_live_recording_with_cleanup_and_friendly_insert(
-        request.recording_artifact().clone(),
-        request.trigger_source(),
-        transcribe_wav_result,
-        Some(prompt_profile.clone()),
-        supporting_context.clone(),
-        |transcript_text| {
-            if let Some(live_status) = live_status.as_ref() {
-                live_status.replace(LiveStatus::cleaning_up());
-            }
-            let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
-            let correction_memory_text = load_correction_store().prompt_memory_text();
-            run_cleanup(&CleanupRequest {
-                transcript_text: transcript_text.into(),
-                model_path,
-                supporting_context_text: supporting_context.supporting_context_text.clone(),
-                ocr_text: supporting_context.ocr_text.clone(),
-                correction_memory_text,
-                prompt_profile: prompt_profile.clone(),
-            })
-        },
-        |transcript_text| {
-            insert_with_uinput_fallback(
-                transcript_text,
-                |transcript_text| {
-                    insert_text_into_friendly_target(
-                        transcript_text,
-                        &FriendlyInsertPolicy::live_supported(),
-                    )
-                },
-                request_uinput_text_insertion,
-            )
-        },
-    );
+    let result = if settings.cleanup_enabled {
+        let prompt_profile = settings.cleanup_prompt_profile.clone();
+        let custom_prompt_text = settings.effective_cleanup_custom_prompt();
+        let cache_root = default_cache_root();
+        let supporting_context = capture_cleanup_context();
+        archive_live_recording_with_cleanup_and_friendly_insert(
+            request.recording_artifact().clone(),
+            request.trigger_source(),
+            transcribe_wav_result,
+            Some(prompt_profile.clone()),
+            supporting_context.clone(),
+            |transcript_text| {
+                if let Some(live_status) = live_status.as_ref() {
+                    live_status.replace(LiveStatus::cleaning_up());
+                }
+                let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
+                let correction_memory_text = load_correction_store().prompt_memory_text();
+                run_cleanup(&CleanupRequest {
+                    transcript_text: transcript_text.into(),
+                    model_path,
+                    supporting_context_text: supporting_context.supporting_context_text.clone(),
+                    ocr_text: supporting_context.ocr_text.clone(),
+                    correction_memory_text,
+                    prompt_profile: prompt_profile.clone(),
+                    custom_prompt_text: custom_prompt_text.clone(),
+                })
+            },
+            |transcript_text| {
+                insert_with_uinput_fallback(
+                    transcript_text,
+                    |transcript_text| {
+                        insert_text_into_friendly_target(
+                            transcript_text,
+                            &FriendlyInsertPolicy::live_supported(),
+                        )
+                    },
+                    request_uinput_text_insertion,
+                )
+            },
+        )
+    } else {
+        archive_live_recording_with_friendly_insert(
+            request.recording_artifact().clone(),
+            request.trigger_source(),
+            transcribe_wav_result,
+            |transcript_text| {
+                insert_with_uinput_fallback(
+                    transcript_text,
+                    |transcript_text| {
+                        insert_text_into_friendly_target(
+                            transcript_text,
+                            &FriendlyInsertPolicy::live_supported(),
+                        )
+                    },
+                    request_uinput_text_insertion,
+                )
+            },
+        )
+    };
 
     match result {
         Ok(entry) => {
@@ -233,7 +256,12 @@ pub fn transcribe_wav_and_cleanup_to_log(
     wav_path: &Path,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
     let settings = AppSettings::load_or_default();
+    if !settings.cleanup_enabled {
+        return transcribe_wav_to_log(wav_path);
+    }
+
     let prompt_profile = settings.cleanup_prompt_profile.clone();
+    let custom_prompt_text = settings.effective_cleanup_custom_prompt();
     let cache_root = default_cache_root();
     let supporting_context = capture_cleanup_context();
     let result = transcribe_wav_result(wav_path)?;
@@ -251,6 +279,7 @@ pub fn transcribe_wav_and_cleanup_to_log(
                 ocr_text: supporting_context.ocr_text.clone(),
                 correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
+                custom_prompt_text: custom_prompt_text.clone(),
             })
         },
     )
@@ -493,6 +522,7 @@ where
     let original_run = store
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
+    let settings = AppSettings::load_or_default();
     let archived_source_wav_path =
         original_run
             .archived_source_wav_path
@@ -506,17 +536,30 @@ where
         .unwrap_or_else(|| original_run.entry.model_name.clone());
     let result = transcribe(&archived_source_wav_path, &asr_model_id)?;
     let mut entry = transcript_entry_from_result(result);
-    let cleanup_model_id = request.cleanup_model_id.clone().or_else(|| {
-        original_run
-            .entry
-            .cleanup
-            .as_ref()
-            .map(|cleanup| cleanup.model_name.clone())
-    });
-    let prompt_profile = request
-        .cleanup_prompt_profile
-        .clone()
-        .or_else(|| original_run.prompt_profile.clone());
+    let cleanup_model_id = if request.cleanup_enabled {
+        request
+            .cleanup_model_id
+            .clone()
+            .or_else(|| {
+                original_run
+                    .entry
+                    .cleanup
+                    .as_ref()
+                    .map(|cleanup| cleanup.model_name.clone())
+            })
+            .or_else(|| Some(settings.preferred_cleanup_model.clone()))
+    } else {
+        None
+    };
+    let prompt_profile = if request.cleanup_enabled {
+        request
+            .cleanup_prompt_profile
+            .clone()
+            .or_else(|| original_run.prompt_profile.clone())
+            .or_else(|| Some(settings.cleanup_prompt_profile.clone()))
+    } else {
+        None
+    };
     let supporting_context = SupportingContext {
         supporting_context_text: original_run.supporting_context_text.clone(),
         ocr_text: original_run.ocr_text.clone(),
@@ -537,7 +580,8 @@ where
             correction_memory_text: load_correction_store().prompt_memory_text(),
             prompt_profile: prompt_profile
                 .clone()
-                .unwrap_or_else(|| AppSettings::load_or_default().cleanup_prompt_profile),
+                .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
+            custom_prompt_text: settings.effective_cleanup_custom_prompt(),
         };
         record_cleanup(&mut entry, &supporting_context, |transcript_text| {
             let request = CleanupRequest {
@@ -548,11 +592,14 @@ where
         });
     }
 
+    let archived_cleanup_metadata = entry.cleanup.is_some();
     archive_transcript_entry_with_request(
         entry,
         RunRuntimeMetadata::archived_rerun(),
-        prompt_profile,
-        Some(&supporting_context),
+        archived_cleanup_metadata
+            .then_some(prompt_profile)
+            .flatten(),
+        archived_cleanup_metadata.then_some(&supporting_context),
         Some(original_run.run_id),
     )
 }
@@ -611,6 +658,20 @@ where
     let insert_text = entry.transcript_text.clone();
     let _ = record_friendly_insert(&mut entry, &insert_text, insert);
     archive_transcript_entry(entry)
+}
+
+fn archive_transcription_result_with_friendly_insert_request<F>(
+    result: TranscriptionResult,
+    runtime_metadata: RunRuntimeMetadata,
+    insert: F,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    F: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
+{
+    let mut entry = transcript_entry_from_result(result);
+    let insert_text = entry.transcript_text.clone();
+    let _ = record_friendly_insert(&mut entry, &insert_text, insert);
+    archive_transcript_entry_with_request(entry, runtime_metadata, None, None, None)
 }
 
 fn archive_transcription_result_with_cleanup_and_friendly_insert<C, I>(
@@ -713,7 +774,27 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
     runtime_metadata: RunRuntimeMetadata,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
     let settings = AppSettings::load_or_default();
+    if !settings.cleanup_enabled {
+        return archive_transcription_result_with_friendly_insert_request(
+            result,
+            runtime_metadata,
+            |transcript_text| {
+                insert_with_uinput_fallback(
+                    transcript_text,
+                    |transcript_text| {
+                        insert_text_into_friendly_target(
+                            transcript_text,
+                            &FriendlyInsertPolicy::live_supported(),
+                        )
+                    },
+                    request_uinput_text_insertion,
+                )
+            },
+        );
+    }
+
     let prompt_profile = settings.cleanup_prompt_profile.clone();
+    let custom_prompt_text = settings.effective_cleanup_custom_prompt();
     let cache_root = default_cache_root();
     let supporting_context = capture_cleanup_context();
     archive_transcription_result_with_cleanup_and_friendly_insert_request(
@@ -731,6 +812,7 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
                 ocr_text: supporting_context.ocr_text.clone(),
                 correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
+                custom_prompt_text: custom_prompt_text.clone(),
             })
         },
         |transcript_text| {
@@ -771,6 +853,34 @@ where
             supporting_context,
             runtime_metadata,
             cleanup,
+            insert,
+        ),
+        Err(error) => {
+            archive_live_transcription_failure(
+                &recording_artifact,
+                runtime_metadata.with_failure("transcription", error.to_string()),
+            )?;
+            Err(error)
+        }
+    }
+}
+
+fn archive_live_recording_with_friendly_insert<T, I>(
+    recording_artifact: RecordingArtifact,
+    trigger_source: TriggerSource,
+    transcribe: T,
+    insert: I,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    T: FnOnce(&Path) -> Result<TranscriptionResult, TranscriptionRunError>,
+    I: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
+{
+    let runtime_metadata =
+        RunRuntimeMetadata::for_live_recording(trigger_source, &recording_artifact);
+    match transcribe(recording_artifact.wav_path()) {
+        Ok(result) => archive_transcription_result_with_friendly_insert_request(
+            result,
+            runtime_metadata,
             insert,
         ),
         Err(error) => {
@@ -1621,6 +1731,7 @@ mod app_shell {
                     ocr_text: None,
                     correction_memory_text: None,
                     prompt_profile: "ordinary-dictation".into(),
+                    custom_prompt_text: None,
                 })
             },
         )
@@ -2606,6 +2717,71 @@ mod app_shell {
     }
 
     #[test]
+    fn cleanup_insert_runtime_skips_cleanup_when_settings_disable_it() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-disabled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_disable_context_capture = std::env::var_os(DISABLE_CONTEXT_CAPTURE_ENV);
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::env::set_var(DISABLE_CONTEXT_CAPTURE_ENV, "1");
+
+        AppSettings {
+            cleanup_enabled: false,
+            ..AppSettings::default()
+        }
+        .save()
+        .expect("settings should save");
+
+        let entry = archive_transcription_result_with_default_cleanup_and_friendly_insert(
+            TranscriptionResult {
+                wav_path: state_root.join("loop5.wav"),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            RunRuntimeMetadata::wav_import(),
+        )
+        .expect("archive entry");
+
+        let entries = TranscriptLog::open(&state_root)
+            .expect("open transcript log")
+            .recent_entries()
+            .expect("load transcript log");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entry.transcript_text, "hello from pepper x");
+        assert_eq!(entry.display_text(), "hello from pepper x");
+        assert_eq!(entry.cleanup, None);
+        assert_eq!(entries[0].transcript_text, "hello from pepper x");
+        assert_eq!(entries[0].display_text(), "hello from pepper x");
+        assert_eq!(entries[0].cleanup, None);
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        match previous_disable_context_capture {
+            Some(previous_disable_context_capture) => std::env::set_var(
+                DISABLE_CONTEXT_CAPTURE_ENV,
+                previous_disable_context_capture,
+            ),
+            None => std::env::remove_var(DISABLE_CONTEXT_CAPTURE_ENV),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
     fn cleanup_insert_runtime_archives_live_transcription_failures_for_retry() {
         let _guard = env_lock().lock().unwrap();
         let state_root = std::env::temp_dir().join(format!(
@@ -3304,6 +3480,7 @@ mod app_shell {
             ArchivedRunRerunRequest {
                 run_id: original_run.run_id.clone(),
                 asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_enabled: true,
                 cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             },
@@ -3378,6 +3555,205 @@ mod app_shell {
                 .map(|cleanup| cleanup.model_name.as_str()),
             Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
         );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn rerun_archived_run_skips_cleanup_when_request_disables_it() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-rerun-skip-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        let source_wav_path = state_root.join("source.wav");
+        std::fs::write(&source_wav_path, b"pepper-x-rerun-audio").unwrap();
+
+        let mut original_entry = TranscriptEntry::new(
+            &source_wav_path,
+            "hello from pepper x",
+            "sherpa-onnx",
+            MODEL_NAME,
+            Duration::from_millis(42),
+        );
+        original_entry.cleanup = Some(CleanupDiagnostics::succeeded(
+            "llama.cpp",
+            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "Hello from Pepper X.",
+            Duration::from_millis(19),
+        ));
+
+        let original_run = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .archive_run(
+                &ArchiveWriteRequest::new(original_entry)
+                    .with_prompt_profile("ordinary-dictation")
+                    .with_supporting_context("line before\nline after")
+                    .with_ocr_text("ocr fallback text"),
+            )
+            .expect("archive original run");
+
+        let entry = rerun_archived_run_with(
+            ArchivedRunRerunRequest {
+                run_id: original_run.run_id.clone(),
+                asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_enabled: false,
+                cleanup_model_id: None,
+                cleanup_prompt_profile: None,
+            },
+            |wav_path: &Path, model_id: &str| {
+                Ok(TranscriptionResult {
+                    wav_path: wav_path.to_path_buf(),
+                    transcript_text: "hello from pepper ex".into(),
+                    backend_name: "sherpa-onnx".into(),
+                    model_name: model_id.into(),
+                    elapsed_ms: 11,
+                })
+            },
+            |_, _| unreachable!("cleanup should not run when disabled"),
+        )
+        .expect("rerun without cleanup");
+
+        let rerun = HistoryStore::open(&state_root)
+            .expect("history store")
+            .recent_runs()
+            .expect("load reruns")
+            .into_iter()
+            .next()
+            .expect("expected rerun");
+
+        assert_eq!(entry.transcript_text, "hello from pepper ex");
+        assert_eq!(entry.cleanup, None);
+        assert_eq!(rerun.prompt_profile, None);
+        assert_eq!(rerun.supporting_context_text, None);
+        assert_eq!(rerun.ocr_text, None);
+        assert_eq!(
+            rerun.parent_run_id.as_deref(),
+            Some(original_run.run_id.as_str())
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn rerun_archived_run_uses_current_cleanup_defaults_when_enabled_without_overrides() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-rerun-default-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+
+        AppSettings {
+            cleanup_enabled: true,
+            preferred_cleanup_model: "qwen2.5-1.5b-instruct-q4_k_m.gguf".into(),
+            cleanup_prompt_profile: "literal-dictation".into(),
+            ..AppSettings::default()
+        }
+        .save()
+        .expect("settings should save");
+
+        let source_wav_path = state_root.join("source.wav");
+        std::fs::write(&source_wav_path, b"pepper-x-rerun-audio").unwrap();
+
+        let original_entry = TranscriptEntry::new(
+            &source_wav_path,
+            "hello from pepper x",
+            "sherpa-onnx",
+            MODEL_NAME,
+            Duration::from_millis(42),
+        );
+
+        let original_run = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .archive_run(&ArchiveWriteRequest::new(original_entry))
+            .expect("archive original run");
+
+        let mut observed_cleanup_model = None;
+        let mut observed_cleanup_request = None;
+
+        let entry = rerun_archived_run_with(
+            ArchivedRunRerunRequest {
+                run_id: original_run.run_id.clone(),
+                asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
+                cleanup_enabled: true,
+                cleanup_model_id: None,
+                cleanup_prompt_profile: None,
+            },
+            |wav_path: &Path, model_id: &str| {
+                Ok(TranscriptionResult {
+                    wav_path: wav_path.to_path_buf(),
+                    transcript_text: "hello from pepper ex".into(),
+                    backend_name: "sherpa-onnx".into(),
+                    model_name: model_id.into(),
+                    elapsed_ms: 11,
+                })
+            },
+            |cleanup_model_id: &str, request: CleanupRequest| {
+                observed_cleanup_model = Some(cleanup_model_id.to_string());
+                observed_cleanup_request = Some(request.clone());
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: cleanup_model_id.into(),
+                    cleaned_text: "Hello from Pepper Ex.".into(),
+                    elapsed_ms: 9,
+                    used_ocr: false,
+                })
+            },
+        )
+        .expect("rerun with current cleanup defaults");
+
+        let rerun = HistoryStore::open(&state_root)
+            .expect("history store")
+            .recent_runs()
+            .expect("load reruns")
+            .into_iter()
+            .next()
+            .expect("expected rerun");
+        let cleanup_request = observed_cleanup_request.expect("cleanup request should be recorded");
+
+        assert_eq!(
+            observed_cleanup_model.as_deref(),
+            Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+        );
+        assert_eq!(cleanup_request.prompt_profile, "literal-dictation");
+        assert_eq!(entry.display_text(), "Hello from Pepper Ex.");
+        assert_eq!(
+            rerun
+                .entry
+                .cleanup
+                .as_ref()
+                .map(|cleanup| cleanup.model_name.as_str()),
+            Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+        );
+        assert_eq!(rerun.prompt_profile.as_deref(), Some("literal-dictation"));
 
         match previous_state_root {
             Some(previous_state_root) => {

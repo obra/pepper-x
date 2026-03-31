@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::app_model::RuntimeReadinessSummary;
+use crate::app_model::{RuntimeReadinessSummary, SettingsSurfaceState};
 use crate::diagnostics_view::DiagnosticsView;
 use crate::history_view::build_history_browser;
 use crate::overlay::OverlayView;
@@ -53,14 +53,14 @@ impl WindowPage {
 
 struct WindowContentProviders {
     history_runs: Rc<dyn Fn() -> Vec<ArchivedRun>>,
-    settings_summary: Rc<dyn Fn() -> String>,
+    settings_surface_state: Rc<dyn Fn() -> SettingsSurfaceState>,
     diagnostics_summary: Rc<dyn Fn() -> String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowContentSnapshot {
     history_runs: Vec<ArchivedRun>,
-    settings_summary: String,
+    settings_surface_state: SettingsSurfaceState,
     diagnostics_summary: String,
 }
 
@@ -86,7 +86,7 @@ impl WindowContentProviders {
     fn snapshot(&self) -> WindowContentSnapshot {
         WindowContentSnapshot {
             history_runs: (self.history_runs)(),
-            settings_summary: (self.settings_summary)(),
+            settings_surface_state: (self.settings_surface_state)(),
             diagnostics_summary: (self.diagnostics_summary)(),
         }
     }
@@ -98,7 +98,7 @@ impl MainWindow {
         Self::new_with_history_and_settings(
             app,
             Vec::new(),
-            default_settings_summary(),
+            default_settings_surface_state(),
             default_diagnostics_summary(),
         )
     }
@@ -106,11 +106,11 @@ impl MainWindow {
     pub fn new_with_history_and_settings(
         app: &adw::Application,
         history_runs: Vec<ArchivedRun>,
-        settings_summary: String,
+        settings_surface_state: SettingsSurfaceState,
         diagnostics_summary: String,
     ) -> Self {
         let history_runs = Rc::new(history_runs);
-        let settings_summary = Rc::new(settings_summary);
+        let settings_surface_state = Rc::new(settings_surface_state);
         let diagnostics_summary = Rc::new(diagnostics_summary);
 
         Self::new_with_providers(
@@ -120,8 +120,8 @@ impl MainWindow {
                 move || history_runs.as_ref().clone()
             },
             {
-                let settings_summary = settings_summary.clone();
-                move || settings_summary.as_ref().clone()
+                let settings_surface_state = settings_surface_state.clone();
+                move || settings_surface_state.as_ref().clone()
             },
             {
                 let diagnostics_summary = diagnostics_summary.clone();
@@ -133,19 +133,19 @@ impl MainWindow {
     pub(crate) fn new_with_providers<H, S, D>(
         app: &adw::Application,
         history_runs: H,
-        settings_summary: S,
+        settings_surface_state: S,
         diagnostics_summary: D,
     ) -> Self
     where
         H: Fn() -> Vec<ArchivedRun> + 'static,
-        S: Fn() -> String + 'static,
+        S: Fn() -> SettingsSurfaceState + 'static,
         D: Fn() -> String + 'static,
     {
         Self {
             app: app.clone(),
             content_providers: Rc::new(WindowContentProviders {
                 history_runs: Rc::new(history_runs),
-                settings_summary: Rc::new(settings_summary),
+                settings_surface_state: Rc::new(settings_surface_state),
                 diagnostics_summary: Rc::new(diagnostics_summary),
             }),
             rerun_archived_run: None,
@@ -157,17 +157,21 @@ impl MainWindow {
     pub(crate) fn new_with_providers_and_rerun<H, S, D>(
         app: &adw::Application,
         history_runs: H,
-        settings_summary: S,
+        settings_surface_state: S,
         diagnostics_summary: D,
         rerun_archived_run: Option<Rc<dyn Fn(String)>>,
     ) -> Self
     where
         H: Fn() -> Vec<ArchivedRun> + 'static,
-        S: Fn() -> String + 'static,
+        S: Fn() -> SettingsSurfaceState + 'static,
         D: Fn() -> String + 'static,
     {
-        let mut window =
-            Self::new_with_providers(app, history_runs, settings_summary, diagnostics_summary);
+        let mut window = Self::new_with_providers(
+            app,
+            history_runs,
+            settings_surface_state,
+            diagnostics_summary,
+        );
         window.rerun_archived_run = rerun_archived_run;
         window
     }
@@ -220,7 +224,7 @@ impl MainWindow {
             .build();
         let overlay_view = OverlayView::new();
         overlay_view.set_live_status(&self.live_status.borrow());
-        let settings_view = SettingsView::new(snapshot.settings_summary.as_str());
+        let settings_view = SettingsView::new(snapshot.settings_surface_state.clone());
         shell_stack.add_titled(settings_view.widget(), Some(SETTINGS_PAGE_NAME), "Settings");
         let history_container = gtk::Box::new(Orientation::Vertical, 0);
         history_container.set_hexpand(true);
@@ -280,7 +284,9 @@ impl MainWindow {
             return;
         };
 
-        state.settings_view.set_summary(&snapshot.settings_summary);
+        state
+            .settings_view
+            .set_surface_state(&snapshot.settings_surface_state);
         state
             .diagnostics_view
             .set_summary(&snapshot.diagnostics_summary);
@@ -473,8 +479,8 @@ pub(crate) fn history_summary_text(runs: &[ArchivedRun]) -> String {
 }
 
 #[cfg(test)]
-fn default_settings_summary() -> String {
-    String::from("Pepper X shell settings and GNOME integration controls live here.")
+fn default_settings_surface_state() -> SettingsSurfaceState {
+    SettingsSurfaceState::from_settings(&AppSettings::default())
 }
 
 #[cfg(test)]
@@ -496,10 +502,14 @@ fn replace_history_browser(
 #[cfg(test)]
 mod app_shell {
     use super::*;
+    use crate::app_model::SettingsSurfaceState;
     use crate::diagnostics_view::{diagnostics_page_scaffold, DiagnosticsContainerKind};
     use crate::history_store::RunRuntimeMetadata;
     use crate::settings::AppSettings;
-    use crate::settings_view::{settings_page_scaffold, SettingsContainerKind};
+    use crate::settings_view::{
+        settings_page_scaffold, SettingsContainerKind, SettingsControl, SettingsSelectControl,
+        SettingsSwitchControl, SettingsTextAreaControl,
+    };
     use crate::transcript_log::{InsertionDiagnostics, LearningDiagnostics, TranscriptEntry};
     use pepperx_ipc::Capabilities;
     use pepperx_models::{ModelInventoryEntry, ModelKind, ModelReadiness};
@@ -665,7 +675,13 @@ mod app_shell {
         let app = adw::Application::builder()
             .application_id("com.obra.PepperX.Tests")
             .build();
-        let settings_summary = Rc::new(RefCell::new(String::from("settings v1")));
+        let settings_surface_state = Rc::new(RefCell::new(SettingsSurfaceState {
+            cleanup_enabled: true,
+            cleanup_prompt_profile: "ordinary-dictation".into(),
+            cleanup_custom_prompt: String::from("settings v1"),
+            launch_at_login: false,
+            feedback_message: None,
+        }));
         let diagnostics_summary = Rc::new(RefCell::new(String::from("diagnostics v1")));
         let history_runs = Rc::new(RefCell::new(vec![archived_run(TranscriptEntry::new(
             "/tmp/run-1.wav",
@@ -681,8 +697,8 @@ mod app_shell {
                 move || history_runs.borrow().clone()
             },
             {
-                let settings_summary = settings_summary.clone();
-                move || settings_summary.borrow().clone()
+                let settings_surface_state = settings_surface_state.clone();
+                move || settings_surface_state.borrow().clone()
             },
             {
                 let diagnostics_summary = diagnostics_summary.clone();
@@ -691,16 +707,30 @@ mod app_shell {
         );
 
         let initial = window.current_content_snapshot();
-        assert_eq!(initial.settings_summary, "settings v1");
+        assert_eq!(
+            initial.settings_surface_state.cleanup_custom_prompt,
+            "settings v1"
+        );
         assert_eq!(initial.diagnostics_summary, "diagnostics v1");
         assert_eq!(initial.history_runs.len(), 1);
 
-        settings_summary.replace(String::from("settings v2"));
+        settings_surface_state.replace(SettingsSurfaceState {
+            cleanup_enabled: false,
+            cleanup_prompt_profile: "literal-dictation".into(),
+            cleanup_custom_prompt: String::from("settings v2"),
+            launch_at_login: true,
+            feedback_message: Some("Saved settings".into()),
+        });
         diagnostics_summary.replace(String::from("diagnostics v2"));
         history_runs.replace(Vec::new());
 
         let refreshed = window.current_content_snapshot();
-        assert_eq!(refreshed.settings_summary, "settings v2");
+        assert_eq!(
+            refreshed.settings_surface_state.cleanup_custom_prompt,
+            "settings v2"
+        );
+        assert!(!refreshed.settings_surface_state.cleanup_enabled);
+        assert!(refreshed.settings_surface_state.launch_at_login);
         assert_eq!(refreshed.diagnostics_summary, "diagnostics v2");
         assert!(refreshed.history_runs.is_empty());
     }
@@ -726,16 +756,57 @@ mod app_shell {
 
     #[test]
     fn window_settings_page_scaffold_builds_structured_rows() {
-        let scaffold = settings_page_scaffold(
-            "Model cache: /tmp/pepper-x-models\nDefault ASR model: nemo-parakeet-tdt",
-        );
+        let scaffold = settings_page_scaffold(&SettingsSurfaceState {
+            cleanup_enabled: true,
+            cleanup_prompt_profile: "ordinary-dictation".into(),
+            cleanup_custom_prompt: "Keep Linux app names verbatim.".into(),
+            launch_at_login: true,
+            feedback_message: Some("Saved settings".into()),
+        });
 
         assert_eq!(scaffold.container_kind, SettingsContainerKind::Form);
-        assert_eq!(scaffold.sections.len(), 1);
-        assert_eq!(scaffold.sections[0].title, "Configuration");
-        assert_eq!(scaffold.sections[0].rows.len(), 2);
-        assert_eq!(scaffold.sections[0].rows[0].title, "Model cache");
-        assert_eq!(scaffold.sections[0].rows[0].value, "/tmp/pepper-x-models");
+        assert_eq!(scaffold.sections.len(), 2);
+        assert_eq!(scaffold.sections[0].title, "Cleanup");
+        assert_eq!(scaffold.sections[1].title, "General");
+        assert_eq!(scaffold.feedback_message.as_deref(), Some("Saved settings"));
+
+        assert!(matches!(
+            &scaffold.sections[0].controls[0],
+            SettingsControl::Switch(SettingsSwitchControl {
+                title,
+                active: true,
+                ..
+            }) if title == "Enable cleanup"
+        ));
+        assert!(matches!(
+            &scaffold.sections[0].controls[1],
+            SettingsControl::Select(SettingsSelectControl {
+                title,
+                selected,
+                options,
+                ..
+            }) if title == "Prompt profile"
+                && selected == "ordinary-dictation"
+                && options == &vec!["ordinary-dictation".to_string(), "literal-dictation".to_string()]
+        ));
+        assert!(matches!(
+            &scaffold.sections[0].controls[2],
+            SettingsControl::TextArea(SettingsTextAreaControl {
+                title,
+                text,
+                enabled: true,
+                ..
+            }) if title == "Custom cleanup prompt"
+                && text == "Keep Linux app names verbatim."
+        ));
+        assert!(matches!(
+            &scaffold.sections[1].controls[0],
+            SettingsControl::Switch(SettingsSwitchControl {
+                title,
+                active: true,
+                ..
+            }) if title == "Launch at login"
+        ));
     }
 
     #[test]

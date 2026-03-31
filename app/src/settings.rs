@@ -15,6 +15,8 @@ const SETUP_STATE_FILE_NAME: &str = "setup.json";
 pub const DEFAULT_CLEANUP_PROMPT_PROFILE: &str = "ordinary-dictation";
 pub const LAUNCH_AT_LOGIN_DESKTOP_FILE_NAME: &str = "pepper-x-autostart.desktop";
 pub const LAUNCH_AT_LOGIN_DESKTOP_FILE_PATH: &str = "/etc/xdg/autostart/pepper-x-autostart.desktop";
+const LAUNCH_AT_LOGIN_DESKTOP_TEMPLATE: &str =
+    include_str!("../../packaging/deb/pepper-x-autostart.desktop");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -29,9 +31,11 @@ pub struct AppSettings {
     pub enable_gnome_extension_integration: bool,
     pub preferred_recording_trigger_mode: RecordingTriggerMode,
     pub preferred_microphone: Option<SelectedMicrophone>,
+    pub cleanup_enabled: bool,
     pub preferred_asr_model: String,
     pub preferred_cleanup_model: String,
     pub cleanup_prompt_profile: String,
+    pub cleanup_custom_prompt: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,9 +65,11 @@ impl Default for AppSettings {
             enable_gnome_extension_integration: true,
             preferred_recording_trigger_mode: RecordingTriggerMode::ModifierOnly,
             preferred_microphone: None,
+            cleanup_enabled: true,
             preferred_asr_model: default_model(ModelKind::Asr).id.into(),
             preferred_cleanup_model: default_model(ModelKind::Cleanup).id.into(),
             cleanup_prompt_profile: DEFAULT_CLEANUP_PROMPT_PROFILE.into(),
+            cleanup_custom_prompt: String::new(),
         }
     }
 }
@@ -72,11 +78,15 @@ impl AppSettings {
     pub fn load() -> io::Result<Self> {
         let settings_path = settings_path();
         if !settings_path.is_file() {
-            return Ok(Self::default());
+            let mut settings = Self::default();
+            if let Ok(launch_at_login) = current_launch_at_login_state() {
+                settings.launch_at_login = launch_at_login;
+            }
+            return Ok(settings);
         }
 
         let settings_json = std::fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&settings_json).map_err(|error| {
+        let mut settings: Self = serde_json::from_str(&settings_json).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -84,7 +94,11 @@ impl AppSettings {
                     settings_path.display()
                 ),
             )
-        })
+        })?;
+        if let Ok(launch_at_login) = current_launch_at_login_state() {
+            settings.launch_at_login = launch_at_login;
+        }
+        Ok(settings)
     }
 
     pub fn load_or_default() -> Self {
@@ -107,6 +121,13 @@ impl AppSettings {
             )
         })?;
         std::fs::write(settings_path, settings_json)
+    }
+
+    pub fn effective_cleanup_custom_prompt(&self) -> Option<String> {
+        self.cleanup_custom_prompt
+            .chars()
+            .any(|character| !character.is_whitespace())
+            .then(|| self.cleanup_custom_prompt.clone())
     }
 
     pub fn microphone_selection_state(
@@ -182,12 +203,70 @@ pub fn launch_at_login_desktop_file_path() -> &'static std::path::Path {
     std::path::Path::new(LAUNCH_AT_LOGIN_DESKTOP_FILE_PATH)
 }
 
+pub fn user_launch_at_login_desktop_file_path() -> io::Result<PathBuf> {
+    Ok(user_config_home()?
+        .join("autostart")
+        .join(LAUNCH_AT_LOGIN_DESKTOP_FILE_NAME))
+}
+
+pub fn save_launch_at_login(enabled: bool) -> io::Result<()> {
+    let autostart_path = user_launch_at_login_desktop_file_path()?;
+    if enabled {
+        if let Some(parent) = autostart_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&autostart_path, launch_at_login_desktop_contents(true))?;
+    } else if autostart_path.exists() {
+        std::fs::remove_file(&autostart_path)?;
+    }
+
+    let mut settings = AppSettings::load_or_default();
+    settings.launch_at_login = enabled;
+    settings.save()
+}
+
 pub fn save_preferred_microphone(
     selected_microphone: Option<SelectedMicrophone>,
 ) -> io::Result<()> {
     let mut settings = AppSettings::load_or_default();
     settings.preferred_microphone = selected_microphone;
     settings.save()
+}
+
+fn user_config_home() -> io::Result<PathBuf> {
+    if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(xdg_config_home));
+    }
+
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))
+}
+
+fn current_launch_at_login_state() -> io::Result<bool> {
+    let autostart_path = user_launch_at_login_desktop_file_path()?;
+    if !autostart_path.is_file() {
+        return Ok(false);
+    }
+
+    let contents = std::fs::read_to_string(autostart_path)?;
+    Ok(
+        match contents
+            .lines()
+            .find_map(|line| line.strip_prefix("X-GNOME-Autostart-enabled="))
+        {
+            Some(value) => value.trim() == "true",
+            None => true,
+        },
+    )
+}
+
+fn launch_at_login_desktop_contents(enabled: bool) -> String {
+    LAUNCH_AT_LOGIN_DESKTOP_TEMPLATE.replace(
+        "X-GNOME-Autostart-enabled=false",
+        &format!("X-GNOME-Autostart-enabled={enabled}"),
+    )
 }
 
 pub fn microphone_ui_state(
@@ -316,9 +395,11 @@ mod tests {
     #[test]
     fn model_status_settings_round_trip_default_models_and_cleanup_prompt_profile() {
         let settings = AppSettings {
+            cleanup_enabled: true,
             preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
             preferred_cleanup_model: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "ordinary-dictation".into(),
+            cleanup_custom_prompt: String::new(),
             ..AppSettings::default()
         };
 
@@ -332,9 +413,11 @@ mod tests {
                 "enable_gnome_extension_integration": true,
                 "preferred_recording_trigger_mode": "modifier-only",
                 "preferred_microphone": null,
+                "cleanup_enabled": true,
                 "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v2-int8",
                 "preferred_cleanup_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
-                "cleanup_prompt_profile": "ordinary-dictation"
+                "cleanup_prompt_profile": "ordinary-dictation",
+                "cleanup_custom_prompt": ""
             })
         );
         assert_eq!(restored.preferred_asr_model, settings.preferred_asr_model);
@@ -345,6 +428,11 @@ mod tests {
         assert_eq!(
             restored.cleanup_prompt_profile,
             settings.cleanup_prompt_profile
+        );
+        assert_eq!(restored.cleanup_enabled, settings.cleanup_enabled);
+        assert_eq!(
+            restored.cleanup_custom_prompt,
+            settings.cleanup_custom_prompt
         );
     }
 
@@ -370,10 +458,75 @@ mod tests {
                     "stable_id": "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
                     "display_name": "Blue Yeti"
                 },
+                "cleanup_enabled": true,
                 "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v2-int8",
                 "preferred_cleanup_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
-                "cleanup_prompt_profile": "ordinary-dictation"
+                "cleanup_prompt_profile": "ordinary-dictation",
+                "cleanup_custom_prompt": ""
             })
+        );
+    }
+
+    #[test]
+    fn settings_round_trip_cleanup_toggle_launch_at_login_and_custom_prompt() {
+        let settings = AppSettings {
+            launch_at_login: true,
+            cleanup_enabled: false,
+            cleanup_prompt_profile: "literal-dictation".into(),
+            cleanup_custom_prompt: "Keep product names verbatim.".into(),
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_value(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_value(json.clone()).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "launch_at_login": true,
+                "enable_gnome_extension_integration": true,
+                "preferred_recording_trigger_mode": "modifier-only",
+                "preferred_microphone": null,
+                "cleanup_enabled": false,
+                "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v2-int8",
+                "preferred_cleanup_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "cleanup_prompt_profile": "literal-dictation",
+                "cleanup_custom_prompt": "Keep product names verbatim."
+            })
+        );
+        assert!(restored.launch_at_login);
+        assert!(!restored.cleanup_enabled);
+        assert_eq!(restored.cleanup_prompt_profile, "literal-dictation");
+        assert_eq!(
+            restored.cleanup_custom_prompt,
+            "Keep product names verbatim."
+        );
+    }
+
+    #[test]
+    fn settings_round_trip_preserves_custom_prompt_whitespace() {
+        let custom_prompt = "\n  Keep product names verbatim.\n\nDo not normalize punctuation.\n";
+        let settings = AppSettings {
+            cleanup_custom_prompt: custom_prompt.into(),
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_value(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_value(json).unwrap();
+
+        assert_eq!(restored.cleanup_custom_prompt, custom_prompt);
+        assert_eq!(
+            restored.effective_cleanup_custom_prompt().as_deref(),
+            Some(custom_prompt)
+        );
+
+        let whitespace_only_settings = AppSettings {
+            cleanup_custom_prompt: " \n\t ".into(),
+            ..AppSettings::default()
+        };
+        assert_eq!(
+            whitespace_only_settings.effective_cleanup_custom_prompt(),
+            None
         );
     }
 
@@ -572,6 +725,149 @@ mod tests {
             LAUNCH_AT_LOGIN_DESKTOP_FILE_NAME,
             "pepper-x-autostart.desktop"
         );
+    }
+
+    #[test]
+    fn settings_launch_at_login_writes_enabled_user_autostart_entry() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = temp_state_root();
+        let config_root = state_root.join("config");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::env::set_var("XDG_CONFIG_HOME", &config_root);
+
+        save_launch_at_login(true).expect("launch at login should save");
+
+        let autostart_path =
+            user_launch_at_login_desktop_file_path().expect("user autostart path should resolve");
+        let autostart_entry = std::fs::read_to_string(&autostart_path)
+            .expect("user autostart desktop entry should exist");
+        let settings = AppSettings::load().expect("settings should load");
+
+        assert!(settings.launch_at_login);
+        assert!(autostart_entry.contains("Exec=pepper-x"));
+        assert!(autostart_entry.contains("X-GNOME-Autostart-enabled=true"));
+
+        set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
+        set_or_remove_env_var("XDG_CONFIG_HOME", previous_xdg_config_home);
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn settings_launch_at_login_removes_user_autostart_entry_when_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = temp_state_root();
+        let config_root = state_root.join("config");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::env::set_var("XDG_CONFIG_HOME", &config_root);
+
+        save_launch_at_login(true).expect("launch at login should save");
+        save_launch_at_login(false).expect("launch at login should disable");
+
+        let autostart_path =
+            user_launch_at_login_desktop_file_path().expect("user autostart path should resolve");
+        let settings = AppSettings::load().expect("settings should load");
+
+        assert!(!settings.launch_at_login);
+        assert!(!autostart_path.exists());
+
+        set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
+        set_or_remove_env_var("XDG_CONFIG_HOME", previous_xdg_config_home);
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn settings_load_launch_at_login_from_user_autostart_entry() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = temp_state_root();
+        let config_root = state_root.join("config");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::env::set_var("XDG_CONFIG_HOME", &config_root);
+
+        AppSettings {
+            launch_at_login: false,
+            ..AppSettings::default()
+        }
+        .save()
+        .expect("settings should save");
+
+        let autostart_path =
+            user_launch_at_login_desktop_file_path().expect("user autostart path should resolve");
+        std::fs::create_dir_all(autostart_path.parent().expect("autostart parent")).unwrap();
+        std::fs::write(&autostart_path, launch_at_login_desktop_contents(true)).unwrap();
+
+        let settings = AppSettings::load().expect("settings should load");
+
+        assert!(settings.launch_at_login);
+
+        set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
+        set_or_remove_env_var("XDG_CONFIG_HOME", previous_xdg_config_home);
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn settings_load_launch_at_login_respects_disabled_user_autostart_entry() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = temp_state_root();
+        let config_root = state_root.join("config");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::env::set_var("XDG_CONFIG_HOME", &config_root);
+
+        AppSettings {
+            launch_at_login: true,
+            ..AppSettings::default()
+        }
+        .save()
+        .expect("settings should save");
+
+        let autostart_path =
+            user_launch_at_login_desktop_file_path().expect("user autostart path should resolve");
+        std::fs::create_dir_all(autostart_path.parent().expect("autostart parent")).unwrap();
+        std::fs::write(&autostart_path, launch_at_login_desktop_contents(false)).unwrap();
+
+        let settings = AppSettings::load().expect("settings should load");
+
+        assert!(!settings.launch_at_login);
+
+        set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
+        set_or_remove_env_var("XDG_CONFIG_HOME", previous_xdg_config_home);
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn settings_load_launch_at_login_from_user_autostart_without_settings_file() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = temp_state_root();
+        let config_root = state_root.join("config");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::env::set_var("XDG_CONFIG_HOME", &config_root);
+
+        let autostart_path =
+            user_launch_at_login_desktop_file_path().expect("user autostart path should resolve");
+        std::fs::create_dir_all(autostart_path.parent().expect("autostart parent")).unwrap();
+        std::fs::write(&autostart_path, launch_at_login_desktop_contents(true)).unwrap();
+
+        let settings = AppSettings::load().expect("settings should load");
+
+        assert!(settings.launch_at_login);
+
+        set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
+        set_or_remove_env_var("XDG_CONFIG_HOME", previous_xdg_config_home);
+        let _ = std::fs::remove_dir_all(state_root);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::settings::{AppSettings, AppSetupState};
 use crate::startup_policy::startup_launch_policy;
 use crate::transcript_log::{state_root, TranscriptEntry};
 use crate::transcription::{rerun_archived_run_to_log, ArchivedRunRerunRequest};
-use crate::window::{diagnostics_summary_text, settings_summary_text, MainWindow};
+use crate::window::{diagnostics_summary_text, MainWindow};
 
 pub const APPLICATION_ID: &str = "com.obra.PepperX";
 
@@ -59,8 +59,8 @@ pub fn run() {
         &service.current_capabilities(),
     ));
     let diagnostics_cache_root = cache_root.clone();
-    let settings_cache_root = cache_root.clone();
     let diagnostics_app_model = app_model.clone();
+    let settings_app_model = app_model.clone();
     let onboarding_window = Rc::new(RefCell::new(None::<adw::ApplicationWindow>));
     let rerun_window = Rc::new(RefCell::new(None::<MainWindow>));
     let rerun_window_handle = rerun_window.clone();
@@ -69,8 +69,7 @@ pub fn run() {
         load_history_runs_or_empty,
         move || {
             let settings = AppSettings::load_or_default();
-            let inventory = model_inventory(&settings_cache_root);
-            settings_summary_text(&settings, &settings_cache_root, &inventory)
+            settings_app_model.settings_surface_state(&settings)
         },
         move || {
             let settings = AppSettings::load_or_default();
@@ -89,8 +88,13 @@ pub fn run() {
             let request = ArchivedRunRerunRequest {
                 run_id,
                 asr_model_id: Some(settings.preferred_asr_model.clone()),
-                cleanup_model_id: Some(settings.preferred_cleanup_model.clone()),
-                cleanup_prompt_profile: Some(settings.cleanup_prompt_profile.clone()),
+                cleanup_enabled: settings.cleanup_enabled,
+                cleanup_model_id: settings
+                    .cleanup_enabled
+                    .then(|| settings.preferred_cleanup_model.clone()),
+                cleanup_prompt_profile: settings
+                    .cleanup_enabled
+                    .then(|| settings.cleanup_prompt_profile.clone()),
             };
 
             match rerun_archived_run_to_log(request) {
