@@ -8,6 +8,7 @@ use pepperx_models::{default_model, ModelKind};
 use crate::transcript_log::state_root;
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
+const SETUP_STATE_FILE_NAME: &str = "setup.json";
 pub const DEFAULT_CLEANUP_PROMPT_PROFILE: &str = "ordinary-dictation";
 pub const LAUNCH_AT_LOGIN_DESKTOP_FILE_NAME: &str = "pepper-x-autostart.desktop";
 pub const LAUNCH_AT_LOGIN_DESKTOP_FILE_PATH: &str = "/etc/xdg/autostart/pepper-x-autostart.desktop";
@@ -28,6 +29,11 @@ pub struct AppSettings {
     pub preferred_asr_model: String,
     pub preferred_cleanup_model: String,
     pub cleanup_prompt_profile: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppSetupState {
+    pub onboarding_completed: bool,
 }
 
 impl Default for AppSettings {
@@ -86,8 +92,54 @@ impl AppSettings {
     }
 }
 
+impl AppSetupState {
+    pub fn load() -> io::Result<Self> {
+        let setup_state_path = setup_state_path();
+        if !setup_state_path.is_file() {
+            return Ok(Self::default());
+        }
+
+        let setup_state_json = std::fs::read_to_string(&setup_state_path)?;
+        serde_json::from_str(&setup_state_json).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "failed to parse Pepper X setup state {}: {error}",
+                    setup_state_path.display()
+                ),
+            )
+        })
+    }
+
+    pub fn load_or_default() -> Self {
+        Self::load().unwrap_or_else(|error| {
+            eprintln!("[Pepper X] failed to load setup state: {error}");
+            Self::default()
+        })
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        let setup_state_path = setup_state_path();
+        if let Some(parent) = setup_state_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let setup_state_json = serde_json::to_string_pretty(self).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to serialize Pepper X setup state: {error}"),
+            )
+        })?;
+        std::fs::write(setup_state_path, setup_state_json)
+    }
+}
+
 fn settings_path() -> PathBuf {
     state_root().join(SETTINGS_FILE_NAME)
+}
+
+fn setup_state_path() -> PathBuf {
+    state_root().join(SETUP_STATE_FILE_NAME)
 }
 
 pub fn corrections_store_path() -> PathBuf {
@@ -243,5 +295,31 @@ mod tests {
             LAUNCH_AT_LOGIN_DESKTOP_FILE_NAME,
             "pepper-x-autostart.desktop"
         );
+    }
+
+    #[test]
+    fn settings_setup_state_defaults_to_incomplete_onboarding() {
+        let settings = AppSetupState::default();
+
+        assert!(!settings.onboarding_completed);
+    }
+
+    #[test]
+    fn settings_setup_state_loads_from_state_root_file() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = temp_state_root();
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        let expected = AppSetupState {
+            onboarding_completed: true,
+        };
+
+        expected.save().expect("setup state should save");
+        let restored = AppSetupState::load().expect("setup state should load");
+
+        assert_eq!(restored, expected);
+        set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
+        let _ = std::fs::remove_dir_all(state_root);
     }
 }

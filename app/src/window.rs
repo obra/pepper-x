@@ -1,16 +1,17 @@
 use adw::prelude::*;
 use gtk::{Align, Orientation};
-use pepperx_ipc::Capabilities;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::app_model::{AppModel, RuntimeReadinessSummary};
 use crate::history_view::build_history_browser;
 use pepperx_models::{ModelInventoryEntry, ModelKind};
 
 use crate::history_store::ArchivedRun;
 use crate::settings::AppSettings;
 
+const SETUP_PAGE_NAME: &str = "setup";
 const SETTINGS_PAGE_NAME: &str = "settings";
 const HISTORY_PAGE_NAME: &str = "history";
 const DIAGNOSTICS_PAGE_NAME: &str = "diagnostics";
@@ -39,6 +40,8 @@ pub struct MainWindow {
 struct WindowState {
     window: adw::ApplicationWindow,
     stack: gtk::Stack,
+    setup_title_label: gtk::Label,
+    setup_label: gtk::Label,
     settings_label: gtk::Label,
     diagnostics_label: gtk::Label,
     history_container: gtk::Box,
@@ -142,6 +145,18 @@ impl MainWindow {
         self.present_page(SETTINGS_PAGE_NAME);
     }
 
+    pub fn present_setup(&self, app_model: &AppModel) {
+        self.ensure_window();
+        self.refresh_content();
+
+        if let Some(state) = self.state.borrow().as_ref() {
+            state.setup_title_label.set_label(app_model.setup_title());
+            state.setup_label.set_label(&app_model.setup_description());
+            state.stack.set_visible_child_name(SETUP_PAGE_NAME);
+            state.window.present();
+        }
+    }
+
     pub fn present_history(&self) {
         self.present_page(HISTORY_PAGE_NAME);
     }
@@ -171,7 +186,10 @@ impl MainWindow {
             .vexpand(true)
             .transition_type(gtk::StackTransitionType::Crossfade)
             .build();
-        let (settings_page, settings_label) =
+        let (setup_page, setup_title_label, setup_label) =
+            build_page("Finish Pepper X setup", "Pepper X setup will appear here.");
+        stack.add_titled(&setup_page, Some(SETUP_PAGE_NAME), "Setup");
+        let (settings_page, _, settings_label) =
             build_page("Settings", snapshot.settings_summary.as_str());
         stack.add_titled(&settings_page, Some(SETTINGS_PAGE_NAME), "Settings");
         let history_container = gtk::Box::new(Orientation::Vertical, 0);
@@ -182,7 +200,7 @@ impl MainWindow {
             self.rerun_archived_run.clone(),
         ));
         stack.add_titled(&history_container, Some(HISTORY_PAGE_NAME), "History");
-        let (diagnostics_page, diagnostics_label) =
+        let (diagnostics_page, _, diagnostics_label) =
             build_page("Diagnostics", snapshot.diagnostics_summary.as_str());
         stack.add_titled(
             &diagnostics_page,
@@ -216,6 +234,8 @@ impl MainWindow {
         *self.state.borrow_mut() = Some(WindowState {
             window,
             stack,
+            setup_title_label,
+            setup_label,
             settings_label,
             diagnostics_label,
             history_container,
@@ -280,7 +300,7 @@ pub(crate) fn diagnostics_summary_text(
     cache_root: &Path,
     inventory: &[ModelInventoryEntry],
     latest_run: Option<&ArchivedRun>,
-    capabilities: &Capabilities,
+    readiness: &RuntimeReadinessSummary,
 ) -> String {
     let mut lines = vec![
         format!("Model cache root: {}", cache_root.display()),
@@ -295,10 +315,10 @@ pub(crate) fn diagnostics_summary_text(
         ),
         format!(
             "Modifier-only capture supported: {}",
-            capabilities.modifier_only_supported
+            readiness.modifier_capture_supported
         ),
-        format!("Extension connected: {}", capabilities.extension_connected),
-        format!("Service version: {}", capabilities.version),
+        format!("Extension connected: {}", readiness.extension_connected),
+        format!("Service version: {}", readiness.service_version),
     ];
 
     for entry in inventory {
@@ -431,7 +451,7 @@ fn default_diagnostics_summary() -> String {
     String::from("Pepper X runtime diagnostics surface lives here.")
 }
 
-fn build_page(title: &str, description: &str) -> (gtk::Box, gtk::Label) {
+fn build_page(title: &str, description: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
     let container = gtk::Box::new(Orientation::Vertical, 12);
     container.set_margin_top(24);
     container.set_margin_bottom(24);
@@ -452,7 +472,7 @@ fn build_page(title: &str, description: &str) -> (gtk::Box, gtk::Label) {
 
     container.append(&title_label);
     container.append(&description_label);
-    (container, description_label)
+    (container, title_label, description_label)
 }
 
 fn replace_history_browser(
@@ -568,10 +588,10 @@ mod app_shell {
                 },
             ],
             None,
-            &Capabilities {
-                modifier_only_supported: true,
+            &RuntimeReadinessSummary {
+                modifier_capture_supported: true,
                 extension_connected: false,
-                version: "0.1.0".into(),
+                service_version: "0.1.0".into(),
             },
         );
 
@@ -617,7 +637,7 @@ mod app_shell {
             &cache_root,
             &[],
             Some(&archived_run(entry)),
-            &Capabilities::shell_default("0.1.0"),
+            &RuntimeReadinessSummary::from_capabilities(&Capabilities::shell_default("0.1.0")),
         );
 
         assert!(summary.contains("Latest run ID: run-1"));

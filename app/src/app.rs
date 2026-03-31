@@ -1,5 +1,4 @@
 use adw::prelude::*;
-use pepper_x_app::startup_policy::startup_launch_policy;
 use pepperx_models::{default_cache_root, model_inventory};
 use pepperx_platform_gnome::{
     atspi::ModifierCaptureHandle,
@@ -11,10 +10,12 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-use crate::background::{should_present_initial_window, BackgroundController};
+use crate::app_model::{initial_surface, AppModel, InitialSurface};
+use crate::background::BackgroundController;
 use crate::history_store::{ArchivedRun, HistoryStore};
 use crate::session_runtime::LiveRuntimeHandle;
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, AppSetupState};
+use crate::startup_policy::startup_launch_policy;
 use crate::transcript_log::{state_root, TranscriptEntry};
 use crate::transcription::{rerun_archived_run_to_log, ArchivedRunRerunRequest};
 use crate::window::{diagnostics_summary_text, settings_summary_text, MainWindow};
@@ -36,6 +37,7 @@ pub fn run() {
     adw::init().expect("failed to initialize GTK/libadwaita");
 
     let settings = AppSettings::load_or_default();
+    let setup_state = AppSetupState::load_or_default();
     let app = build_application();
     let cache_root = default_cache_root();
     let (command_sender, command_receiver) = mpsc::channel();
@@ -43,9 +45,14 @@ pub fn run() {
         .expect("failed to start GNOME IPC service");
     let service = service_handle.service();
     let _modifier_capture = start_modifier_capture(service.clone());
+    let app_model = Rc::new(AppModel::for_startup(
+        &setup_state,
+        &settings,
+        &service.current_capabilities(),
+    ));
     let diagnostics_cache_root = cache_root.clone();
     let settings_cache_root = cache_root.clone();
-    let diagnostics_service = service.clone();
+    let diagnostics_app_model = app_model.clone();
     let rerun_window = Rc::new(RefCell::new(None::<MainWindow>));
     let rerun_window_handle = rerun_window.clone();
     let window = MainWindow::new_with_providers_and_rerun(
@@ -65,7 +72,7 @@ pub fn run() {
                 &diagnostics_cache_root,
                 &inventory,
                 history_runs.first(),
-                &diagnostics_service.current_capabilities(),
+                &diagnostics_app_model.readiness,
             )
         },
         Some(Rc::new(move |run_id| {
@@ -91,7 +98,8 @@ pub fn run() {
 
     let startup_launch_policy = startup_launch_policy();
     let skipped_initial_activation = Rc::new(Cell::new(false));
-    install_command_pump(window.clone(), command_receiver);
+    let app_model = app_model.clone();
+    install_command_pump(window.clone(), app_model.clone(), command_receiver);
     app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
             window.present();
@@ -100,14 +108,20 @@ pub fn run() {
 
         let controller = BackgroundController::new();
 
-        controller.install(app, &window);
-        if !should_present_initial_window(
+        controller.install(app, &window, &app_model);
+        match initial_surface(
             startup_launch_policy,
             skipped_initial_activation.replace(true),
+            app_model.setup_state.clone(),
         ) {
-            return;
+            Some(InitialSurface::Setup) => {
+                window.present_setup(&app_model);
+            }
+            Some(InitialSurface::Settings) => {
+                window.present_settings();
+            }
+            None => {}
         }
-        window.present_settings();
     });
     app.run();
 }
@@ -159,11 +173,14 @@ fn start_modifier_capture(service: PepperXService) -> Option<ModifierCaptureHand
     }
 }
 
-fn install_command_pump(window: MainWindow, receiver: Receiver<AppCommand>) {
+fn install_command_pump(window: MainWindow, app_model: Rc<AppModel>, receiver: Receiver<AppCommand>) {
     gtk::glib::timeout_add_local(Duration::from_millis(50), move || {
         while let Ok(command) = receiver.try_recv() {
             match command {
-                AppCommand::ShowSettings => window.present_settings(),
+                AppCommand::ShowSettings => match app_model.requested_surface() {
+                    InitialSurface::Setup => window.present_setup(&app_model),
+                    InitialSurface::Settings => window.present_settings(),
+                },
                 AppCommand::ShowHistory => window.present_history(),
             }
         }
@@ -175,14 +192,16 @@ fn install_command_pump(window: MainWindow, receiver: Receiver<AppCommand>) {
 #[cfg(test)]
 mod app_shell {
     use super::*;
+    use crate::app_model::{initial_surface, AppModel, InitialSurface, SetupIssue, SetupState};
     use crate::cli::{run_with, StartupMode};
-    use crate::settings::RecordingTriggerMode;
+    use crate::settings::{AppSetupState, RecordingTriggerMode};
+    use crate::startup_policy::StartupLaunchPolicy;
     use crate::transcript_log::env_lock;
     use crate::transcript_log::TranscriptEntry;
     use crate::transcription::archive_transcription_result;
     use crate::window::history_summary_text;
     use pepperx_asr::TranscriptionResult;
-    use pepperx_ipc::SERVICE_NAME;
+    use pepperx_ipc::{Capabilities, SERVICE_NAME};
     use std::time::Duration;
 
     fn archived_run(entry: TranscriptEntry) -> ArchivedRun {
@@ -222,8 +241,13 @@ mod app_shell {
         let app = build_application();
         let window = MainWindow::new(&app);
         let controller = BackgroundController::new();
+        let app_model = AppModel::for_startup(
+            &AppSetupState::default(),
+            &AppSettings::default(),
+            &Capabilities::shell_default("0.1.0"),
+        );
 
-        controller.install(&app, &window);
+        controller.install(&app, &window, &app_model);
 
         for action_name in BackgroundController::ACTION_NAMES {
             assert!(app.lookup_action(action_name).is_some());
@@ -233,13 +257,120 @@ mod app_shell {
     #[test]
     fn app_shell_settings_include_integration_toggles() {
         let settings = AppSettings::default();
+        let setup_state = AppSetupState::default();
 
+        assert!(!setup_state.onboarding_completed);
         assert!(!settings.launch_at_login);
         assert!(settings.enable_gnome_extension_integration);
         assert_eq!(
             settings.preferred_recording_trigger_mode,
             RecordingTriggerMode::ModifierOnly
         );
+    }
+
+    #[test]
+    fn app_shell_first_run_prefers_setup_surface_over_settings() {
+        let settings = AppSettings::default();
+        let setup_state = AppSetupState::default();
+        let app_model = AppModel::for_startup(
+            &setup_state,
+            &settings,
+            &Capabilities {
+                modifier_only_supported: true,
+                extension_connected: false,
+                version: "0.1.0".into(),
+            },
+        );
+
+        assert_eq!(
+            initial_surface(
+                StartupLaunchPolicy::Interactive,
+                false,
+                app_model.setup_state.clone()
+            ),
+            Some(InitialSurface::Setup)
+        );
+        assert_eq!(app_model.setup_title(), "Finish Pepper X setup");
+        assert!(app_model
+            .setup_description()
+            .contains("first-run setup before it can stay in the background"));
+    }
+
+    #[test]
+    fn app_shell_completed_setup_keeps_autostart_background_first() {
+        let settings = AppSettings::default();
+        let setup_state = AppSetupState {
+            onboarding_completed: true,
+        };
+        let app_model = AppModel::for_startup(
+            &setup_state,
+            &settings,
+            &Capabilities {
+                modifier_only_supported: true,
+                extension_connected: false,
+                version: "0.1.0".into(),
+            },
+        );
+
+        assert_eq!(
+            initial_surface(
+                StartupLaunchPolicy::Background,
+                false,
+                app_model.setup_state.clone()
+            ),
+            None
+        );
+        assert_eq!(
+            initial_surface(
+                StartupLaunchPolicy::Background,
+                true,
+                app_model.setup_state.clone()
+            ),
+            Some(InitialSurface::Settings)
+        );
+        assert!(app_model.readiness.modifier_capture_supported);
+        assert!(!app_model.readiness.extension_connected);
+    }
+
+    #[test]
+    fn app_shell_modifier_capture_failure_surfaces_recoverable_setup_state() {
+        let settings = AppSettings::default();
+        let setup_state = AppSetupState {
+            onboarding_completed: true,
+        };
+        let app_model = AppModel::for_startup(
+            &setup_state,
+            &settings,
+            &Capabilities::shell_default("0.1.0"),
+        );
+
+        assert_eq!(
+            app_model.setup_state,
+            SetupState::NeedsAttention(vec![SetupIssue::ModifierCaptureUnavailable])
+        );
+        assert_eq!(app_model.setup_title(), "Fix Pepper X setup");
+        assert!(app_model
+            .setup_description()
+            .contains("Modifier-only capture is unavailable"));
+    }
+
+    #[test]
+    fn app_shell_standard_shortcut_setup_does_not_require_modifier_capture() {
+        let settings = AppSettings {
+            preferred_recording_trigger_mode: RecordingTriggerMode::StandardShortcut,
+            ..AppSettings::default()
+        };
+        let setup_state = AppSetupState {
+            onboarding_completed: true,
+        };
+        let app_model = AppModel::for_startup(
+            &setup_state,
+            &settings,
+            &Capabilities::shell_default("0.1.0"),
+        );
+
+        assert_eq!(app_model.setup_state, SetupState::Ready);
+        assert_eq!(app_model.requested_surface(), InitialSurface::Settings);
     }
 
     #[test]
