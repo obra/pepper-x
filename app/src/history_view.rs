@@ -473,7 +473,7 @@ fn set_detail_sections(
 #[cfg(test)]
 mod history_view_tests {
     use super::*;
-    use crate::history_store::ArchivedRun;
+    use crate::history_store::{ArchivedRun, RunRuntimeMetadata};
     use crate::transcript_log::{CleanupDiagnostics, InsertionDiagnostics, TranscriptEntry};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -511,6 +511,7 @@ mod history_view_tests {
             run_dir: PathBuf::from(format!("/tmp/history/{run_id}")),
             metadata_path: PathBuf::from(format!("/tmp/history/{run_id}/run.json")),
             entry,
+            runtime_metadata: RunRuntimeMetadata::wav_import(),
             archived_source_wav_path: Some(PathBuf::from(format!(
                 "/tmp/history/{run_id}/source.wav"
             ))),

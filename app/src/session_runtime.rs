@@ -11,7 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::transcript_log::state_root;
 use crate::transcript_log::TranscriptEntry;
-use crate::transcription::{transcribe_recorded_wav_to_log, TranscriptionRunError};
+use crate::transcription::{
+    transcribe_recorded_wav_to_log, LivePipelineRequest, TranscriptionRunError,
+};
 
 pub trait Recorder {
     fn start_recording(&mut self, request: RecordingRequest) -> Result<(), RecordingError>;
@@ -60,7 +62,7 @@ impl Recorder for PipeWireRecorder {
 type LiveSessionRuntime = SessionRuntime<
     PipeWireRecorder,
     fn() -> PathBuf,
-    fn(&Path) -> Result<TranscriptEntry, TranscriptionRunError>,
+    fn(LivePipelineRequest) -> Result<TranscriptEntry, TranscriptionRunError>,
 >;
 
 pub struct LiveRuntimeHandle {
@@ -197,7 +199,7 @@ pub struct SessionRuntime<R, P, T>
 where
     R: Recorder,
     P: FnMut() -> PathBuf,
-    T: FnMut(&Path) -> Result<TranscriptEntry, TranscriptionRunError>,
+    T: FnMut(LivePipelineRequest) -> Result<TranscriptEntry, TranscriptionRunError>,
 {
     session: RecordingSession,
     recorder: R,
@@ -209,7 +211,7 @@ impl<R, P, T> SessionRuntime<R, P, T>
 where
     R: Recorder,
     P: FnMut() -> PathBuf,
-    T: FnMut(&Path) -> Result<TranscriptEntry, TranscriptionRunError>,
+    T: FnMut(LivePipelineRequest) -> Result<TranscriptEntry, TranscriptionRunError>,
 {
     pub fn new(recorder: R, next_output_wav_path: P, transcribe_recorded_wav: T) -> Self {
         Self {
@@ -244,9 +246,16 @@ where
     }
 
     pub fn stop_recording(&mut self) -> Result<TranscriptEntry, SessionRuntimeError> {
+        let trigger_source = self
+            .session
+            .active_trigger_source()
+            .ok_or(SessionError::NotRecording)?;
         self.session.stop_recording()?;
         let recorded_wav = self.recorder.stop_recording()?;
-        Ok((self.transcribe_recorded_wav)(recorded_wav.wav_path())?)
+        Ok((self.transcribe_recorded_wav)(LivePipelineRequest::new(
+            trigger_source,
+            recorded_wav,
+        ))?)
     }
 
     pub fn record_and_transcribe<W>(
@@ -395,7 +404,8 @@ mod session_runtime {
         let mut runtime = SessionRuntime::new(
             recorder,
             || PathBuf::from("/tmp/pepper-x-live.wav"),
-            move |wav_path| {
+            move |request| {
+                let wav_path = request.recording_artifact().wav_path();
                 observed_wav_paths_clone
                     .borrow_mut()
                     .push(wav_path.to_path_buf());
@@ -426,9 +436,65 @@ mod session_runtime {
     }
 
     #[test]
+    fn session_runtime_hands_live_pipeline_request_to_transcriber() {
+        let selected_microphone = Some(SelectedMicrophone::new(
+            "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+            "Blue Yeti",
+        ));
+        let observed_requests = Rc::new(RefCell::new(Vec::new()));
+        let observed_requests_clone = observed_requests.clone();
+        let recorder = FakeRecorder {
+            observed_requests: Rc::new(RefCell::new(Vec::new())),
+            stop_calls: Rc::new(RefCell::new(0)),
+            stop_result: Some(Ok(RecordingArtifact::new(
+                "/tmp/pepper-x-live.wav",
+                selected_microphone.clone(),
+                Duration::from_millis(250),
+            ))),
+        };
+        let mut runtime = SessionRuntime::new(
+            recorder,
+            || PathBuf::from("/tmp/pepper-x-live.wav"),
+            move |request| {
+                observed_requests_clone.borrow_mut().push(request.clone());
+                Ok(TranscriptEntry::new(
+                    request.recording_artifact().wav_path(),
+                    "hello from pepper x",
+                    "sherpa-onnx",
+                    "nemo-parakeet-tdt-0.6b-v2-int8",
+                    Duration::from_millis(37),
+                ))
+            },
+        );
+
+        runtime
+            .start_recording(TriggerSource::ModifierOnly, selected_microphone.clone())
+            .expect("start should succeed");
+        runtime.stop_recording().expect("stop should transcribe");
+
+        let observed_requests = observed_requests.borrow();
+        let request = observed_requests
+            .first()
+            .expect("transcriber should observe one live request");
+        assert_eq!(request.trigger_source(), TriggerSource::ModifierOnly);
+        assert_eq!(
+            request.recording_artifact().wav_path(),
+            Path::new("/tmp/pepper-x-live.wav")
+        );
+        assert_eq!(
+            request.recording_artifact().selected_microphone(),
+            selected_microphone.as_ref()
+        );
+        assert_eq!(
+            request.recording_artifact().elapsed(),
+            Duration::from_millis(250)
+        );
+    }
+
+    #[test]
     fn session_runtime_records_until_stop_signal_and_transcribes() {
-        let observed_wav_paths = Rc::new(RefCell::new(Vec::new()));
-        let observed_wav_paths_clone = observed_wav_paths.clone();
+        let observed_recordings = Rc::new(RefCell::new(Vec::new()));
+        let observed_recordings_clone = observed_recordings.clone();
         let wait_calls = Rc::new(RefCell::new(0));
         let wait_calls_clone = wait_calls.clone();
         let recorder = FakeRecorder {
@@ -443,12 +509,15 @@ mod session_runtime {
         let mut runtime = SessionRuntime::new(
             recorder,
             || PathBuf::from("/tmp/pepper-x-live.wav"),
-            move |wav_path| {
-                observed_wav_paths_clone
-                    .borrow_mut()
-                    .push(wav_path.to_path_buf());
+            move |request| {
+                observed_recordings_clone.borrow_mut().push((
+                    request.recording_artifact().wav_path().to_path_buf(),
+                    request.recording_artifact().selected_microphone().cloned(),
+                    request.recording_artifact().elapsed(),
+                    request.trigger_source(),
+                ));
                 Ok(TranscriptEntry::new(
-                    wav_path,
+                    request.recording_artifact().wav_path(),
                     "hello from pepper x",
                     "sherpa-onnx",
                     "nemo-parakeet-tdt-0.6b-v2-int8",
@@ -466,8 +535,13 @@ mod session_runtime {
 
         assert_eq!(*wait_calls.borrow(), 1);
         assert_eq!(
-            observed_wav_paths.borrow().as_slice(),
-            &[PathBuf::from("/tmp/pepper-x-live.wav")]
+            observed_recordings.borrow().as_slice(),
+            &[(
+                PathBuf::from("/tmp/pepper-x-live.wav"),
+                None,
+                Duration::from_millis(250),
+                TriggerSource::ShellAction,
+            )]
         );
         assert_eq!(
             entry.source_wav_path,
@@ -506,5 +580,58 @@ mod session_runtime {
         assert!(matches!(error, SessionRuntimeError::WaitForStop(_)));
         assert_eq!(*stop_calls.borrow(), 1);
         assert_eq!(runtime.session_state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn session_runtime_stop_passes_live_recording_metadata_to_shared_pipeline() {
+        let selected_microphone = Some(SelectedMicrophone::new(
+            "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+            "Blue Yeti",
+        ));
+        let observed_recordings = Rc::new(RefCell::new(Vec::new()));
+        let observed_recordings_clone = observed_recordings.clone();
+        let recorder = FakeRecorder {
+            observed_requests: Rc::new(RefCell::new(Vec::new())),
+            stop_calls: Rc::new(RefCell::new(0)),
+            stop_result: Some(Ok(RecordingArtifact::new(
+                "/tmp/pepper-x-live.wav",
+                selected_microphone.clone(),
+                Duration::from_millis(725),
+            ))),
+        };
+        let mut runtime = SessionRuntime::new(
+            recorder,
+            || PathBuf::from("/tmp/pepper-x-live.wav"),
+            move |request| {
+                observed_recordings_clone.borrow_mut().push((
+                    request.recording_artifact().wav_path().to_path_buf(),
+                    request.recording_artifact().selected_microphone().cloned(),
+                    request.recording_artifact().elapsed(),
+                    request.trigger_source(),
+                ));
+                Ok(TranscriptEntry::new(
+                    request.recording_artifact().wav_path(),
+                    "hello from pepper x",
+                    "sherpa-onnx",
+                    "nemo-parakeet-tdt-0.6b-v2-int8",
+                    Duration::from_millis(37),
+                ))
+            },
+        );
+
+        runtime
+            .start_recording(TriggerSource::ModifierOnly, selected_microphone.clone())
+            .expect("start should succeed");
+        runtime.stop_recording().expect("stop should transcribe");
+
+        assert_eq!(
+            observed_recordings.borrow().as_slice(),
+            &[(
+                PathBuf::from("/tmp/pepper-x-live.wav"),
+                selected_microphone,
+                Duration::from_millis(725),
+                TriggerSource::ModifierOnly,
+            )]
+        );
     }
 }

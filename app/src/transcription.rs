@@ -6,6 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
+use pepperx_audio::RecordingArtifact;
 use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 use pepperx_corrections::{learn_correction, CorrectionStore};
 use pepperx_models::{catalog_model, default_cache_root, model_readiness, ModelKind};
@@ -14,8 +15,9 @@ use pepperx_platform_gnome::atspi::{
     FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME, UINPUT_TEXT_BACKEND_NAME,
 };
 use pepperx_platform_gnome::context::{capture_supporting_context, SupportingContext};
+use pepperx_session::TriggerSource;
 
-use crate::history_store::{ArchiveWriteRequest, HistoryStore};
+use crate::history_store::{ArchiveWriteRequest, HistoryStore, RunRuntimeMetadata};
 use crate::settings::{corrections_store_path, AppSettings};
 use crate::transcript_log::{
     nonempty_env_path, state_root, CleanupDiagnostics, InsertionDiagnostics, LearningDiagnostics,
@@ -48,6 +50,29 @@ pub struct ArchivedRunRerunRequest {
     pub asr_model_id: Option<String>,
     pub cleanup_model_id: Option<String>,
     pub cleanup_prompt_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LivePipelineRequest {
+    recording_artifact: RecordingArtifact,
+    trigger_source: TriggerSource,
+}
+
+impl LivePipelineRequest {
+    pub fn new(trigger_source: TriggerSource, recording_artifact: RecordingArtifact) -> Self {
+        Self {
+            recording_artifact,
+            trigger_source,
+        }
+    }
+
+    pub fn recording_artifact(&self) -> &RecordingArtifact {
+        &self.recording_artifact
+    }
+
+    pub fn trigger_source(&self) -> TriggerSource {
+        self.trigger_source
+    }
 }
 
 #[derive(Debug)]
@@ -129,9 +154,45 @@ pub fn transcribe_wav_to_log(wav_path: &Path) -> Result<TranscriptEntry, Transcr
 }
 
 pub fn transcribe_recorded_wav_to_log(
-    wav_path: &Path,
+    request: LivePipelineRequest,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
-    transcribe_wav_to_log(wav_path)
+    let settings = AppSettings::load_or_default();
+    let prompt_profile = settings.cleanup_prompt_profile.clone();
+    let cache_root = default_cache_root();
+    let supporting_context = capture_cleanup_context();
+    archive_live_recording_with_cleanup_and_friendly_insert(
+        request.recording_artifact().clone(),
+        request.trigger_source(),
+        transcribe_wav_result,
+        Some(prompt_profile.clone()),
+        supporting_context.clone(),
+        |transcript_text| {
+            let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
+            let correction_memory_text = load_correction_store().prompt_memory_text();
+            run_cleanup(&CleanupRequest {
+                transcript_text: transcript_text.into(),
+                model_path,
+                supporting_context_text: supporting_context.supporting_context_text.clone(),
+                ocr_text: supporting_context.ocr_text.clone(),
+                correction_memory_text,
+                prompt_profile: prompt_profile.clone(),
+            })
+        },
+        |transcript_text| {
+            insert_with_uinput_fallback(
+                transcript_text,
+                |transcript_text| {
+                    insert_text_into_friendly_target(
+                        transcript_text,
+                        &FriendlyInsertPolicy {
+                            target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
+                        },
+                    )
+                },
+                request_uinput_text_insertion,
+            )
+        },
+    )
 }
 
 pub fn transcribe_wav_and_cleanup_to_log(
@@ -184,41 +245,10 @@ pub fn transcribe_wav_and_insert_friendly_to_log(
 pub fn transcribe_wav_and_cleanup_and_insert_friendly_to_log(
     wav_path: &Path,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
-    let settings = AppSettings::load_or_default();
-    let prompt_profile = settings.cleanup_prompt_profile.clone();
-    let cache_root = default_cache_root();
-    let supporting_context = capture_cleanup_context();
     let result = transcribe_wav_result(wav_path)?;
-    archive_transcription_result_with_cleanup_and_friendly_insert(
+    archive_transcription_result_with_default_cleanup_and_friendly_insert(
         result,
-        Some(prompt_profile.clone()),
-        supporting_context.clone(),
-        move |transcript_text| {
-            let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
-            let correction_memory_text = load_correction_store().prompt_memory_text();
-            run_cleanup(&CleanupRequest {
-                transcript_text: transcript_text.into(),
-                model_path,
-                supporting_context_text: supporting_context.supporting_context_text.clone(),
-                ocr_text: supporting_context.ocr_text.clone(),
-                correction_memory_text,
-                prompt_profile: prompt_profile.clone(),
-            })
-        },
-        |transcript_text| {
-            insert_with_uinput_fallback(
-                transcript_text,
-                |transcript_text| {
-                    insert_text_into_friendly_target(
-                        transcript_text,
-                        &FriendlyInsertPolicy {
-                            target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
-                        },
-                    )
-                },
-                request_uinput_text_insertion,
-            )
-        },
+        RunRuntimeMetadata::wav_import(),
     )
 }
 
@@ -488,6 +518,7 @@ where
 
     archive_transcript_entry_with_request(
         entry,
+        RunRuntimeMetadata::archived_rerun(),
         prompt_profile,
         Some(&supporting_context),
         Some(original_run.run_id),
@@ -528,7 +559,13 @@ where
 {
     let mut entry = transcript_entry_from_result(result);
     record_cleanup(&mut entry, &supporting_context, cleanup);
-    archive_transcript_entry_with_request(entry, prompt_profile, Some(&supporting_context), None)
+    archive_transcript_entry_with_request(
+        entry,
+        RunRuntimeMetadata::wav_import(),
+        prompt_profile,
+        Some(&supporting_context),
+        None,
+    )
 }
 
 pub(crate) fn archive_transcription_result_with_friendly_insert<F>(
@@ -555,12 +592,35 @@ where
     C: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
     I: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
 {
+    archive_transcription_result_with_cleanup_and_friendly_insert_request(
+        result,
+        prompt_profile,
+        supporting_context,
+        RunRuntimeMetadata::wav_import(),
+        cleanup,
+        insert,
+    )
+}
+
+fn archive_transcription_result_with_cleanup_and_friendly_insert_request<C, I>(
+    result: TranscriptionResult,
+    prompt_profile: Option<String>,
+    supporting_context: SupportingContext,
+    runtime_metadata: RunRuntimeMetadata,
+    cleanup: C,
+    insert: I,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    C: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
+    I: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
+{
     let mut entry = transcript_entry_from_result(result);
     record_cleanup(&mut entry, &supporting_context, cleanup);
     let insert_text = entry.display_text().to_string();
     let insert_error = record_friendly_insert(&mut entry, &insert_text, insert).err();
     let entry = archive_transcript_entry_with_request(
         entry,
+        runtime_metadata,
         prompt_profile,
         Some(&supporting_context),
         None,
@@ -585,17 +645,19 @@ fn transcript_entry_from_result(result: TranscriptionResult) -> TranscriptEntry 
 fn archive_transcript_entry(
     entry: TranscriptEntry,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
-    archive_transcript_entry_with_request(entry, None, None, None)
+    archive_transcript_entry_with_request(entry, RunRuntimeMetadata::wav_import(), None, None, None)
 }
 
 fn archive_transcript_entry_with_request(
     entry: TranscriptEntry,
+    runtime_metadata: RunRuntimeMetadata,
     prompt_profile: Option<String>,
     supporting_context: Option<&SupportingContext>,
     parent_run_id: Option<String>,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
     let store = HistoryStore::open(state_root())?;
-    let mut request = ArchiveWriteRequest::new(entry.clone());
+    let mut request =
+        ArchiveWriteRequest::new(entry.clone()).with_runtime_metadata(runtime_metadata);
     if let Some(parent_run_id) = parent_run_id {
         request = request.with_parent_run_id(parent_run_id);
     }
@@ -612,6 +674,99 @@ fn archive_transcript_entry_with_request(
     }
     store.archive_run(&request)?;
     Ok(entry)
+}
+
+fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
+    result: TranscriptionResult,
+    runtime_metadata: RunRuntimeMetadata,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let settings = AppSettings::load_or_default();
+    let prompt_profile = settings.cleanup_prompt_profile.clone();
+    let cache_root = default_cache_root();
+    let supporting_context = capture_cleanup_context();
+    archive_transcription_result_with_cleanup_and_friendly_insert_request(
+        result,
+        Some(prompt_profile.clone()),
+        supporting_context.clone(),
+        runtime_metadata,
+        move |transcript_text| {
+            let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
+            let correction_memory_text = load_correction_store().prompt_memory_text();
+            run_cleanup(&CleanupRequest {
+                transcript_text: transcript_text.into(),
+                model_path,
+                supporting_context_text: supporting_context.supporting_context_text.clone(),
+                ocr_text: supporting_context.ocr_text.clone(),
+                correction_memory_text,
+                prompt_profile: prompt_profile.clone(),
+            })
+        },
+        |transcript_text| {
+            insert_with_uinput_fallback(
+                transcript_text,
+                |transcript_text| {
+                    insert_text_into_friendly_target(
+                        transcript_text,
+                        &FriendlyInsertPolicy {
+                            target_application_id: FRIENDLY_TARGET_APPLICATION_ID,
+                        },
+                    )
+                },
+                request_uinput_text_insertion,
+            )
+        },
+    )
+}
+
+fn archive_live_recording_with_cleanup_and_friendly_insert<T, C, I>(
+    recording_artifact: RecordingArtifact,
+    trigger_source: TriggerSource,
+    transcribe: T,
+    prompt_profile: Option<String>,
+    supporting_context: SupportingContext,
+    cleanup: C,
+    insert: I,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    T: FnOnce(&Path) -> Result<TranscriptionResult, TranscriptionRunError>,
+    C: FnOnce(&str) -> Result<CleanupResult, CleanupError>,
+    I: FnOnce(&str) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError>,
+{
+    let runtime_metadata =
+        RunRuntimeMetadata::for_live_recording(trigger_source, &recording_artifact);
+    match transcribe(recording_artifact.wav_path()) {
+        Ok(result) => archive_transcription_result_with_cleanup_and_friendly_insert_request(
+            result,
+            prompt_profile,
+            supporting_context,
+            runtime_metadata,
+            cleanup,
+            insert,
+        ),
+        Err(error) => {
+            archive_live_transcription_failure(
+                &recording_artifact,
+                runtime_metadata.with_failure("transcription", error.to_string()),
+            )?;
+            Err(error)
+        }
+    }
+}
+
+fn archive_live_transcription_failure(
+    recording_artifact: &RecordingArtifact,
+    runtime_metadata: RunRuntimeMetadata,
+) -> Result<(), TranscriptionRunError> {
+    let settings = AppSettings::load_or_default();
+    let failure_entry = TranscriptEntry::new(
+        recording_artifact.wav_path(),
+        "",
+        "sherpa-onnx",
+        settings.preferred_asr_model,
+        Duration::ZERO,
+    );
+    archive_transcript_entry_with_request(failure_entry, runtime_metadata, None, None, None)
+        .map(|_| ())
 }
 
 fn describe_asr_error(error: &TranscriptionError) -> String {
@@ -923,13 +1078,15 @@ fn insertion_diagnostics_from_error(error: &FriendlyInsertRunError) -> Insertion
 #[cfg(test)]
 mod app_shell {
     use super::*;
-    use crate::history_store::{ArchiveWriteRequest, HistoryStore};
+    use crate::history_store::{ArchiveWriteRequest, HistoryStore, RunRuntimeMetadata};
     use crate::settings::AppSettings;
     use crate::transcript_log::{env_lock, TranscriptLog};
+    use pepperx_audio::{RecordingArtifact, SelectedMicrophone};
     use pepperx_cleanup::cleanup::{CleanupError, CleanupResult};
     use pepperx_corrections::CorrectionStore;
     use pepperx_models::catalog_model;
     use pepperx_platform_gnome::context::SupportingContext;
+    use pepperx_session::TriggerSource;
     use std::ffi::OsString;
 
     fn materialize_ready_model(cache_root: &Path, model_id: &str) -> PathBuf {
@@ -2218,7 +2375,7 @@ mod app_shell {
                     used_ocr: false,
                 })
             },
-            |text| {
+            |text: &str| {
                 inserted_text = Some(text.to_string());
                 Ok(FriendlyInsertOutcome {
                     selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
@@ -2331,6 +2488,253 @@ mod app_shell {
         );
         assert_eq!(
             entries[0].insertion,
+            Some(InsertionDiagnostics::failed(
+                FRIENDLY_INSERT_BACKEND_NAME,
+                "unknown",
+                "friendly insertion could not find a focused target"
+            ))
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_insert_runtime_archives_live_transcription_failures_for_retry() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-live-cleanup-insert-transcription-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        let source_wav_path = state_root.join("live-failure.wav");
+        std::fs::write(&source_wav_path, b"pepper-x-live-audio").unwrap();
+        let selected_microphone = pepperx_audio::SelectedMicrophone::new(
+            "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+            "Blue Yeti",
+        );
+
+        let error = archive_live_recording_with_cleanup_and_friendly_insert(
+            pepperx_audio::recording::RecordingArtifact::new(
+                &source_wav_path,
+                Some(selected_microphone.clone()),
+                Duration::from_millis(725),
+            ),
+            pepperx_session::TriggerSource::ModifierOnly,
+            |_| {
+                Err(TranscriptionRunError::Asr(
+                    TranscriptionError::DecodeFailed(source_wav_path.clone()),
+                ))
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext::default(),
+            |_| unreachable!("cleanup should not run when transcription fails"),
+            |_| unreachable!("insert should not run when transcription fails"),
+        )
+        .unwrap_err();
+        let archived = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .recent_runs()
+            .expect("load archived runs")
+            .into_iter()
+            .next()
+            .expect("expected archived run");
+
+        assert!(matches!(
+            error,
+            TranscriptionRunError::Asr(TranscriptionError::DecodeFailed(_))
+        ));
+        assert_eq!(archived.entry.transcript_text, "");
+        assert_eq!(
+            archived.runtime_metadata,
+            RunRuntimeMetadata::for_live_recording(
+                pepperx_session::TriggerSource::ModifierOnly,
+                &pepperx_audio::recording::RecordingArtifact::new(
+                    &source_wav_path,
+                    Some(selected_microphone),
+                    Duration::from_millis(725),
+                ),
+            )
+            .with_failure(
+                "transcription",
+                format!(
+                    "Pepper X transcription failed: failed to decode {}",
+                    source_wav_path.display()
+                ),
+            )
+        );
+        assert_eq!(
+            archived.archived_source_wav_path.as_deref(),
+            Some(archived.run_dir.join("source.wav").as_path())
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_insert_runtime_archives_live_runtime_metadata_for_recorded_runs() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-live-runtime-metadata-success-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let wav_path = state_root.join("live.wav");
+        std::fs::write(&wav_path, b"pepper-x-live-audio").unwrap();
+        let runtime_metadata = RunRuntimeMetadata::for_live_recording(
+            TriggerSource::ModifierOnly,
+            &RecordingArtifact::new(
+                &wav_path,
+                Some(SelectedMicrophone::new(
+                    "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                    "Blue Yeti",
+                )),
+                Duration::from_millis(275),
+            ),
+        );
+
+        let entry = archive_transcription_result_with_cleanup_and_friendly_insert_request(
+            TranscriptionResult {
+                wav_path: wav_path.clone(),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext::default(),
+            runtime_metadata.clone(),
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |_| {
+                Ok(FriendlyInsertOutcome {
+                    selection: pepperx_platform_gnome::atspi::FriendlyInsertSelection {
+                        backend_name: "atspi-editable-text",
+                        target_application_id: "org.gnome.TextEditor".into(),
+                        target_class: "text-editor",
+                        attempted_backends: vec!["atspi-editable-text"],
+                    },
+                    target_application_name: "Text Editor".into(),
+                    target_class: "text-editor".into(),
+                    caret_offset: 5,
+                    before_text: "Hello from Pepper X.".into(),
+                    after_text: "Hello from Pepper X.".into(),
+                })
+            },
+        )
+        .expect("archive cleanup plus insert entry");
+
+        assert_eq!(entry.display_text(), "Hello from Pepper X.");
+        let archived_run = HistoryStore::open(&state_root)
+            .expect("history store")
+            .recent_runs()
+            .expect("load runs")
+            .into_iter()
+            .next()
+            .expect("archived live run");
+        assert_eq!(archived_run.runtime_metadata, runtime_metadata);
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn cleanup_insert_runtime_archives_live_runtime_metadata_on_insertion_failure() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-live-runtime-metadata-insert-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let wav_path = state_root.join("live.wav");
+        std::fs::write(&wav_path, b"pepper-x-live-audio").unwrap();
+        let runtime_metadata = RunRuntimeMetadata::for_live_recording(
+            TriggerSource::ShellAction,
+            &RecordingArtifact::new(&wav_path, None, Duration::from_millis(150)),
+        );
+
+        let error = archive_transcription_result_with_cleanup_and_friendly_insert_request(
+            TranscriptionResult {
+                wav_path: wav_path.clone(),
+                transcript_text: "hello from pepper x".into(),
+                backend_name: "sherpa-onnx".into(),
+                model_name: MODEL_NAME.into(),
+                elapsed_ms: 42,
+            },
+            Some("ordinary-dictation".into()),
+            SupportingContext::default(),
+            runtime_metadata.clone(),
+            |_| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    cleaned_text: "Hello from Pepper X.".into(),
+                    elapsed_ms: 19,
+                    used_ocr: false,
+                })
+            },
+            |_| Err(FriendlyInsertRunError::MissingFocusedTarget),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Pepper X friendly insertion failed: friendly insertion could not find a focused target"
+        );
+        let archived_run = HistoryStore::open(&state_root)
+            .expect("history store")
+            .recent_runs()
+            .expect("load runs")
+            .into_iter()
+            .next()
+            .expect("archived live run");
+        assert_eq!(archived_run.runtime_metadata, runtime_metadata);
+        assert_eq!(
+            archived_run.entry.insertion,
             Some(InsertionDiagnostics::failed(
                 FRIENDLY_INSERT_BACKEND_NAME,
                 "unknown",

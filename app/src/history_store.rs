@@ -1,3 +1,5 @@
+use pepperx_audio::{RecordingArtifact, SelectedMicrophone};
+use pepperx_session::TriggerSource;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -13,6 +15,7 @@ const ARCHIVED_SOURCE_WAV_FILE_NAME: &str = "source.wav";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveWriteRequest {
     pub entry: TranscriptEntry,
+    pub runtime_metadata: RunRuntimeMetadata,
     pub parent_run_id: Option<String>,
     pub prompt_profile: Option<String>,
     pub supporting_context_text: Option<String>,
@@ -23,11 +26,17 @@ impl ArchiveWriteRequest {
     pub fn new(entry: TranscriptEntry) -> Self {
         Self {
             entry,
+            runtime_metadata: RunRuntimeMetadata::wav_import(),
             parent_run_id: None,
             prompt_profile: None,
             supporting_context_text: None,
             ocr_text: None,
         }
+    }
+
+    pub fn with_runtime_metadata(mut self, runtime_metadata: RunRuntimeMetadata) -> Self {
+        self.runtime_metadata = runtime_metadata;
+        self
     }
 
     pub fn with_parent_run_id(mut self, parent_run_id: impl Into<String>) -> Self {
@@ -60,6 +69,7 @@ pub struct ArchivedRun {
     pub run_dir: PathBuf,
     pub metadata_path: PathBuf,
     pub entry: TranscriptEntry,
+    pub runtime_metadata: RunRuntimeMetadata,
     pub archived_source_wav_path: Option<PathBuf>,
     pub parent_run_id: Option<String>,
     pub prompt_profile: Option<String>,
@@ -72,6 +82,69 @@ pub struct HistoryStore {
     root: PathBuf,
     history_root: PathBuf,
     legacy_log: TranscriptLog,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRuntimeMetadata {
+    pub input_origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_microphone: Option<SelectedMicrophone>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording_elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+impl RunRuntimeMetadata {
+    pub fn wav_import() -> Self {
+        Self {
+            input_origin: "wav-import".into(),
+            trigger_source: None,
+            selected_microphone: None,
+            recording_elapsed_ms: None,
+            failure_stage: None,
+            failure_reason: None,
+        }
+    }
+
+    pub fn archived_rerun() -> Self {
+        Self {
+            input_origin: "archived-rerun".into(),
+            trigger_source: None,
+            selected_microphone: None,
+            recording_elapsed_ms: None,
+            failure_stage: None,
+            failure_reason: None,
+        }
+    }
+
+    pub fn for_live_recording(
+        trigger_source: TriggerSource,
+        recording_artifact: &RecordingArtifact,
+    ) -> Self {
+        Self {
+            input_origin: "live-recording".into(),
+            trigger_source: Some(trigger_source_label(trigger_source).into()),
+            selected_microphone: recording_artifact.selected_microphone().cloned(),
+            recording_elapsed_ms: Some(recording_artifact.elapsed().as_millis() as u64),
+            failure_stage: None,
+            failure_reason: None,
+        }
+    }
+
+    pub fn with_failure(
+        mut self,
+        failure_stage: impl Into<String>,
+        failure_reason: impl Into<String>,
+    ) -> Self {
+        self.failure_stage = Some(failure_stage.into());
+        self.failure_reason = Some(failure_reason.into());
+        self
+    }
 }
 
 impl HistoryStore {
@@ -103,6 +176,7 @@ impl HistoryStore {
             run_id: run_id.clone(),
             archived_at_ms,
             entry: request.entry.clone(),
+            runtime_metadata: request.runtime_metadata.clone(),
             archived_source_wav_path: archived_source_wav_path.clone(),
             parent_run_id: request.parent_run_id.clone(),
             prompt_profile: request.prompt_profile.clone(),
@@ -191,6 +265,7 @@ impl HistoryStore {
                     run_dir,
                     metadata_path,
                     entry,
+                    runtime_metadata: RunRuntimeMetadata::wav_import(),
                     archived_source_wav_path: None,
                     parent_run_id: None,
                     prompt_profile: None,
@@ -207,6 +282,7 @@ struct StoredArchivedRun {
     run_id: String,
     archived_at_ms: u64,
     entry: TranscriptEntry,
+    runtime_metadata: RunRuntimeMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     archived_source_wav_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,6 +303,7 @@ impl StoredArchivedRun {
             run_dir,
             metadata_path,
             entry: self.entry,
+            runtime_metadata: self.runtime_metadata,
             archived_source_wav_path: self.archived_source_wav_path,
             parent_run_id: self.parent_run_id,
             prompt_profile: self.prompt_profile,
@@ -255,6 +332,14 @@ fn next_run_id() -> String {
         .expect("system clock before unix epoch")
         .as_nanos();
     format!("run-{}-{unique}", std::process::id())
+}
+
+fn trigger_source_label(trigger_source: TriggerSource) -> &'static str {
+    match trigger_source {
+        TriggerSource::ModifierOnly => "modifier-only",
+        TriggerSource::StandardShortcut => "standard-shortcut",
+        TriggerSource::ShellAction => "shell-action",
+    }
 }
 
 #[cfg(test)]

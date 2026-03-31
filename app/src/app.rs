@@ -259,6 +259,7 @@ mod app_shell {
         initial_surface, AppModel, InitialSurface, ModelBootstrapSummary, SetupIssue, SetupState,
     };
     use crate::cli::{run_with, StartupMode};
+    use crate::history_store::RunRuntimeMetadata;
     use crate::settings::{AppSetupState, RecordingTriggerMode};
     use crate::startup_policy::StartupLaunchPolicy;
     use crate::transcript_log::env_lock;
@@ -276,6 +277,7 @@ mod app_shell {
             run_dir: std::path::PathBuf::from("/tmp/history/run-1"),
             metadata_path: std::path::PathBuf::from("/tmp/history/run-1/run.json"),
             entry,
+            runtime_metadata: RunRuntimeMetadata::wav_import(),
             archived_source_wav_path: Some(std::path::PathBuf::from(
                 "/tmp/history/run-1/source.wav",
             )),

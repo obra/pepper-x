@@ -478,6 +478,7 @@ fn replace_history_browser(
 mod app_shell {
     use super::*;
     use crate::diagnostics_view::{diagnostics_page_scaffold, DiagnosticsContainerKind};
+    use crate::history_store::RunRuntimeMetadata;
     use crate::settings::AppSettings;
     use crate::settings_view::{settings_page_scaffold, SettingsContainerKind};
     use crate::transcript_log::{InsertionDiagnostics, LearningDiagnostics, TranscriptEntry};
@@ -493,6 +494,7 @@ mod app_shell {
             run_dir: PathBuf::from("/tmp/history/run-1"),
             metadata_path: PathBuf::from("/tmp/history/run-1/run.json"),
             entry,
+            runtime_metadata: RunRuntimeMetadata::wav_import(),
             archived_source_wav_path: Some(PathBuf::from("/tmp/history/run-1/source.wav")),
             parent_run_id: None,
             prompt_profile: None,
