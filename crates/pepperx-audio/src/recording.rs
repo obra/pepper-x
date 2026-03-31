@@ -1,7 +1,7 @@
 use crate::SelectedMicrophone;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use crate::devices::stable_pipewire_microphone_id;
@@ -28,6 +28,11 @@ use std::thread;
 const APP_ID: &str = "com.obra.PepperX";
 #[cfg(target_os = "linux")]
 const STREAM_NAME: &str = "pepperx-microphone-capture";
+const SIGNAL_LEVEL_THRESHOLD: f32 = 0.02;
+#[cfg(target_os = "linux")]
+const SIGNAL_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+#[cfg(target_os = "linux")]
+const SIGNAL_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingRequest {
@@ -115,6 +120,94 @@ impl fmt::Display for RecordingError {
 
 impl std::error::Error for RecordingError {}
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SignalLevelSample {
+    normalized_level: f32,
+}
+
+impl SignalLevelSample {
+    pub fn from_interleaved_samples(interleaved_samples: &[f32]) -> Self {
+        Self::from_normalized_samples(interleaved_samples)
+    }
+
+    pub fn from_pcm_samples(pcm_samples: &[i16]) -> Self {
+        let normalized_samples = pcm_samples
+            .iter()
+            .map(|sample| *sample as f32 / i16::MAX as f32)
+            .collect::<Vec<_>>();
+        Self::from_normalized_samples(&normalized_samples)
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn from_normalized_samples(normalized_samples: &[f32]) -> Self {
+        let normalized_level = normalized_samples
+            .iter()
+            .copied()
+            .map(f32::abs)
+            .fold(0.0, f32::max);
+
+        Self { normalized_level }
+    }
+
+    pub fn normalized_level(&self) -> f32 {
+        self.normalized_level
+    }
+
+    pub fn signal_present(&self) -> bool {
+        self.normalized_level >= SIGNAL_LEVEL_THRESHOLD
+    }
+
+    pub fn peak_fraction(&self) -> f32 {
+        self.normalized_level()
+    }
+
+    pub fn has_signal(&self) -> bool {
+        self.signal_present()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalLevelErrorKind {
+    UnsupportedPlatform,
+    NoSignal,
+    CaptureFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalLevelError {
+    kind: SignalLevelErrorKind,
+    message: String,
+}
+
+impl SignalLevelError {
+    pub fn new(kind: SignalLevelErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> SignalLevelErrorKind {
+        self.kind
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn unsupported_platform() -> Self {
+        Self::new(
+            SignalLevelErrorKind::UnsupportedPlatform,
+            "microphone signal checks are only supported on linux",
+        )
+    }
+}
+
+impl fmt::Display for SignalLevelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SignalLevelError {}
+
 #[cfg(target_os = "linux")]
 enum RecordingCommand {
     Stop,
@@ -171,6 +264,31 @@ pub fn start_recording(request: RecordingRequest) -> Result<ActiveRecording, Rec
     }
 }
 
+pub fn probe_signal_level(
+    selected_microphone: Option<SelectedMicrophone>,
+) -> Result<SignalLevelSample, SignalLevelError> {
+    #[cfg(target_os = "linux")]
+    {
+        return probe_linux_signal_level(selected_microphone);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = selected_microphone;
+        Err(SignalLevelError::unsupported_platform())
+    }
+}
+
+pub type InputLevelSample = SignalLevelSample;
+pub type InputLevelError = SignalLevelError;
+pub type InputLevelErrorKind = SignalLevelErrorKind;
+
+pub fn sample_input_level(
+    selected_microphone: Option<SelectedMicrophone>,
+) -> Result<InputLevelSample, InputLevelError> {
+    probe_signal_level(selected_microphone)
+}
+
 #[cfg(target_os = "linux")]
 fn start_linux_recording(request: RecordingRequest) -> Result<ActiveRecording, RecordingError> {
     let (control_sender, control_receiver) = pw::channel::channel();
@@ -193,6 +311,86 @@ fn start_linux_recording(request: RecordingRequest) -> Result<ActiveRecording, R
             Err(error)
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_linux_signal_level(
+    selected_microphone: Option<SelectedMicrophone>,
+) -> Result<SignalLevelSample, SignalLevelError> {
+    pw::init();
+
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|error| {
+        SignalLevelError::new(
+            SignalLevelErrorKind::CaptureFailed,
+            format!("failed to create PipeWire main loop: {error}"),
+        )
+    })?;
+    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|error| {
+        SignalLevelError::new(
+            SignalLevelErrorKind::CaptureFailed,
+            format!("failed to create PipeWire context: {error}"),
+        )
+    })?;
+    let core = context.connect_rc(None).map_err(|error| {
+        SignalLevelError::new(
+            SignalLevelErrorKind::CaptureFailed,
+            format!("failed to connect to PipeWire: {error}"),
+        )
+    })?;
+
+    let target_node_id = resolve_selected_node_id(&core, &mainloop, selected_microphone.as_ref())
+        .map_err(|error| {
+        SignalLevelError::new(SignalLevelErrorKind::CaptureFailed, error.to_string())
+    })?;
+    let captured_audio = Rc::new(RefCell::new(CapturedAudio::default()));
+    let recording_error = Rc::new(RefCell::new(None::<RecordingError>));
+    let stream = configure_capture_stream(
+        &core,
+        &mainloop,
+        &captured_audio,
+        &recording_error,
+        target_node_id,
+    )
+    .map_err(|error| {
+        SignalLevelError::new(SignalLevelErrorKind::CaptureFailed, error.to_string())
+    })?;
+
+    let started_at = Instant::now();
+    while started_at.elapsed() < SIGNAL_PROBE_TIMEOUT {
+        if let Some(error) = recording_error.borrow_mut().take() {
+            let _ = stream.disconnect();
+            return Err(SignalLevelError::new(
+                SignalLevelErrorKind::CaptureFailed,
+                error.to_string(),
+            ));
+        }
+
+        let sample = {
+            let captured_audio = captured_audio.borrow();
+            (!captured_audio.interleaved_samples.is_empty()).then(|| {
+                SignalLevelSample::from_normalized_samples(&captured_audio.interleaved_samples)
+            })
+        };
+        if let Some(sample) = sample {
+            let _ = stream.disconnect();
+            if sample.signal_present() {
+                return Ok(sample);
+            }
+
+            return Err(SignalLevelError::new(
+                SignalLevelErrorKind::NoSignal,
+                "Pepper X did not detect microphone signal",
+            ));
+        }
+
+        mainloop.loop_().iterate(SIGNAL_PROBE_POLL_INTERVAL);
+    }
+
+    let _ = stream.disconnect();
+    Err(SignalLevelError::new(
+        SignalLevelErrorKind::NoSignal,
+        "Pepper X did not detect microphone signal",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -702,6 +900,22 @@ mod recording_runtime {
         assert!(samples[1] < 0);
 
         let _ = std::fs::remove_file(wav_path);
+    }
+
+    #[test]
+    fn device_signal_level_reports_silence_without_marking_signal_present() {
+        let sample = SignalLevelSample::from_pcm_samples(&[0, 0, 0, 0]);
+
+        assert_eq!(sample.normalized_level(), 0.0);
+        assert!(!sample.signal_present());
+    }
+
+    #[test]
+    fn device_signal_level_detects_meaningful_input_for_meter_updates() {
+        let sample = SignalLevelSample::from_pcm_samples(&[0, 16_384, -16_384, 0]);
+
+        assert!(sample.normalized_level() > 0.45);
+        assert!(sample.signal_present());
     }
 
     fn unique_wav_path(suffix: &str) -> PathBuf {

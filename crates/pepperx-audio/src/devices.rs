@@ -105,6 +105,23 @@ impl MicrophoneInventory {
     pub fn devices(&self) -> &[MicrophoneDevice] {
         &self.devices
     }
+
+    pub fn resolve_selected(
+        &self,
+        preferred: Option<&SelectedMicrophone>,
+    ) -> Option<SelectedMicrophone> {
+        if let Some(preferred) = preferred {
+            if let Some(device) = self
+                .devices
+                .iter()
+                .find(|device| device.stable_id() == preferred.stable_id())
+            {
+                return Some(SelectedMicrophone::from(device));
+            }
+        }
+
+        self.devices.first().map(SelectedMicrophone::from)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,6 +399,7 @@ fn test_pipewire_properties(properties: &[(&str, &str)]) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recording::SignalLevelSample;
 
     #[test]
     fn device_discovered_microphones_keep_stable_ids_and_display_names() {
@@ -404,6 +422,72 @@ mod tests {
         let inventory = MicrophoneInventory::from_devices(Vec::new());
 
         assert!(inventory.devices().is_empty());
+    }
+
+    #[test]
+    fn device_inventory_resolves_saved_microphone_when_present() {
+        let inventory = MicrophoneInventory::from_devices(vec![
+            MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            ),
+            MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.pci-built-in-00.analog-stereo",
+                "Built-in Audio",
+            ),
+        ]);
+
+        let selected = inventory
+            .resolve_selected(Some(&SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            )))
+            .expect("saved microphone should resolve");
+
+        assert_eq!(
+            selected,
+            SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            )
+        );
+    }
+
+    #[test]
+    fn device_inventory_falls_back_to_first_microphone_when_saved_device_is_missing() {
+        let inventory = MicrophoneInventory::from_devices(vec![
+            MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            ),
+            MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.pci-built-in-00.analog-stereo",
+                "Built-in Audio",
+            ),
+        ]);
+
+        let selected = inventory
+            .resolve_selected(Some(&SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.missing-device",
+                "Missing Device",
+            )))
+            .expect("inventory should fall back to a discovered microphone");
+
+        assert_eq!(
+            selected,
+            SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            )
+        );
+    }
+
+    #[test]
+    fn device_level_sample_reports_peak_signal_strength_from_pcm() {
+        let sample = SignalLevelSample::from_pcm_samples(&[0, 21_299, -8_192]);
+
+        assert!(sample.signal_present());
+        assert!(sample.normalized_level() > 0.64);
     }
 
     #[test]

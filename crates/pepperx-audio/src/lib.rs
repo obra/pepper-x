@@ -6,5 +6,7 @@ pub use devices::{
     SelectedMicrophone,
 };
 pub use recording::{
-    start_recording, ActiveRecording, RecordingArtifact, RecordingError, RecordingRequest,
+    probe_signal_level, sample_input_level, start_recording, ActiveRecording, InputLevelError,
+    InputLevelErrorKind, InputLevelSample, RecordingArtifact, RecordingError, RecordingRequest,
+    SignalLevelError, SignalLevelErrorKind, SignalLevelSample,
 };

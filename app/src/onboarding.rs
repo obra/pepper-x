@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use crate::app_model::{AppModel, ModelBootstrapSummary, RuntimeReadinessSummary, SetupChecklist};
 use crate::settings::AppSetupState;
+use crate::settings_view::build_microphone_controls;
 use crate::transcript_log::state_root;
 use pepperx_models::{bootstrap_default_models_with_progress, default_cache_root};
 use pepperx_platform_gnome::atspi::{
@@ -307,6 +308,7 @@ pub fn show_onboarding_window(
         .wrap(true)
         .selectable(true)
         .build();
+    let microphone_controls = build_microphone_controls("Microphone", "Level");
     let primary_button = gtk::Button::builder().halign(gtk::Align::End).build();
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
@@ -317,6 +319,7 @@ pub fn show_onboarding_window(
     content.append(&progress_label);
     content.append(&title_label);
     content.append(&body_label);
+    content.append(&microphone_controls);
     content.append(&primary_button);
 
     let window = adw::ApplicationWindow::builder()
@@ -335,6 +338,7 @@ pub fn show_onboarding_window(
         let progress_label = progress_label.clone();
         let title_label = title_label.clone();
         let body_label = body_label.clone();
+        let microphone_controls = microphone_controls.clone();
         let primary_button = primary_button.clone();
         Rc::new(move || {
             let checklist = checklist_provider();
@@ -346,6 +350,8 @@ pub fn show_onboarding_window(
             progress_label.set_label(&step_view.progress_label);
             title_label.set_label(step_view.title);
             body_label.set_label(&step_view.body);
+            microphone_controls
+                .set_visible(wizard.borrow().current_step() == OnboardingStep::Setup);
             primary_button.set_label(step_view.primary_label);
             primary_button.set_sensitive(primary_button_enabled(
                 &wizard.borrow(),

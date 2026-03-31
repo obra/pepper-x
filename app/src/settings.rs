@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
 
-use pepperx_audio::SelectedMicrophone;
+use pepperx_audio::{
+    enumerate_microphones, InputLevelError, InputLevelErrorKind, InputLevelSample,
+    MicrophoneDevice, MicrophoneInventory, SelectedMicrophone,
+};
 use pepperx_models::{default_model, ModelKind};
 
 use crate::transcript_log::state_root;
@@ -34,6 +37,21 @@ pub struct AppSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSetupState {
     pub onboarding_completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MicrophoneUiState {
+    pub devices: Vec<MicrophoneDevice>,
+    pub selected_microphone: Option<SelectedMicrophone>,
+    pub level_fraction: f64,
+    pub status_label: String,
+    pub recovery_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrophoneSelectionState {
+    pub available_microphones: Vec<SelectedMicrophone>,
+    pub selected_microphone: Option<SelectedMicrophone>,
 }
 
 impl Default for AppSettings {
@@ -89,6 +107,20 @@ impl AppSettings {
             )
         })?;
         std::fs::write(settings_path, settings_json)
+    }
+
+    pub fn microphone_selection_state(
+        &self,
+        inventory: &MicrophoneInventory,
+    ) -> MicrophoneSelectionState {
+        MicrophoneSelectionState {
+            available_microphones: inventory
+                .devices()
+                .iter()
+                .map(SelectedMicrophone::from)
+                .collect(),
+            selected_microphone: inventory.resolve_selected(self.preferred_microphone.as_ref()),
+        }
     }
 }
 
@@ -148,6 +180,89 @@ pub fn corrections_store_path() -> PathBuf {
 
 pub fn launch_at_login_desktop_file_path() -> &'static std::path::Path {
     std::path::Path::new(LAUNCH_AT_LOGIN_DESKTOP_FILE_PATH)
+}
+
+pub fn save_preferred_microphone(
+    selected_microphone: Option<SelectedMicrophone>,
+) -> io::Result<()> {
+    let mut settings = AppSettings::load_or_default();
+    settings.preferred_microphone = selected_microphone;
+    settings.save()
+}
+
+pub fn microphone_ui_state(
+    settings: &AppSettings,
+    inventory: &MicrophoneInventory,
+    level_probe: Option<Result<InputLevelSample, InputLevelError>>,
+) -> MicrophoneUiState {
+    let selection = settings.microphone_selection_state(inventory);
+    let devices = inventory.devices().to_vec();
+
+    if devices.is_empty() {
+        return MicrophoneUiState {
+            devices,
+            selected_microphone: None,
+            level_fraction: 0.0,
+            status_label: "No microphone detected.".into(),
+            recovery_message: Some("Connect a microphone to continue.".into()),
+        };
+    }
+
+    match level_probe {
+        Some(Ok(sample)) => MicrophoneUiState {
+            devices,
+            selected_microphone: selection.selected_microphone,
+            level_fraction: sample.normalized_level() as f64,
+            status_label: "Sound check looks healthy.".into(),
+            recovery_message: None,
+        },
+        Some(Err(error)) => {
+            let (status_label, recovery_message) = match error.kind() {
+                InputLevelErrorKind::NoSignal => (
+                    "No sound detected.".into(),
+                    Some("Check the selected microphone and speak again.".into()),
+                ),
+                InputLevelErrorKind::UnsupportedPlatform => (
+                    "Microphone checks are unavailable.".into(),
+                    Some(error.to_string()),
+                ),
+                InputLevelErrorKind::CaptureFailed => {
+                    ("Microphone check failed.".into(), Some(error.to_string()))
+                }
+            };
+
+            MicrophoneUiState {
+                devices,
+                selected_microphone: selection.selected_microphone,
+                level_fraction: 0.0,
+                status_label,
+                recovery_message,
+            }
+        }
+        None => MicrophoneUiState {
+            devices,
+            selected_microphone: selection.selected_microphone,
+            level_fraction: 0.0,
+            status_label: "Run a sound check.".into(),
+            recovery_message: None,
+        },
+    }
+}
+
+pub fn load_microphone_ui_state(
+    level_probe: Option<Result<InputLevelSample, InputLevelError>>,
+) -> MicrophoneUiState {
+    let settings = AppSettings::load_or_default();
+    match enumerate_microphones() {
+        Ok(inventory) => microphone_ui_state(&settings, &inventory, level_probe),
+        Err(error) => MicrophoneUiState {
+            devices: Vec::new(),
+            selected_microphone: settings.preferred_microphone,
+            level_fraction: 0.0,
+            status_label: "Microphone list unavailable.".into(),
+            recovery_message: Some(error.to_string()),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +398,168 @@ mod tests {
         assert_eq!(restored.preferred_microphone, expected.preferred_microphone);
         set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
         let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn settings_microphone_ui_state_prefers_the_saved_microphone_when_available() {
+        let settings = AppSettings {
+            preferred_microphone: Some(SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            )),
+            ..AppSettings::default()
+        };
+        let inventory = MicrophoneInventory::from_devices(vec![
+            MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            ),
+            MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.pci-built-in-00.analog-stereo",
+                "Built-in Audio",
+            ),
+        ]);
+
+        let state = microphone_ui_state(
+            &settings,
+            &inventory,
+            Some(Ok(InputLevelSample::from_pcm_samples(&[0, 14_745]))),
+        );
+
+        assert_eq!(state.selected_microphone, settings.preferred_microphone);
+        assert_eq!(state.devices.len(), 2);
+        assert_eq!(state.status_label, "Sound check looks healthy.");
+        assert!(state.recovery_message.is_none());
+        assert!(state.level_fraction > 0.4);
+    }
+
+    #[test]
+    fn settings_microphone_ui_state_falls_back_to_the_first_available_microphone() {
+        let inventory = MicrophoneInventory::from_devices(vec![
+            MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            ),
+            MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.pci-built-in-00.analog-stereo",
+                "Built-in Audio",
+            ),
+        ]);
+
+        let state = microphone_ui_state(
+            &AppSettings {
+                preferred_microphone: Some(SelectedMicrophone::new(
+                    "pipewire:node.name=alsa_input.missing-device",
+                    "Missing Device",
+                )),
+                ..AppSettings::default()
+            },
+            &inventory,
+            None,
+        );
+
+        assert_eq!(
+            state.selected_microphone,
+            Some(SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            ))
+        );
+        assert_eq!(state.status_label, "Run a sound check.");
+        assert_eq!(state.recovery_message, None);
+    }
+
+    #[test]
+    fn settings_microphone_ui_state_surfaces_no_signal_recovery_copy() {
+        let inventory = MicrophoneInventory::from_devices(vec![MicrophoneDevice::new(
+            "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+            "Blue Yeti",
+        )]);
+
+        let state = microphone_ui_state(
+            &AppSettings::default(),
+            &inventory,
+            Some(Err(InputLevelError::new(
+                InputLevelErrorKind::NoSignal,
+                "Pepper X did not detect microphone signal",
+            ))),
+        );
+
+        assert_eq!(state.level_fraction, 0.0);
+        assert_eq!(state.status_label, "No sound detected.");
+        assert_eq!(
+            state.recovery_message.as_deref(),
+            Some("Check the selected microphone and speak again.")
+        );
+    }
+
+    #[test]
+    fn settings_microphone_selection_prefers_saved_device_when_inventory_contains_it() {
+        let settings = AppSettings {
+            preferred_microphone: Some(SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            )),
+            ..AppSettings::default()
+        };
+        let inventory = pepperx_audio::MicrophoneInventory::from_devices(vec![
+            pepperx_audio::MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.pci-0000_00_1f.3.analog-stereo",
+                "Built-in Audio",
+            ),
+            pepperx_audio::MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            ),
+        ]);
+
+        let selection = settings.microphone_selection_state(&inventory);
+
+        assert_eq!(
+            selection.available_microphones,
+            vec![
+                SelectedMicrophone::new(
+                    "pipewire:node.name=alsa_input.pci-0000_00_1f.3.analog-stereo",
+                    "Built-in Audio",
+                ),
+                SelectedMicrophone::new(
+                    "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                    "Blue Yeti",
+                ),
+            ]
+        );
+        assert_eq!(selection.selected_microphone, settings.preferred_microphone);
+    }
+
+    #[test]
+    fn settings_microphone_selection_falls_back_to_first_live_device_when_saved_one_is_missing() {
+        let settings = AppSettings {
+            preferred_microphone: Some(SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-missing-00.analog-stereo",
+                "Missing Mic",
+            )),
+            ..AppSettings::default()
+        };
+        let inventory = pepperx_audio::MicrophoneInventory::from_devices(vec![
+            pepperx_audio::MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            ),
+            pepperx_audio::MicrophoneDevice::new(
+                "pipewire:node.name=alsa_input.usb-rode-00.analog-stereo",
+                "Rode NT-USB",
+            ),
+        ]);
+
+        let selection = settings.microphone_selection_state(&inventory);
+
+        assert_eq!(
+            selection.selected_microphone,
+            Some(SelectedMicrophone::new(
+                "pipewire:node.name=alsa_input.usb-blue-yeti-00.analog-stereo",
+                "Blue Yeti",
+            ))
+        );
     }
 
     #[test]
