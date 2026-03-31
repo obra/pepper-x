@@ -255,7 +255,9 @@ fn install_command_pump(
 #[cfg(test)]
 mod app_shell {
     use super::*;
-    use crate::app_model::{initial_surface, AppModel, InitialSurface, SetupIssue, SetupState};
+    use crate::app_model::{
+        initial_surface, AppModel, InitialSurface, ModelBootstrapSummary, SetupIssue, SetupState,
+    };
     use crate::cli::{run_with, StartupMode};
     use crate::settings::{AppSetupState, RecordingTriggerMode};
     use crate::startup_policy::StartupLaunchPolicy;
@@ -282,6 +284,10 @@ mod app_shell {
             supporting_context_text: None,
             ocr_text: None,
         }
+    }
+
+    fn ready_model_bootstrap() -> ModelBootstrapSummary {
+        ModelBootstrapSummary::ready()
     }
 
     #[test]
@@ -342,7 +348,7 @@ mod app_shell {
     fn app_shell_first_run_prefers_setup_surface_over_settings() {
         let settings = AppSettings::default();
         let setup_state = AppSetupState::default();
-        let app_model = AppModel::for_startup(
+        let app_model = AppModel::for_startup_with_model_bootstrap(
             &setup_state,
             &settings,
             &Capabilities {
@@ -350,6 +356,7 @@ mod app_shell {
                 extension_connected: false,
                 version: "0.1.0".into(),
             },
+            ready_model_bootstrap(),
         );
 
         assert_eq!(
@@ -370,16 +377,18 @@ mod app_shell {
     fn app_shell_first_run_blocks_modifier_only_try_it_when_capture_is_unavailable() {
         let settings = AppSettings::default();
         let setup_state = AppSetupState::default();
-        let app_model = AppModel::for_startup(
+        let app_model = AppModel::for_startup_with_model_bootstrap(
             &setup_state,
             &settings,
             &Capabilities::shell_default("0.1.0"),
+            ready_model_bootstrap(),
         );
 
         assert_eq!(app_model.setup_state(), SetupState::SetupRequired);
         assert_eq!(app_model.requested_surface(), InitialSurface::Setup);
-        assert_eq!(app_model.setup_checklist().completed_items(), 0);
+        assert_eq!(app_model.setup_checklist().completed_items(), 1);
         assert!(!app_model.setup_checklist().trigger_ready);
+        assert!(app_model.setup_checklist().asr_ready);
     }
 
     #[test]
@@ -388,7 +397,7 @@ mod app_shell {
         let setup_state = AppSetupState {
             onboarding_completed: true,
         };
-        let app_model = AppModel::for_startup(
+        let app_model = AppModel::for_startup_with_model_bootstrap(
             &setup_state,
             &settings,
             &Capabilities {
@@ -396,6 +405,7 @@ mod app_shell {
                 extension_connected: false,
                 version: "0.1.0".into(),
             },
+            ready_model_bootstrap(),
         );
 
         assert_eq!(
@@ -424,10 +434,11 @@ mod app_shell {
         let setup_state = AppSetupState {
             onboarding_completed: true,
         };
-        let app_model = AppModel::for_startup(
+        let app_model = AppModel::for_startup_with_model_bootstrap(
             &setup_state,
             &settings,
             &Capabilities::shell_default("0.1.0"),
+            ready_model_bootstrap(),
         );
 
         assert_eq!(
@@ -449,10 +460,11 @@ mod app_shell {
         let setup_state = AppSetupState {
             onboarding_completed: true,
         };
-        let app_model = AppModel::for_startup(
+        let app_model = AppModel::for_startup_with_model_bootstrap(
             &setup_state,
             &settings,
             &Capabilities::shell_default("0.1.0"),
+            ready_model_bootstrap(),
         );
 
         assert_eq!(app_model.setup_state(), SetupState::Ready);

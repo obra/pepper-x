@@ -5,9 +5,10 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::app_model::{AppModel, RuntimeReadinessSummary, SetupChecklist};
+use crate::app_model::{AppModel, ModelBootstrapSummary, RuntimeReadinessSummary, SetupChecklist};
 use crate::settings::AppSetupState;
 use crate::transcript_log::state_root;
+use pepperx_models::{bootstrap_default_models_with_progress, default_cache_root};
 use pepperx_platform_gnome::atspi::{
     modifier_capture_probe, ProbeStatus, RecoveryAction, RecoveryProbe,
 };
@@ -144,6 +145,7 @@ impl OnboardingWizard {
         &self,
         checklist: &SetupChecklist,
         readiness: &RuntimeReadinessSummary,
+        model_bootstrap: &ModelBootstrapSummary,
     ) -> OnboardingStepView {
         match self.progress.current_step {
             OnboardingStep::Welcome => OnboardingStepView {
@@ -154,11 +156,18 @@ impl OnboardingWizard {
             },
             OnboardingStep::Setup => {
                 let mut body = format!(
-                    "Setup checklist: {}/{} complete\n\nRecording trigger available: {}\n\nContinue unlocks once the trigger path is ready.",
+                    "Setup checklist: {}/{} complete\n\nRecording trigger available: {}\nASR model ready: {}\nCleanup model ready: {}\n\n{}",
                     checklist.completed_items(),
                     checklist.total_items(),
-                    if checklist.trigger_ready { "Yes" } else { "No" }
+                    if checklist.trigger_ready { "Yes" } else { "No" },
+                    if checklist.asr_ready { "Yes" } else { "No" },
+                    if checklist.cleanup_ready { "Yes" } else { "No" },
+                    model_bootstrap.progress_label,
                 );
+                if let Some(failure_message) = model_bootstrap.failure_message.as_deref() {
+                    body.push_str("\n");
+                    body.push_str(failure_message);
+                }
                 if let Some(recovery_body) = step_recovery_body(checklist, readiness) {
                     body.push_str("\n\n");
                     body.push_str(&recovery_body);
@@ -168,13 +177,14 @@ impl OnboardingWizard {
                     title: "Finish setup",
                     body,
                     progress_label: "Step 2 of 4".into(),
-                    primary_label: "Continue",
+                    primary_label: setup_primary_label(model_bootstrap),
                 }
             }
             OnboardingStep::TryIt => {
                 let mut body = format!(
-                    "Hold Pepper X's trigger and speak once the trigger path is ready.\n\nTrigger ready: {}\n\nFor this first GNOME parity slice, you can continue manually after confirming the path is available.",
-                    if checklist.trigger_ready { "Yes" } else { "No" }
+                    "Hold Pepper X's trigger and speak once the trigger path is ready.\n\nTrigger ready: {}\nASR model ready: {}\n\nFor this first GNOME parity slice, you can continue manually after confirming the path is available.",
+                    if checklist.trigger_ready { "Yes" } else { "No" },
+                    if checklist.asr_ready { "Yes" } else { "No" },
                 );
                 if let Some(recovery_body) = step_recovery_body(checklist, readiness) {
                     body.push_str("\n\n");
@@ -233,6 +243,16 @@ fn step_recovery_body(
     }
 }
 
+fn setup_primary_label(model_bootstrap: &ModelBootstrapSummary) -> &'static str {
+    if !model_bootstrap.asr_ready && model_bootstrap.retry_available {
+        "Retry model download"
+    } else if !model_bootstrap.asr_ready {
+        "Waiting for model download"
+    } else {
+        "Continue"
+    }
+}
+
 fn extension_connection_probe(readiness: &RuntimeReadinessSummary) -> RecoveryProbe {
     if readiness.extension_connected {
         RecoveryProbe {
@@ -267,6 +287,10 @@ pub fn show_onboarding_window(
     let readiness_provider: Rc<dyn Fn() -> RuntimeReadinessSummary> = {
         let app_model = app_model.clone();
         Rc::new(move || app_model.readiness.clone())
+    };
+    let model_bootstrap_provider: Rc<dyn Fn() -> ModelBootstrapSummary> = {
+        let app_model = app_model.clone();
+        Rc::new(move || app_model.model_bootstrap_summary())
     };
 
     let progress_label = gtk::Label::builder()
@@ -307,6 +331,7 @@ pub fn show_onboarding_window(
         let wizard = wizard.clone();
         let checklist_provider = checklist_provider.clone();
         let readiness_provider = readiness_provider.clone();
+        let model_bootstrap_provider = model_bootstrap_provider.clone();
         let progress_label = progress_label.clone();
         let title_label = title_label.clone();
         let body_label = body_label.clone();
@@ -314,19 +339,29 @@ pub fn show_onboarding_window(
         Rc::new(move || {
             let checklist = checklist_provider();
             let readiness = readiness_provider();
-            let step_view = wizard.borrow().step_view(&checklist, &readiness);
+            let model_bootstrap = model_bootstrap_provider();
+            let step_view = wizard
+                .borrow()
+                .step_view(&checklist, &readiness, &model_bootstrap);
             progress_label.set_label(&step_view.progress_label);
             title_label.set_label(step_view.title);
             body_label.set_label(&step_view.body);
             primary_button.set_label(step_view.primary_label);
-            primary_button.set_sensitive(wizard.borrow().can_continue(&checklist));
+            primary_button.set_sensitive(primary_button_enabled(
+                &wizard.borrow(),
+                &checklist,
+                &model_bootstrap,
+            ));
         })
     };
+    ensure_default_model_bootstrap(&app_model);
     refresh_ui();
 
     primary_button.connect_clicked({
+        let app_model = app_model.clone();
         let wizard = wizard.clone();
         let checklist_provider = checklist_provider.clone();
+        let model_bootstrap_provider = model_bootstrap_provider.clone();
         let refresh_ui = refresh_ui.clone();
         let window = window.clone();
         let on_complete = Rc::new(on_complete);
@@ -342,6 +377,17 @@ pub fn show_onboarding_window(
                 return;
             }
 
+            let model_bootstrap = model_bootstrap_provider();
+            if wizard.current_step() == OnboardingStep::Setup
+                && !model_bootstrap.asr_ready
+                && model_bootstrap.retry_available
+            {
+                drop(wizard);
+                ensure_default_model_bootstrap(&app_model);
+                refresh_ui();
+                return;
+            }
+
             if wizard.advance(&checklist_provider()).is_ok() {
                 let _ = wizard.save_progress();
                 drop(wizard);
@@ -354,6 +400,33 @@ pub fn show_onboarding_window(
     window
 }
 
+fn primary_button_enabled(
+    wizard: &OnboardingWizard,
+    checklist: &SetupChecklist,
+    model_bootstrap: &ModelBootstrapSummary,
+) -> bool {
+    if wizard.current_step() == OnboardingStep::Setup
+        && !model_bootstrap.asr_ready
+        && model_bootstrap.retry_available
+    {
+        return true;
+    }
+
+    wizard.can_continue(checklist)
+}
+
+fn ensure_default_model_bootstrap(app_model: &AppModel) {
+    let summary = app_model.model_bootstrap_summary();
+    if summary.asr_ready || summary.retry_available {
+        return;
+    }
+
+    let cache_root = default_cache_root();
+    let _ = bootstrap_default_models_with_progress(&cache_root, |progress| {
+        app_model.set_model_bootstrap_summary(ModelBootstrapSummary::from_progress(progress));
+    });
+}
+
 fn onboarding_progress_path() -> PathBuf {
     state_root().join(ONBOARDING_PROGRESS_FILE_NAME)
 }
@@ -361,7 +434,7 @@ fn onboarding_progress_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_model::RuntimeReadinessSummary;
+    use crate::app_model::{ModelBootstrapSummary, RuntimeReadinessSummary};
     use crate::transcript_log::env_lock;
     use std::ffi::OsString;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -530,6 +603,7 @@ mod tests {
                 modifier_capture_supported: false,
                 ..ready_runtime()
             },
+            &ModelBootstrapSummary::ready(),
         );
 
         assert!(step_view.body.contains("Modifier-only trigger unavailable"));
@@ -555,9 +629,64 @@ mod tests {
                 extension_connected: false,
                 ..ready_runtime()
             },
+            &ModelBootstrapSummary::ready(),
         );
 
         assert!(step_view.body.contains("GNOME extension disconnected"));
         assert!(step_view.body.contains("Recheck"));
+    }
+
+    #[test]
+    fn onboarding_model_requires_asr_readiness_even_if_cleanup_is_still_bootstrapping() {
+        let mut wizard = OnboardingWizard::resume(
+            &AppSetupState::default(),
+            OnboardingProgress::default(),
+            true,
+        );
+        wizard
+            .advance(&ready_checklist())
+            .expect("welcome should advance to setup");
+
+        let step_view = wizard.step_view(
+            &SetupChecklist::with_model_readiness(true, false, false),
+            &ready_runtime(),
+            &ModelBootstrapSummary {
+                asr_ready: false,
+                cleanup_ready: false,
+                progress_label: "Downloading default ASR model".into(),
+                failure_message: None,
+                retry_available: false,
+            },
+        );
+
+        assert!(step_view.body.contains("Downloading default ASR model"));
+        assert_eq!(step_view.primary_label, "Waiting for model download");
+    }
+
+    #[test]
+    fn onboarding_model_failed_download_surfaces_retry_without_restarting() {
+        let mut wizard = OnboardingWizard::resume(
+            &AppSetupState::default(),
+            OnboardingProgress::default(),
+            true,
+        );
+        wizard
+            .advance(&ready_checklist())
+            .expect("welcome should advance to setup");
+
+        let step_view = wizard.step_view(
+            &SetupChecklist::with_model_readiness(true, false, true),
+            &ready_runtime(),
+            &ModelBootstrapSummary {
+                asr_ready: false,
+                cleanup_ready: true,
+                progress_label: "Default ASR download failed".into(),
+                failure_message: Some("network down".into()),
+                retry_available: true,
+            },
+        );
+
+        assert!(step_view.body.contains("network down"));
+        assert_eq!(step_view.primary_label, "Retry model download");
     }
 }

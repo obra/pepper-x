@@ -7,7 +7,9 @@ use bzip2::read::BzDecoder;
 use tar::Archive;
 
 use crate::cache::{model_install_dir, model_readiness, ModelInventoryEntry, ModelReadiness};
-use crate::catalog::{CatalogModel, DownloadArtifact, DownloadArtifactKind};
+use crate::catalog::{
+    default_model, CatalogModel, DownloadArtifact, DownloadArtifactKind, ModelKind,
+};
 
 const DOWNLOADS_DIR_NAME: &str = ".downloads";
 const PARTIAL_INSTALL_SUFFIX: &str = ".partial";
@@ -15,6 +17,30 @@ const PARTIAL_INSTALL_SUFFIX: &str = ".partial";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadSupport {
     pub supported: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapModelPhase {
+    Pending,
+    Downloading,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapModelState {
+    pub model_id: String,
+    pub kind: ModelKind,
+    pub phase: BootstrapModelPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapProgress {
+    pub total_models: usize,
+    pub completed_models: usize,
+    pub current_model_id: Option<String>,
+    pub failure_message: Option<String>,
+    pub model_states: Vec<BootstrapModelState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +120,79 @@ pub fn bootstrap_model(
     bootstrap_model_with_fetch(model, cache_root, |url, target_path| {
         download_to_path(url, target_path)
     })
+}
+
+pub fn bootstrap_default_models_with_progress<P>(
+    cache_root: &Path,
+    progress: P,
+) -> Result<BootstrapProgress, BootstrapError>
+where
+    P: FnMut(&BootstrapProgress),
+{
+    bootstrap_default_models_with_fetch(cache_root, progress, |url, target_path| {
+        download_to_path(url, target_path)
+    })
+}
+
+pub fn bootstrap_default_models_with_fetch<P, F, E>(
+    cache_root: &Path,
+    mut progress: P,
+    mut fetch: F,
+) -> Result<BootstrapProgress, BootstrapError>
+where
+    P: FnMut(&BootstrapProgress),
+    F: FnMut(&str, &Path) -> Result<(), E>,
+    E: fmt::Display,
+{
+    let models = [
+        default_model(ModelKind::Asr),
+        default_model(ModelKind::Cleanup),
+    ];
+    let mut snapshot = bootstrap_progress_snapshot(&models, cache_root);
+    progress(&snapshot);
+
+    for model in models {
+        let Some(index) = snapshot
+            .model_states
+            .iter()
+            .position(|state| state.model_id == model.id)
+        else {
+            continue;
+        };
+
+        if snapshot.model_states[index].phase == BootstrapModelPhase::Ready {
+            continue;
+        }
+
+        snapshot.current_model_id = Some(model.id.into());
+        snapshot.failure_message = None;
+        snapshot.model_states[index].phase = BootstrapModelPhase::Downloading;
+        progress(&snapshot);
+
+        match bootstrap_model_with_fetch(model, cache_root, |url, target_path| {
+            fetch(url, target_path)
+        }) {
+            Ok(_) => {
+                snapshot.model_states[index].phase = BootstrapModelPhase::Ready;
+                snapshot.completed_models = snapshot
+                    .model_states
+                    .iter()
+                    .filter(|state| state.phase == BootstrapModelPhase::Ready)
+                    .count();
+                snapshot.current_model_id = None;
+                progress(&snapshot);
+            }
+            Err(error) => {
+                snapshot.model_states[index].phase = BootstrapModelPhase::Failed;
+                snapshot.failure_message = Some(error.to_string());
+                snapshot.current_model_id = None;
+                progress(&snapshot);
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(snapshot)
 }
 
 pub fn bootstrap_model_with_fetch<F, E>(
@@ -202,6 +301,35 @@ where
         target_path: target_path.to_path_buf(),
         message: error.to_string(),
     })
+}
+
+fn bootstrap_progress_snapshot(models: &[&CatalogModel], cache_root: &Path) -> BootstrapProgress {
+    let model_states = models
+        .iter()
+        .map(|model| {
+            let readiness = model_readiness(model, cache_root);
+            BootstrapModelState {
+                model_id: model.id.into(),
+                kind: model.kind,
+                phase: if readiness.is_ready {
+                    BootstrapModelPhase::Ready
+                } else {
+                    BootstrapModelPhase::Pending
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    BootstrapProgress {
+        total_models: model_states.len(),
+        completed_models: model_states
+            .iter()
+            .filter(|state| state.phase == BootstrapModelPhase::Ready)
+            .count(),
+        current_model_id: None,
+        failure_message: None,
+        model_states,
+    }
 }
 
 fn extract_tar_bz2(
@@ -446,6 +574,101 @@ mod tests {
         let readiness = model_readiness(model, &root);
 
         assert!(readiness.is_ready);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn download_bootstrap_emits_progress_and_failure_states_for_default_models() {
+        let root = temp_root("default-bootstrap-progress");
+        let progress_snapshots = Rc::new(RefCell::new(Vec::new()));
+        let progress_snapshots_clone = progress_snapshots.clone();
+
+        let error = bootstrap_default_models_with_fetch(
+            &root,
+            move |progress| {
+                progress_snapshots_clone.borrow_mut().push(progress.clone());
+            },
+            move |_url, target_path| {
+                if target_path.to_string_lossy().contains(".gguf") {
+                    if let Some(parent) = target_path.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    std::fs::write(target_path, b"GGUFcleanup").unwrap();
+                    Ok::<(), std::io::Error>(())
+                } else {
+                    Err(std::io::Error::other("network down"))
+                }
+            },
+        )
+        .unwrap_err();
+
+        let snapshots = progress_snapshots.borrow();
+        assert!(matches!(error, BootstrapError::Fetch { .. }));
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.model_states.iter().any(|state| {
+                state.phase == BootstrapModelPhase::Downloading
+                    && state.model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
+            })));
+        assert!(snapshots
+            .last()
+            .expect("failed bootstrap should emit a final snapshot")
+            .model_states
+            .iter()
+            .any(|state| {
+                state.phase == BootstrapModelPhase::Failed
+                    && state.model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
+            }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn download_bootstrap_retry_succeeds_without_restarting_the_plan() {
+        let root = temp_root("default-bootstrap-retry");
+        let attempts = Rc::new(RefCell::new(0usize));
+
+        let first_attempt = bootstrap_default_models_with_fetch(&root, |_| {}, {
+            let attempts = attempts.clone();
+            move |_url, target_path| {
+                *attempts.borrow_mut() += 1;
+                if *attempts.borrow() == 1 {
+                    return Err(std::io::Error::other("transient fetch failure"));
+                }
+                if let Some(parent) = target_path.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                if target_path.to_string_lossy().contains(".gguf") {
+                    write_cleanup_model_file(target_path);
+                } else {
+                    write_asr_bundle(target_path);
+                }
+                Ok::<(), std::io::Error>(())
+            }
+        });
+        assert!(first_attempt.is_err());
+
+        let final_progress = bootstrap_default_models_with_fetch(
+            &root,
+            |_| {},
+            move |_url, target_path| {
+                if let Some(parent) = target_path.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                if target_path.to_string_lossy().contains(".gguf") {
+                    write_cleanup_model_file(target_path);
+                } else {
+                    write_asr_bundle(target_path);
+                }
+                Ok::<(), std::io::Error>(())
+            },
+        )
+        .expect("retry should finish the default bootstrap plan");
+
+        assert_eq!(final_progress.completed_models, final_progress.total_models);
+        assert!(final_progress
+            .model_states
+            .iter()
+            .all(|state| state.phase == BootstrapModelPhase::Ready));
         let _ = std::fs::remove_dir_all(root);
     }
 

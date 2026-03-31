@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::{supported_models, CatalogModel, InstallLayout, ModelKind};
+use crate::catalog::{default_model, supported_models, CatalogModel, InstallLayout, ModelKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelReadiness {
@@ -16,6 +16,12 @@ pub struct ModelInventoryEntry {
     pub id: String,
     pub kind: ModelKind,
     pub readiness: ModelReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultBootstrapReadiness {
+    pub asr: ModelReadiness,
+    pub cleanup: ModelReadiness,
 }
 
 pub fn default_cache_root() -> PathBuf {
@@ -86,6 +92,13 @@ pub fn model_inventory(cache_root: &Path) -> Vec<ModelInventoryEntry> {
             readiness: model_readiness(model, cache_root),
         })
         .collect()
+}
+
+pub fn default_bootstrap_readiness(cache_root: &Path) -> DefaultBootstrapReadiness {
+    DefaultBootstrapReadiness {
+        asr: model_readiness(default_model(ModelKind::Asr), cache_root),
+        cleanup: model_readiness(default_model(ModelKind::Cleanup), cache_root),
+    }
 }
 
 fn nonempty_env_path(name: &str) -> Option<PathBuf> {

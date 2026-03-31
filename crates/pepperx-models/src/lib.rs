@@ -3,15 +3,17 @@ mod catalog;
 mod download;
 
 pub use cache::{
-    default_cache_root, model_install_dir, model_readiness, ModelInventoryEntry, ModelReadiness,
+    default_bootstrap_readiness, default_cache_root, model_install_dir, model_readiness,
+    DefaultBootstrapReadiness, ModelInventoryEntry, ModelReadiness,
 };
 pub use catalog::{
     catalog_model, default_model, supported_models, CatalogModel, DownloadArtifact,
     DownloadArtifactKind, InstallLayout, ModelKind,
 };
 pub use download::{
-    bootstrap_model, bootstrap_model_with_fetch, download_support, model_inventory, BootstrapError,
-    DownloadSupport,
+    bootstrap_default_models_with_fetch, bootstrap_default_models_with_progress, bootstrap_model,
+    bootstrap_model_with_fetch, download_support, model_inventory, BootstrapError,
+    BootstrapModelPhase, BootstrapModelState, BootstrapProgress, DownloadSupport,
 };
 
 #[cfg(test)]

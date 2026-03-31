@@ -94,18 +94,42 @@ pub fn settings_form_sections(summary: &str) -> Vec<SettingsFormSection> {
         .lines()
         .filter_map(parse_summary_row)
         .collect::<Vec<_>>();
+    let mut configuration_rows = Vec::new();
+    let mut model_rows = Vec::new();
 
-    vec![SettingsFormSection {
-        title: "Configuration".into(),
-        rows: if rows.is_empty() {
-            vec![SettingsFormRow {
+    for row in rows {
+        if row.title.starts_with("ASR model ") || row.title.starts_with("Cleanup model ") {
+            model_rows.push(row);
+        } else {
+            configuration_rows.push(row);
+        }
+    }
+
+    if configuration_rows.is_empty() && model_rows.is_empty() {
+        return vec![SettingsFormSection {
+            title: "Configuration".into(),
+            rows: vec![SettingsFormRow {
                 title: "Status".into(),
                 value: "Settings summary unavailable.".into(),
-            }]
-        } else {
-            rows
-        },
-    }]
+            }],
+        }];
+    }
+
+    let mut sections = Vec::new();
+    if !configuration_rows.is_empty() {
+        sections.push(SettingsFormSection {
+            title: "Configuration".into(),
+            rows: configuration_rows,
+        });
+    }
+    if !model_rows.is_empty() {
+        sections.push(SettingsFormSection {
+            title: "Model bootstrap".into(),
+            rows: model_rows,
+        });
+    }
+
+    sections
 }
 
 fn parse_summary_row(line: &str) -> Option<SettingsFormRow> {

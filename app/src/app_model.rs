@@ -1,6 +1,7 @@
 use crate::settings::{AppSettings, AppSetupState, RecordingTriggerMode};
 use crate::startup_policy::StartupLaunchPolicy;
 use pepperx_ipc::Capabilities;
+use pepperx_models::{default_bootstrap_readiness, default_cache_root, BootstrapProgress};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -14,12 +15,24 @@ pub struct RuntimeReadinessSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupChecklist {
     pub trigger_ready: bool,
+    pub asr_ready: bool,
+    pub cleanup_ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelBootstrapSummary {
+    pub asr_ready: bool,
+    pub cleanup_ready: bool,
+    pub progress_label: String,
+    pub failure_message: Option<String>,
+    pub retry_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppModel {
     setup_state: Rc<RefCell<SetupState>>,
     trigger_ready: bool,
+    model_bootstrap: Rc<RefCell<ModelBootstrapSummary>>,
     pub readiness: RuntimeReadinessSummary,
 }
 
@@ -47,8 +60,22 @@ impl AppModel {
         settings: &AppSettings,
         capabilities: &Capabilities,
     ) -> Self {
+        let cache_root = default_cache_root();
+        let model_bootstrap = ModelBootstrapSummary::from_default_readiness(
+            &default_bootstrap_readiness(&cache_root),
+        );
+        Self::for_startup_with_model_bootstrap(setup_state, settings, capabilities, model_bootstrap)
+    }
+
+    pub fn for_startup_with_model_bootstrap(
+        setup_state: &AppSetupState,
+        settings: &AppSettings,
+        capabilities: &Capabilities,
+        model_bootstrap: ModelBootstrapSummary,
+    ) -> Self {
         Self {
             trigger_ready: trigger_path_ready(settings, capabilities.modifier_only_supported),
+            model_bootstrap: Rc::new(RefCell::new(model_bootstrap)),
             setup_state: Rc::new(RefCell::new(startup_setup_state(
                 setup_state,
                 settings,
@@ -101,11 +128,24 @@ impl AppModel {
     }
 
     pub fn setup_checklist(&self) -> SetupChecklist {
-        SetupChecklist::new(self.trigger_ready)
+        let model_bootstrap = self.model_bootstrap_summary();
+        SetupChecklist::with_model_readiness(
+            self.trigger_ready,
+            model_bootstrap.asr_ready,
+            model_bootstrap.cleanup_ready,
+        )
     }
 
     pub fn mark_onboarding_completed(&self) {
         *self.setup_state.borrow_mut() = SetupState::Ready;
+    }
+
+    pub fn model_bootstrap_summary(&self) -> ModelBootstrapSummary {
+        self.model_bootstrap.borrow().clone()
+    }
+
+    pub fn set_model_bootstrap_summary(&self, summary: ModelBootstrapSummary) {
+        *self.model_bootstrap.borrow_mut() = summary;
     }
 }
 
@@ -121,19 +161,95 @@ impl RuntimeReadinessSummary {
 
 impl SetupChecklist {
     pub fn new(trigger_ready: bool) -> Self {
-        Self { trigger_ready }
+        Self {
+            trigger_ready,
+            asr_ready: true,
+            cleanup_ready: true,
+        }
+    }
+
+    pub fn with_model_readiness(trigger_ready: bool, asr_ready: bool, cleanup_ready: bool) -> Self {
+        Self {
+            trigger_ready,
+            asr_ready,
+            cleanup_ready,
+        }
     }
 
     pub fn completed_items(&self) -> usize {
-        usize::from(self.trigger_ready)
+        usize::from(self.trigger_ready) + usize::from(self.asr_ready)
     }
 
     pub fn total_items(&self) -> usize {
-        1
+        2
     }
 
     pub fn is_complete(&self) -> bool {
-        self.trigger_ready
+        self.trigger_ready && self.asr_ready
+    }
+}
+
+impl ModelBootstrapSummary {
+    pub fn ready() -> Self {
+        Self {
+            asr_ready: true,
+            cleanup_ready: true,
+            progress_label: "Default models ready".into(),
+            failure_message: None,
+            retry_available: false,
+        }
+    }
+
+    pub fn from_default_readiness(readiness: &pepperx_models::DefaultBootstrapReadiness) -> Self {
+        let progress_label = if !readiness.asr.is_ready {
+            "Default ASR model download pending".into()
+        } else if !readiness.cleanup.is_ready {
+            "Cleanup model download pending".into()
+        } else {
+            "Default models ready".into()
+        };
+
+        Self {
+            asr_ready: readiness.asr.is_ready,
+            cleanup_ready: readiness.cleanup.is_ready,
+            progress_label,
+            failure_message: None,
+            retry_available: false,
+        }
+    }
+
+    pub fn from_progress(progress: &BootstrapProgress) -> Self {
+        let asr_ready = progress.model_states.iter().any(|state| {
+            state.kind == pepperx_models::ModelKind::Asr
+                && state.phase == pepperx_models::BootstrapModelPhase::Ready
+        });
+        let cleanup_ready = progress.model_states.iter().any(|state| {
+            state.kind == pepperx_models::ModelKind::Cleanup
+                && state.phase == pepperx_models::BootstrapModelPhase::Ready
+        });
+        let progress_label = if let Some(model_id) = progress.current_model_id.as_deref() {
+            format!("Downloading {model_id}")
+        } else if let Some(failure_message) = progress.failure_message.as_deref() {
+            if asr_ready {
+                format!("Cleanup bootstrap failed: {failure_message}")
+            } else {
+                "Default ASR download failed".into()
+            }
+        } else if asr_ready && cleanup_ready {
+            "Default models ready".into()
+        } else if asr_ready {
+            "Cleanup model bootstrapping in background".into()
+        } else {
+            "Downloading default ASR model".into()
+        };
+
+        Self {
+            asr_ready,
+            cleanup_ready,
+            progress_label,
+            failure_message: progress.failure_message.clone(),
+            retry_available: progress.failure_message.is_some(),
+        }
     }
 }
 
