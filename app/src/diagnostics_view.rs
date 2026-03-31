@@ -106,6 +106,20 @@ fn parse_card(line: &str) -> Option<DiagnosticsCard> {
         .map(|(title, body)| (title.trim(), body.trim()))
         .unwrap_or((trimmed, ""));
 
+    if title == "Modifier-only capture supported" && body == "false" {
+        return Some(DiagnosticsCard {
+            title: "Modifier-only trigger unavailable".into(),
+            body: "Pepper X could not confirm GNOME modifier capture.\nActions: Retry, Open GNOME integration docs, Recheck".into(),
+        });
+    }
+
+    if title == "Extension connected" && body == "false" {
+        return Some(DiagnosticsCard {
+            title: "GNOME extension disconnected".into(),
+            body: "Pepper X can still run, but the shell indicator is not connected.\nActions: Recheck".into(),
+        });
+    }
+
     Some(DiagnosticsCard {
         title: title.into(),
         body: body.into(),

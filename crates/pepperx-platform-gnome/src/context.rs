@@ -6,7 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use zbus::blocking::Connection;
 
-use crate::atspi::{inspect_focused_target, FocusedTargetSnapshot, FriendlyInsertRunError};
+use crate::atspi::{
+    inspect_focused_target, FocusedTargetSnapshot, FriendlyInsertRunError, ProbeStatus,
+    RecoveryAction, RecoveryProbe,
+};
 use crate::screenshot::{
     introspect_interface_xml, screenshot_window, validate_interface_xml, ScreenshotContractError,
     ScreenshotWindowError,
@@ -72,6 +75,37 @@ pub fn capture_supporting_context() -> Result<SupportingContext, ContextCaptureE
     );
     let _ = std::fs::remove_file(&screenshot_path);
     result
+}
+
+pub(crate) fn context_capture_probe(
+    snapshot: Option<&FocusedTargetSnapshot>,
+    screenshot_contract_xml: &str,
+) -> RecoveryProbe {
+    let atspi_context = supporting_context_from_atspi(snapshot, None, SUPPORTING_CONTEXT_LIMIT);
+    if atspi_context.supporting_context_text.is_some() {
+        return RecoveryProbe {
+            status: ProbeStatus::Ready,
+            summary: "Focused app exposes cleanup context through AT-SPI.".into(),
+            actions: Vec::new(),
+        };
+    }
+
+    match validate_interface_xml(screenshot_contract_xml) {
+        Ok(()) => RecoveryProbe {
+            status: ProbeStatus::Ready,
+            summary: "OCR fallback is available for cleanup context.".into(),
+            actions: Vec::new(),
+        },
+        Err(_) => RecoveryProbe {
+            status: ProbeStatus::RetryableFailure,
+            summary: "Pepper X cannot capture cleanup context because GNOME Shell screenshot support is unavailable.".into(),
+            actions: vec![
+                RecoveryAction::Retry,
+                RecoveryAction::OpenGnomeIntegrationDocs,
+                RecoveryAction::Recheck,
+            ],
+        },
+    }
 }
 
 pub(crate) fn supporting_context_from_atspi(
@@ -171,9 +205,10 @@ fn temporary_screenshot_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_supporting_context_with, supporting_context_from_atspi, ContextCaptureError,
+        capture_supporting_context_with, context_capture_probe, supporting_context_from_atspi,
+        ContextCaptureError,
     };
-    use crate::atspi::FocusedTargetSnapshot;
+    use crate::atspi::{FocusedTargetSnapshot, ProbeStatus, RecoveryAction};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -310,5 +345,70 @@ mod tests {
         assert_eq!(context.supporting_context_text.as_deref(), Some("ocr fall"));
         assert_eq!(context.ocr_text.as_deref(), Some("ocr fall"));
         assert!(context.used_ocr);
+    }
+
+    #[test]
+    fn context_recovery_reports_retryable_status_when_screenshot_contract_is_missing() {
+        let snapshot = FocusedTargetSnapshot {
+            application_id: "org.gnome.Terminal".into(),
+            application_name: "Terminal".into(),
+            target_class: "terminal",
+            is_editable: true,
+            supports_text: false,
+            supports_editable_text: false,
+            supports_caret: false,
+            before_text: None,
+            caret_offset: None,
+        };
+
+        let probe = context_capture_probe(Some(&snapshot), "<node/>");
+
+        assert_eq!(probe.status, ProbeStatus::RetryableFailure);
+        assert!(probe.summary.contains("cleanup context"));
+        assert_eq!(
+            probe.actions,
+            vec![
+                RecoveryAction::Retry,
+                RecoveryAction::OpenGnomeIntegrationDocs,
+                RecoveryAction::Recheck,
+            ]
+        );
+    }
+
+    #[test]
+    fn context_recovery_reports_ready_status_when_ocr_fallback_is_available() {
+        let snapshot = FocusedTargetSnapshot {
+            application_id: "org.gnome.Terminal".into(),
+            application_name: "Terminal".into(),
+            target_class: "terminal",
+            is_editable: true,
+            supports_text: false,
+            supports_editable_text: false,
+            supports_caret: false,
+            before_text: None,
+            caret_offset: None,
+        };
+
+        let probe = context_capture_probe(
+            Some(&snapshot),
+            r#"
+                <node>
+                  <interface name="org.gnome.Shell.Screenshot">
+                    <method name="ScreenshotWindow">
+                      <arg name="include_frame" type="b" direction="in"/>
+                      <arg name="include_cursor" type="b" direction="in"/>
+                      <arg name="flash" type="b" direction="in"/>
+                      <arg name="filename" type="s" direction="in"/>
+                      <arg name="success" type="b" direction="out"/>
+                      <arg name="filename_used" type="s" direction="out"/>
+                    </method>
+                  </interface>
+                </node>
+            "#,
+        );
+
+        assert_eq!(probe.status, ProbeStatus::Ready);
+        assert!(probe.summary.contains("OCR fallback"));
+        assert!(probe.actions.is_empty());
     }
 }

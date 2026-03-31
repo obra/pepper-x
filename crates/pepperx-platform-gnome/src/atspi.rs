@@ -20,6 +20,57 @@ pub const CLIPBOARD_PASTE_BACKEND_NAME: &str = "clipboard-paste";
 pub const UINPUT_TEXT_BACKEND_NAME: &str = "uinput-text";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeStatus {
+    Ready,
+    Degraded,
+    RetryableFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    Retry,
+    OpenGnomeIntegrationDocs,
+    Recheck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryProbe {
+    pub status: ProbeStatus,
+    pub summary: String,
+    pub actions: Vec<RecoveryAction>,
+}
+
+impl RecoveryAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Retry => "Retry",
+            Self::OpenGnomeIntegrationDocs => "Open GNOME integration docs",
+            Self::Recheck => "Recheck",
+        }
+    }
+}
+
+pub fn modifier_capture_probe(modifier_capture_supported: bool) -> RecoveryProbe {
+    if modifier_capture_supported {
+        RecoveryProbe {
+            status: ProbeStatus::Ready,
+            summary: "Modifier-only trigger is ready.".into(),
+            actions: Vec::new(),
+        }
+    } else {
+        RecoveryProbe {
+            status: ProbeStatus::RetryableFailure,
+            summary: "Modifier-only trigger unavailable.".into(),
+            actions: vec![
+                RecoveryAction::Retry,
+                RecoveryAction::OpenGnomeIntegrationDocs,
+                RecoveryAction::Recheck,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FriendlyInsertBackend {
     EditableText,
     StringInjection,

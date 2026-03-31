@@ -8,6 +8,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {createPepperXClient} from './ipc.js';
 
 const LOG_PREFIX = '[Pepper X]';
+const STATUS_LABEL_PREFIX = 'Status';
 const SETTINGS_ACTION_LABEL = 'Open Pepper X Settings';
 const HISTORY_ACTION_LABEL = 'Open Pepper X History';
 
@@ -22,6 +23,12 @@ class PepperXIndicator extends PanelMenu.Button {
         });
         this.add_child(icon);
 
+        this._statusItem = new PopupMenu.PopupMenuItem(`${STATUS_LABEL_PREFIX}: Connecting`, {
+            reactive: false,
+            can_focus: false,
+        });
+        this.menu.addMenuItem(this._statusItem);
+
         const settingsItem = new PopupMenu.PopupMenuItem(SETTINGS_ACTION_LABEL);
         settingsItem.connect('activate', () => onOpenSettings());
         this.menu.addMenuItem(settingsItem);
@@ -29,6 +36,10 @@ class PepperXIndicator extends PanelMenu.Button {
         const historyItem = new PopupMenu.PopupMenuItem(HISTORY_ACTION_LABEL);
         historyItem.connect('activate', () => onOpenHistory());
         this.menu.addMenuItem(historyItem);
+    }
+
+    setStatus(statusLabel) {
+        this._statusItem.label.text = `${STATUS_LABEL_PREFIX}: ${statusLabel}`;
     }
 });
 
@@ -76,13 +87,20 @@ export default class PepperXExtension extends Extension {
     _bootstrapConnection() {
         try {
             const reply = this._client.ping();
-            if (reply !== 'pong')
+            if (reply !== 'pong') {
+                this._indicator?.setStatus('Degraded');
                 console.error(`${LOG_PREFIX} Unexpected Ping response: ${reply}`);
+            }
 
             this._capabilities = this._client.getCapabilities();
+            if (!this._capabilities.modifierOnlySupported)
+                this._indicator?.setStatus('Degraded');
+            else
+                this._indicator?.setStatus('Ready');
             console.log(`${LOG_PREFIX} capabilities`, this._capabilities);
         } catch (error) {
             this._capabilities = null;
+            this._indicator?.setStatus('Disconnected');
             console.error(`${LOG_PREFIX} Failed to reach Pepper X app service`, error);
         }
     }

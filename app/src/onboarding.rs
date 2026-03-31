@@ -5,9 +5,12 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::app_model::{AppModel, SetupChecklist};
+use crate::app_model::{AppModel, RuntimeReadinessSummary, SetupChecklist};
 use crate::settings::AppSetupState;
 use crate::transcript_log::state_root;
+use pepperx_platform_gnome::atspi::{
+    modifier_capture_probe, ProbeStatus, RecoveryAction, RecoveryProbe,
+};
 
 const ONBOARDING_PROGRESS_FILE_NAME: &str = "onboarding.json";
 
@@ -137,7 +140,11 @@ impl OnboardingWizard {
         }
     }
 
-    fn step_view(&self, checklist: &SetupChecklist) -> OnboardingStepView {
+    fn step_view(
+        &self,
+        checklist: &SetupChecklist,
+        readiness: &RuntimeReadinessSummary,
+    ) -> OnboardingStepView {
         match self.progress.current_step {
             OnboardingStep::Welcome => OnboardingStepView {
                 title: "Welcome to Pepper X",
@@ -145,32 +152,99 @@ impl OnboardingWizard {
                 progress_label: "Step 1 of 4".into(),
                 primary_label: "Get Started",
             },
-            OnboardingStep::Setup => OnboardingStepView {
-                title: "Finish setup",
-                body: format!(
+            OnboardingStep::Setup => {
+                let mut body = format!(
                     "Setup checklist: {}/{} complete\n\nRecording trigger available: {}\n\nContinue unlocks once the trigger path is ready.",
                     checklist.completed_items(),
                     checklist.total_items(),
                     if checklist.trigger_ready { "Yes" } else { "No" }
-                ),
-                progress_label: "Step 2 of 4".into(),
-                primary_label: "Continue",
-            },
-            OnboardingStep::TryIt => OnboardingStepView {
-                title: "Try it",
-                body: format!(
+                );
+                if let Some(recovery_body) = step_recovery_body(checklist, readiness) {
+                    body.push_str("\n\n");
+                    body.push_str(&recovery_body);
+                }
+
+                OnboardingStepView {
+                    title: "Finish setup",
+                    body,
+                    progress_label: "Step 2 of 4".into(),
+                    primary_label: "Continue",
+                }
+            }
+            OnboardingStep::TryIt => {
+                let mut body = format!(
                     "Hold Pepper X's trigger and speak once the trigger path is ready.\n\nTrigger ready: {}\n\nFor this first GNOME parity slice, you can continue manually after confirming the path is available.",
                     if checklist.trigger_ready { "Yes" } else { "No" }
-                ),
-                progress_label: "Step 3 of 4".into(),
-                primary_label: "Continue",
-            },
+                );
+                if let Some(recovery_body) = step_recovery_body(checklist, readiness) {
+                    body.push_str("\n\n");
+                    body.push_str(&recovery_body);
+                }
+
+                OnboardingStepView {
+                    title: "Try it",
+                    body,
+                    progress_label: "Step 3 of 4".into(),
+                    primary_label: "Continue",
+                }
+            }
             OnboardingStep::Done => OnboardingStepView {
                 title: "Pepper X is ready",
                 body: "Setup is complete. Pepper X can stay in the background and wait for hold-to-talk.".into(),
                 progress_label: "Step 4 of 4".into(),
                 primary_label: "Start Using Pepper X",
             },
+        }
+    }
+}
+
+fn step_recovery_body(
+    checklist: &SetupChecklist,
+    readiness: &RuntimeReadinessSummary,
+) -> Option<String> {
+    let probes = [
+        modifier_capture_probe(checklist.trigger_ready),
+        extension_connection_probe(readiness),
+    ];
+    let mut sections = Vec::new();
+
+    for probe in probes {
+        if probe.status == ProbeStatus::Ready {
+            continue;
+        }
+
+        let action_labels = probe
+            .actions
+            .iter()
+            .map(|action| action.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if action_labels.is_empty() {
+            sections.push(probe.summary);
+        } else {
+            sections.push(format!("{}\nActions: {action_labels}", probe.summary));
+        }
+    }
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n"))
+    }
+}
+
+fn extension_connection_probe(readiness: &RuntimeReadinessSummary) -> RecoveryProbe {
+    if readiness.extension_connected {
+        RecoveryProbe {
+            status: ProbeStatus::Ready,
+            summary: "GNOME extension connected.".into(),
+            actions: Vec::new(),
+        }
+    } else {
+        RecoveryProbe {
+            status: ProbeStatus::Degraded,
+            summary: "GNOME extension disconnected.".into(),
+            actions: vec![RecoveryAction::Recheck],
         }
     }
 }
@@ -189,6 +263,10 @@ pub fn show_onboarding_window(
     let checklist_provider: Rc<dyn Fn() -> SetupChecklist> = {
         let app_model = app_model.clone();
         Rc::new(move || app_model.setup_checklist())
+    };
+    let readiness_provider: Rc<dyn Fn() -> RuntimeReadinessSummary> = {
+        let app_model = app_model.clone();
+        Rc::new(move || app_model.readiness.clone())
     };
 
     let progress_label = gtk::Label::builder()
@@ -228,13 +306,15 @@ pub fn show_onboarding_window(
     let refresh_ui: Rc<dyn Fn()> = {
         let wizard = wizard.clone();
         let checklist_provider = checklist_provider.clone();
+        let readiness_provider = readiness_provider.clone();
         let progress_label = progress_label.clone();
         let title_label = title_label.clone();
         let body_label = body_label.clone();
         let primary_button = primary_button.clone();
         Rc::new(move || {
             let checklist = checklist_provider();
-            let step_view = wizard.borrow().step_view(&checklist);
+            let readiness = readiness_provider();
+            let step_view = wizard.borrow().step_view(&checklist, &readiness);
             progress_label.set_label(&step_view.progress_label);
             title_label.set_label(step_view.title);
             body_label.set_label(&step_view.body);
@@ -281,12 +361,21 @@ fn onboarding_progress_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_model::RuntimeReadinessSummary;
     use crate::transcript_log::env_lock;
     use std::ffi::OsString;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn ready_checklist() -> SetupChecklist {
         SetupChecklist::new(true)
+    }
+
+    fn ready_runtime() -> RuntimeReadinessSummary {
+        RuntimeReadinessSummary {
+            modifier_capture_supported: true,
+            extension_connected: true,
+            service_version: "0.1.0".into(),
+        }
     }
 
     fn set_or_remove_env_var(name: &str, value: Option<OsString>) {
@@ -422,5 +511,53 @@ mod tests {
         assert_eq!(restored, expected);
         set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
         let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn onboarding_recovery_modifier_capture_exposes_user_facing_recovery_state() {
+        let mut wizard = OnboardingWizard::resume(
+            &AppSetupState::default(),
+            OnboardingProgress::default(),
+            true,
+        );
+        wizard
+            .advance(&ready_checklist())
+            .expect("welcome should advance to setup");
+
+        let step_view = wizard.step_view(
+            &SetupChecklist::new(false),
+            &RuntimeReadinessSummary {
+                modifier_capture_supported: false,
+                ..ready_runtime()
+            },
+        );
+
+        assert!(step_view.body.contains("Modifier-only trigger unavailable"));
+        assert!(step_view.body.contains("Retry"));
+        assert!(step_view.body.contains("Open GNOME integration docs"));
+        assert!(step_view.body.contains("Recheck"));
+    }
+
+    #[test]
+    fn onboarding_recovery_extension_disconnect_exposes_user_facing_status() {
+        let mut wizard = OnboardingWizard::resume(
+            &AppSetupState::default(),
+            OnboardingProgress::default(),
+            true,
+        );
+        wizard
+            .advance(&ready_checklist())
+            .expect("welcome should advance to setup");
+
+        let step_view = wizard.step_view(
+            &ready_checklist(),
+            &RuntimeReadinessSummary {
+                extension_connected: false,
+                ..ready_runtime()
+            },
+        );
+
+        assert!(step_view.body.contains("GNOME extension disconnected"));
+        assert!(step_view.body.contains("Recheck"));
     }
 }
