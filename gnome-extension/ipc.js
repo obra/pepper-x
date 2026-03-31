@@ -20,6 +20,10 @@ const INTERFACE_XML = `<node>
       <arg name="extension_connected" type="b" direction="out" />
       <arg name="version" type="s" direction="out" />
     </method>
+    <method name="GetLiveStatus">
+      <arg name="state" type="s" direction="out" />
+      <arg name="detail" type="s" direction="out" />
+    </method>
   </interface>
 </node>`;
 
@@ -60,6 +64,12 @@ export class PepperXClient {
             extensionConnected,
             version,
         };
+    }
+
+    getLiveStatus() {
+        const [state, detail] = this._proxy.GetLiveStatusSync();
+
+        return {state, detail};
     }
 }
 

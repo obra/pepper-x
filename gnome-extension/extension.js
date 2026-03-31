@@ -1,3 +1,4 @@
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -11,6 +12,7 @@ const LOG_PREFIX = '[Pepper X]';
 const STATUS_LABEL_PREFIX = 'Status';
 const SETTINGS_ACTION_LABEL = 'Open Pepper X Settings';
 const HISTORY_ACTION_LABEL = 'Open Pepper X History';
+const STATUS_POLL_INTERVAL_MS = 500;
 
 const PepperXIndicator = GObject.registerClass(
 class PepperXIndicator extends PanelMenu.Button {
@@ -53,9 +55,14 @@ export default class PepperXExtension extends Extension {
 
         Main.panel.addToStatusArea(this.uuid, this._indicator);
         this._bootstrapConnection();
+        this._startStatusPolling();
     }
 
     disable() {
+        if (this._statusPollId) {
+            GLib.source_remove(this._statusPollId);
+            this._statusPollId = 0;
+        }
         this._indicator?.destroy();
         this._indicator = null;
         this._client = null;
@@ -93,15 +100,63 @@ export default class PepperXExtension extends Extension {
             }
 
             this._capabilities = this._client.getCapabilities();
-            if (!this._capabilities.modifierOnlySupported)
-                this._indicator?.setStatus('Degraded');
-            else
-                this._indicator?.setStatus('Ready');
+            this._refreshIndicatorState();
             console.log(`${LOG_PREFIX} capabilities`, this._capabilities);
         } catch (error) {
             this._capabilities = null;
-            this._indicator?.setStatus('Disconnected');
+            this._setDisconnectedState();
             console.error(`${LOG_PREFIX} Failed to reach Pepper X app service`, error);
+        }
+    }
+
+    _startStatusPolling() {
+        this._statusPollId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            STATUS_POLL_INTERVAL_MS,
+            () => {
+                this._refreshIndicatorState();
+                return GLib.SOURCE_CONTINUE;
+            }
+        );
+    }
+
+    _refreshIndicatorState() {
+        if (!this._client) {
+            return;
+        }
+
+        try {
+            if (!this._capabilities)
+                this._capabilities = this._client.getCapabilities();
+
+            const liveStatus = this._client.getLiveStatus();
+            this._indicator?.setStatus(this._statusLabelFor(liveStatus));
+        } catch (error) {
+            this._capabilities = null;
+            this._setDisconnectedState();
+            console.error(`${LOG_PREFIX} Failed to refresh Pepper X status`, error);
+        }
+    }
+
+    _setDisconnectedState() {
+        this._indicator?.setStatus('Disconnected');
+    }
+
+    _statusLabelFor(liveStatus) {
+        switch (liveStatus.state) {
+        case 'recording':
+            return 'Recording...';
+        case 'transcribing':
+            return 'Transcribing...';
+        case 'cleaning-up':
+            return 'Cleaning up...';
+        case 'clipboard-fallback':
+            return liveStatus.detail || 'Copied to clipboard';
+        case 'error':
+            return liveStatus.detail || 'Error';
+        case 'ready':
+        default:
+            return this._capabilities?.modifierOnlySupported ? 'Ready' : 'Degraded';
         }
     }
 }

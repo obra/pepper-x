@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+use pepperx_ipc::SharedLiveStatus;
 use pepperx_models::{
     bootstrap_model, catalog_model, default_cache_root, model_inventory, ModelInventoryEntry,
     ModelKind,
@@ -369,7 +370,7 @@ fn record_and_transcribe<F>(
 where
     F: FnOnce() -> std::io::Result<()>,
 {
-    let runtime = LiveRuntimeHandle::new(selected_microphone);
+    let runtime = LiveRuntimeHandle::new(selected_microphone, SharedLiveStatus::new());
     runtime
         .record_and_transcribe(TriggerSource::ShellAction, wait_for_stop)
         .map_err(|error| TranscriptionRunError::LiveRecording(error.to_string()))

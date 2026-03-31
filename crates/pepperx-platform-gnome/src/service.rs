@@ -1,5 +1,6 @@
 use pepperx_ipc::{
-    parse_trigger_source, Capabilities, CapabilityPayload, OBJECT_PATH, SERVICE_NAME,
+    parse_trigger_source, Capabilities, CapabilityPayload, LiveStatus, LiveStatusPayload,
+    SharedLiveStatus, OBJECT_PATH, SERVICE_NAME,
 };
 use pepperx_session::TriggerSource;
 use std::sync::{mpsc::Sender, Arc, Mutex};
@@ -36,8 +37,9 @@ impl ServiceHandle {
     pub fn start(
         command_sender: Sender<AppCommand>,
         recording_runtime: Arc<dyn RecordingRuntime>,
+        live_status: SharedLiveStatus,
     ) -> zbus::Result<Self> {
-        let service = PepperXService::new(command_sender, recording_runtime);
+        let service = PepperXService::new(command_sender, recording_runtime, live_status);
         let connection = ConnectionBuilder::session()?
             .name(SERVICE_NAME)?
             .serve_at(OBJECT_PATH, service.clone())?
@@ -67,6 +69,7 @@ impl std::fmt::Debug for PepperXService {
 
 struct ServiceState {
     recording_runtime: Arc<dyn RecordingRuntime>,
+    live_status: SharedLiveStatus,
     capabilities: Mutex<Capabilities>,
     command_sender: Sender<AppCommand>,
 }
@@ -75,10 +78,12 @@ impl PepperXService {
     pub fn new(
         command_sender: Sender<AppCommand>,
         recording_runtime: Arc<dyn RecordingRuntime>,
+        live_status: SharedLiveStatus,
     ) -> Self {
         Self {
             state: Arc::new(ServiceState {
                 recording_runtime,
+                live_status,
                 capabilities: Mutex::new(Capabilities::shell_default(env!("CARGO_PKG_VERSION"))),
                 command_sender,
             }),
@@ -125,6 +130,10 @@ impl PepperXService {
             .lock()
             .expect("capabilities lock poisoned")
             .clone()
+    }
+
+    fn live_status(&self) -> LiveStatus {
+        self.state.live_status.snapshot()
     }
 
     fn send_command(&self, command: AppCommand) -> fdo::Result<()> {
@@ -195,6 +204,10 @@ impl PepperXService {
 
     fn get_capabilities(&self) -> CapabilityPayload {
         self.capabilities().to_dbus_payload()
+    }
+
+    fn get_live_status(&self) -> LiveStatusPayload {
+        self.live_status().to_dbus_payload()
     }
 }
 
@@ -285,7 +298,7 @@ mod service_contract {
     fn service_contract_routes_start_and_stop_recording_through_runtime() {
         let (sender, _receiver) = channel();
         let runtime = FakeRecordingRuntime::succeeding();
-        let service = PepperXService::new(sender, runtime.clone());
+        let service = PepperXService::new(sender, runtime.clone(), SharedLiveStatus::new());
 
         assert_eq!(service.ping(), "pong");
         service
@@ -305,7 +318,11 @@ mod service_contract {
     #[test]
     fn service_contract_routes_shell_actions() {
         let (sender, receiver) = channel();
-        let service = PepperXService::new(sender, FakeRecordingRuntime::succeeding());
+        let service = PepperXService::new(
+            sender,
+            FakeRecordingRuntime::succeeding(),
+            SharedLiveStatus::new(),
+        );
 
         service.show_settings().unwrap();
         assert_eq!(receiver.recv().unwrap(), AppCommand::ShowSettings);
@@ -317,7 +334,11 @@ mod service_contract {
     #[test]
     fn service_contract_reports_capabilities() {
         let (sender, _receiver) = channel();
-        let service = PepperXService::new(sender, FakeRecordingRuntime::succeeding());
+        let service = PepperXService::new(
+            sender,
+            FakeRecordingRuntime::succeeding(),
+            SharedLiveStatus::new(),
+        );
 
         assert_eq!(
             Capabilities::from_dbus_payload(service.get_capabilities()),
@@ -333,7 +354,7 @@ mod service_contract {
     fn service_contract_ignores_duplicate_start_requests() {
         let (sender, _receiver) = channel();
         let runtime = FakeRecordingRuntime::duplicate_start();
-        let service = PepperXService::new(sender, runtime.clone());
+        let service = PepperXService::new(sender, runtime.clone(), SharedLiveStatus::new());
 
         service
             .start_recording(pepperx_ipc::trigger_source_name(
@@ -356,7 +377,7 @@ mod service_contract {
     fn service_contract_ignores_duplicate_stop_requests() {
         let (sender, _receiver) = channel();
         let runtime = FakeRecordingRuntime::duplicate_stop();
-        let service = PepperXService::new(sender, runtime.clone());
+        let service = PepperXService::new(sender, runtime.clone(), SharedLiveStatus::new());
 
         service
             .start_recording(pepperx_ipc::trigger_source_name(
@@ -372,7 +393,11 @@ mod service_contract {
     #[test]
     fn service_contract_surfaces_runtime_failures() {
         let (sender, _receiver) = channel();
-        let service = PepperXService::new(sender, FakeRecordingRuntime::failing_stop("boom"));
+        let service = PepperXService::new(
+            sender,
+            FakeRecordingRuntime::failing_stop("boom"),
+            SharedLiveStatus::new(),
+        );
 
         let error = service.stop_recording().unwrap_err();
 
@@ -380,5 +405,67 @@ mod service_contract {
             fdo::Error::Failed(message) => assert!(message.contains("boom")),
             other => panic!("expected failed D-Bus error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn service_contract_reports_live_status_separately_from_capabilities() {
+        let (sender, _receiver) = channel();
+        let live_status = SharedLiveStatus::new();
+        live_status.replace(LiveStatus::transcribing());
+        let service = PepperXService::new(
+            sender,
+            FakeRecordingRuntime::succeeding(),
+            live_status.clone(),
+        );
+
+        assert_eq!(
+            LiveStatus::from_dbus_payload(service.get_live_status()),
+            LiveStatus::transcribing()
+        );
+        assert_eq!(
+            Capabilities::from_dbus_payload(service.get_capabilities()),
+            Capabilities {
+                modifier_only_supported: false,
+                extension_connected: false,
+                version: "0.1.0".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn service_contract_runtime_error_does_not_mutate_capabilities() {
+        let (sender, _receiver) = channel();
+        let live_status = SharedLiveStatus::new();
+        live_status.replace(LiveStatus::error("boom"));
+        let service = PepperXService::new(
+            sender,
+            FakeRecordingRuntime::succeeding(),
+            live_status.clone(),
+        );
+
+        assert_eq!(
+            LiveStatus::from_dbus_payload(service.get_live_status()),
+            LiveStatus::error("boom")
+        );
+        assert!(!Capabilities::from_dbus_payload(service.get_capabilities()).extension_connected);
+    }
+
+    #[test]
+    fn service_contract_clipboard_fallback_status_roundtrips() {
+        let (sender, _receiver) = channel();
+        let live_status = SharedLiveStatus::new();
+        live_status.replace(LiveStatus::clipboard_fallback(
+            "Copied to clipboard. Press Ctrl+V to paste.",
+        ));
+        let service = PepperXService::new(
+            sender,
+            FakeRecordingRuntime::succeeding(),
+            live_status.clone(),
+        );
+
+        assert_eq!(
+            LiveStatus::from_dbus_payload(service.get_live_status()),
+            LiveStatus::clipboard_fallback("Copied to clipboard. Press Ctrl+V to paste.")
+        );
     }
 }

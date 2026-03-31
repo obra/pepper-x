@@ -1,5 +1,6 @@
 use adw::prelude::*;
 use gtk::Orientation;
+use pepperx_ipc::LiveStatus;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -7,6 +8,7 @@ use std::rc::Rc;
 use crate::app_model::RuntimeReadinessSummary;
 use crate::diagnostics_view::DiagnosticsView;
 use crate::history_view::build_history_browser;
+use crate::overlay::OverlayView;
 use crate::settings_view::SettingsView;
 use pepperx_models::{ModelInventoryEntry, ModelKind};
 
@@ -67,11 +69,13 @@ pub struct MainWindow {
     app: adw::Application,
     content_providers: Rc<WindowContentProviders>,
     rerun_archived_run: Option<Rc<dyn Fn(String)>>,
+    live_status: Rc<RefCell<LiveStatus>>,
     state: Rc<RefCell<Option<WindowState>>>,
 }
 
 struct WindowState {
     window: adw::ApplicationWindow,
+    overlay_view: OverlayView,
     shell_stack: gtk::Stack,
     settings_view: SettingsView,
     diagnostics_view: DiagnosticsView,
@@ -145,6 +149,7 @@ impl MainWindow {
                 diagnostics_summary: Rc::new(diagnostics_summary),
             }),
             rerun_archived_run: None,
+            live_status: Rc::new(RefCell::new(LiveStatus::ready())),
             state: Rc::new(RefCell::new(None)),
         }
     }
@@ -180,6 +185,14 @@ impl MainWindow {
         self.present_page(WindowPage::History);
     }
 
+    pub fn set_live_status(&self, status: &LiveStatus) {
+        *self.live_status.borrow_mut() = status.clone();
+
+        if let Some(state) = self.state.borrow().as_ref() {
+            state.overlay_view.set_live_status(status);
+        }
+    }
+
     fn current_content_snapshot(&self) -> WindowContentSnapshot {
         self.content_providers.snapshot()
     }
@@ -205,6 +218,8 @@ impl MainWindow {
             .vexpand(true)
             .transition_type(gtk::StackTransitionType::Crossfade)
             .build();
+        let overlay_view = OverlayView::new();
+        overlay_view.set_live_status(&self.live_status.borrow());
         let settings_view = SettingsView::new(snapshot.settings_summary.as_str());
         shell_stack.add_titled(settings_view.widget(), Some(SETTINGS_PAGE_NAME), "Settings");
         let history_container = gtk::Box::new(Orientation::Vertical, 0);
@@ -235,7 +250,10 @@ impl MainWindow {
 
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header_bar);
-        view.set_content(Some(&shell_stack));
+        let content = gtk::Box::new(Orientation::Vertical, 0);
+        content.append(overlay_view.widget());
+        content.append(&shell_stack);
+        view.set_content(Some(&content));
 
         let window = adw::ApplicationWindow::builder()
             .application(&self.app)
@@ -247,6 +265,7 @@ impl MainWindow {
 
         *self.state.borrow_mut() = Some(WindowState {
             window,
+            overlay_view,
             shell_stack,
             settings_view,
             diagnostics_view,

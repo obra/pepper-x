@@ -1,4 +1,5 @@
 use adw::prelude::*;
+use pepperx_ipc::SharedLiveStatus;
 use pepperx_models::{default_cache_root, model_inventory};
 use pepperx_platform_gnome::{
     atspi::ModifierCaptureHandle,
@@ -43,8 +44,13 @@ pub fn run() {
     let _background_hold = app.hold();
     let cache_root = default_cache_root();
     let (command_sender, command_receiver) = mpsc::channel();
-    let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))
-        .expect("failed to start GNOME IPC service");
+    let live_status = SharedLiveStatus::new();
+    let service_handle = ServiceHandle::start(
+        command_sender,
+        build_live_runtime(&settings, live_status.clone()),
+        live_status.clone(),
+    )
+    .expect("failed to start GNOME IPC service");
     let service = service_handle.service();
     let _modifier_capture = start_modifier_capture(service.clone());
     let app_model = Rc::new(AppModel::for_startup(
@@ -108,6 +114,7 @@ pub fn run() {
         window.clone(),
         app_model.clone(),
         onboarding_window.clone(),
+        live_status.clone(),
         command_receiver,
     );
     app.connect_activate(move |app| {
@@ -154,8 +161,13 @@ pub fn run() {
 fn run_headless() {
     let settings = AppSettings::load_or_default();
     let (command_sender, command_receiver) = mpsc::channel::<AppCommand>();
-    let service_handle = ServiceHandle::start(command_sender, build_live_runtime(&settings))
-        .expect("failed to start GNOME IPC service");
+    let live_status = SharedLiveStatus::new();
+    let service_handle = ServiceHandle::start(
+        command_sender,
+        build_live_runtime(&settings, live_status.clone()),
+        live_status.clone(),
+    )
+    .expect("failed to start GNOME IPC service");
     let _modifier_capture = start_modifier_capture(service_handle.service());
     let _command_receiver = command_receiver;
     let main_loop = gtk::glib::MainLoop::new(None, false);
@@ -178,9 +190,13 @@ fn load_history_runs_or_empty() -> Vec<ArchivedRun> {
     })
 }
 
-fn build_live_runtime(settings: &AppSettings) -> std::sync::Arc<LiveRuntimeHandle> {
+fn build_live_runtime(
+    settings: &AppSettings,
+    live_status: SharedLiveStatus,
+) -> std::sync::Arc<LiveRuntimeHandle> {
     std::sync::Arc::new(LiveRuntimeHandle::new(
         settings.preferred_microphone.clone(),
+        live_status,
     ))
 }
 
@@ -236,6 +252,7 @@ fn install_command_pump(
     window: MainWindow,
     app_model: Rc<AppModel>,
     onboarding_window: Rc<RefCell<Option<adw::ApplicationWindow>>>,
+    live_status: SharedLiveStatus,
     receiver: Receiver<AppCommand>,
 ) {
     gtk::glib::timeout_add_local(Duration::from_millis(50), move || {
@@ -247,6 +264,8 @@ fn install_command_pump(
                 AppCommand::ShowHistory => window.present_history(),
             }
         }
+
+        window.set_live_status(&live_status.snapshot());
 
         gtk::glib::ControlFlow::Continue
     });

@@ -6,6 +6,7 @@ mod diagnostics_view;
 mod history_store;
 mod history_view;
 mod onboarding;
+mod overlay;
 mod session_runtime;
 mod settings;
 mod settings_view;

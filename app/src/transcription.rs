@@ -9,10 +9,12 @@ use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, Tran
 use pepperx_audio::RecordingArtifact;
 use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 use pepperx_corrections::{learn_correction, CorrectionStore};
+use pepperx_ipc::{LiveStatus, SharedLiveStatus};
 use pepperx_models::{catalog_model, default_cache_root, model_readiness, ModelKind};
 use pepperx_platform_gnome::atspi::{
     insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
-    FriendlyInsertRunError, FRIENDLY_INSERT_BACKEND_NAME, UINPUT_TEXT_BACKEND_NAME,
+    FriendlyInsertRunError, CLIPBOARD_PASTE_BACKEND_NAME, FRIENDLY_INSERT_BACKEND_NAME,
+    UINPUT_TEXT_BACKEND_NAME,
 };
 use pepperx_platform_gnome::context::{capture_supporting_context, SupportingContext};
 use pepperx_session::TriggerSource;
@@ -31,6 +33,11 @@ const DEFAULT_UINPUT_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-uinput-he
 const UINPUT_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
 const UINPUT_HELPER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const DISABLE_CONTEXT_CAPTURE_ENV: &str = "PEPPERX_DISABLE_CONTEXT_CAPTURE";
+const CLIPBOARD_FALLBACK_MESSAGE: &str = "Copied to clipboard. Press Ctrl+V to paste.";
+#[cfg(not(test))]
+const CLIPBOARD_FALLBACK_VISIBILITY: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const CLIPBOARD_FALLBACK_VISIBILITY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct UinputInsertRequest {
@@ -153,20 +160,35 @@ pub fn transcribe_wav_to_log(wav_path: &Path) -> Result<TranscriptEntry, Transcr
     archive_transcription_result(result)
 }
 
-pub fn transcribe_recorded_wav_to_log(
+pub(crate) fn transcribe_recorded_wav_to_log_with_status(
     request: LivePipelineRequest,
+    live_status: SharedLiveStatus,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
+    transcribe_recorded_wav_to_log_with_live_status(request, Some(live_status))
+}
+
+fn transcribe_recorded_wav_to_log_with_live_status(
+    request: LivePipelineRequest,
+    live_status: Option<SharedLiveStatus>,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    if let Some(live_status) = live_status.as_ref() {
+        live_status.replace(LiveStatus::transcribing());
+    }
+
     let settings = AppSettings::load_or_default();
     let prompt_profile = settings.cleanup_prompt_profile.clone();
     let cache_root = default_cache_root();
     let supporting_context = capture_cleanup_context();
-    archive_live_recording_with_cleanup_and_friendly_insert(
+    let result = archive_live_recording_with_cleanup_and_friendly_insert(
         request.recording_artifact().clone(),
         request.trigger_source(),
         transcribe_wav_result,
         Some(prompt_profile.clone()),
         supporting_context.clone(),
         |transcript_text| {
+            if let Some(live_status) = live_status.as_ref() {
+                live_status.replace(LiveStatus::cleaning_up());
+            }
             let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
             let correction_memory_text = load_correction_store().prompt_memory_text();
             run_cleanup(&CleanupRequest {
@@ -192,7 +214,22 @@ pub fn transcribe_recorded_wav_to_log(
                 request_uinput_text_insertion,
             )
         },
-    )
+    );
+
+    match result {
+        Ok(entry) => {
+            if let Some(live_status) = live_status {
+                update_live_status_after_success(&live_status, &entry);
+            }
+            Ok(entry)
+        }
+        Err(error) => {
+            if let Some(live_status) = live_status {
+                live_status.replace(LiveStatus::error(error.to_string()));
+            }
+            Err(error)
+        }
+    }
 }
 
 pub fn transcribe_wav_and_cleanup_to_log(
@@ -767,6 +804,31 @@ fn archive_live_transcription_failure(
     );
     archive_transcript_entry_with_request(failure_entry, runtime_metadata, None, None, None)
         .map(|_| ())
+}
+
+fn update_live_status_after_success(live_status: &SharedLiveStatus, entry: &TranscriptEntry) {
+    let used_clipboard_fallback = entry
+        .insertion
+        .as_ref()
+        .map(|insertion| {
+            insertion.succeeded && insertion.backend_name == CLIPBOARD_PASTE_BACKEND_NAME
+        })
+        .unwrap_or(false);
+
+    if !used_clipboard_fallback {
+        live_status.replace(LiveStatus::ready());
+        return;
+    }
+
+    let clipboard_fallback = LiveStatus::clipboard_fallback(CLIPBOARD_FALLBACK_MESSAGE);
+    live_status.replace(clipboard_fallback.clone());
+    let live_status = live_status.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(CLIPBOARD_FALLBACK_VISIBILITY);
+        if live_status.snapshot() == clipboard_fallback {
+            live_status.replace(LiveStatus::ready());
+        }
+    });
 }
 
 fn describe_asr_error(error: &TranscriptionError) -> String {
@@ -1974,6 +2036,52 @@ mod app_shell {
             None => std::env::remove_var("PEPPERX_STATE_ROOT"),
         }
         let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn live_status_runtime_marks_ready_after_non_clipboard_insert() {
+        let live_status = SharedLiveStatus::new();
+        let mut entry = TranscriptEntry::new(
+            "/tmp/live-status.wav",
+            "hello from pepper x",
+            "sherpa-onnx",
+            MODEL_NAME,
+            Duration::from_millis(42),
+        );
+        entry.insertion = Some(InsertionDiagnostics::succeeded(
+            "atspi-editable-text",
+            "Text Editor",
+        ));
+
+        update_live_status_after_success(&live_status, &entry);
+
+        assert_eq!(live_status.snapshot(), LiveStatus::ready());
+    }
+
+    #[test]
+    fn live_status_runtime_surfaces_clipboard_fallback_then_resets_to_ready() {
+        let live_status = SharedLiveStatus::new();
+        let mut entry = TranscriptEntry::new(
+            "/tmp/live-status.wav",
+            "hello from pepper x",
+            "sherpa-onnx",
+            MODEL_NAME,
+            Duration::from_millis(42),
+        );
+        entry.insertion = Some(InsertionDiagnostics::succeeded(
+            CLIPBOARD_PASTE_BACKEND_NAME,
+            "Firefox",
+        ));
+
+        update_live_status_after_success(&live_status, &entry);
+        assert_eq!(
+            live_status.snapshot(),
+            LiveStatus::clipboard_fallback(CLIPBOARD_FALLBACK_MESSAGE)
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert_eq!(live_status.snapshot(), LiveStatus::ready());
     }
 
     #[test]

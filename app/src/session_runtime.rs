@@ -4,6 +4,7 @@ use pepperx_audio::recording::{
     start_recording, ActiveRecording, RecordingArtifact, RecordingError, RecordingRequest,
 };
 use pepperx_audio::SelectedMicrophone;
+use pepperx_ipc::{LiveStatus, SharedLiveStatus};
 use pepperx_platform_gnome::service::{RecordingRuntime, RecordingRuntimeError};
 use pepperx_session::{RecordingSession, SessionError, SessionState, TriggerSource};
 use std::sync::Mutex;
@@ -12,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::transcript_log::state_root;
 use crate::transcript_log::TranscriptEntry;
 use crate::transcription::{
-    transcribe_recorded_wav_to_log, LivePipelineRequest, TranscriptionRunError,
+    transcribe_recorded_wav_to_log_with_status, LivePipelineRequest, TranscriptionRunError,
 };
 
 pub trait Recorder {
@@ -59,26 +60,33 @@ impl Recorder for PipeWireRecorder {
     }
 }
 
-type LiveSessionRuntime = SessionRuntime<
-    PipeWireRecorder,
-    fn() -> PathBuf,
-    fn(LivePipelineRequest) -> Result<TranscriptEntry, TranscriptionRunError>,
->;
+type LivePipelineTranscriber =
+    Box<dyn FnMut(LivePipelineRequest) -> Result<TranscriptEntry, TranscriptionRunError> + Send>;
+type LiveSessionRuntime =
+    SessionRuntime<PipeWireRecorder, fn() -> PathBuf, LivePipelineTranscriber>;
 
 pub struct LiveRuntimeHandle {
     runtime: Mutex<LiveSessionRuntime>,
     selected_microphone: Option<SelectedMicrophone>,
+    live_status: SharedLiveStatus,
 }
 
 impl LiveRuntimeHandle {
-    pub fn new(selected_microphone: Option<SelectedMicrophone>) -> Self {
+    pub fn new(
+        selected_microphone: Option<SelectedMicrophone>,
+        live_status: SharedLiveStatus,
+    ) -> Self {
+        let transcriber_status = live_status.clone();
         Self {
             runtime: Mutex::new(SessionRuntime::new(
                 PipeWireRecorder::new(),
                 next_live_recording_wav_path,
-                transcribe_recorded_wav_to_log,
+                Box::new(move |request| {
+                    transcribe_recorded_wav_to_log_with_status(request, transcriber_status.clone())
+                }),
             )),
             selected_microphone,
+            live_status,
         }
     }
 
@@ -86,18 +94,18 @@ impl LiveRuntimeHandle {
         &self,
         trigger_source: TriggerSource,
     ) -> Result<(), SessionRuntimeError> {
-        self.runtime
+        let result = self
+            .runtime
             .lock()
             .expect("live runtime lock poisoned")
             .start_recording(trigger_source, self.selected_microphone.clone())
-            .map(|_| ())
-    }
+            .map(|_| ());
 
-    pub fn stop_recording(&self) -> Result<TranscriptEntry, SessionRuntimeError> {
-        self.runtime
-            .lock()
-            .expect("live runtime lock poisoned")
-            .stop_recording()
+        if result.is_ok() {
+            self.live_status.replace(LiveStatus::recording());
+        }
+
+        result
     }
 
     pub fn record_and_transcribe<F>(
@@ -117,6 +125,27 @@ impl LiveRuntimeHandle {
                 wait_for_stop,
             )
     }
+
+    fn stop_recording_in_background(&self) -> Result<(), SessionRuntimeError> {
+        let request = self
+            .runtime
+            .lock()
+            .expect("live runtime lock poisoned")
+            .finish_recording()?;
+        self.live_status.replace(LiveStatus::transcribing());
+        let live_status = self.live_status.clone();
+        std::thread::Builder::new()
+            .name("pepperx-live-pipeline".into())
+            .spawn(move || {
+                if let Err(error) =
+                    transcribe_recorded_wav_to_log_with_status(request, live_status.clone())
+                {
+                    live_status.replace(LiveStatus::error(error.to_string()));
+                }
+            })
+            .map_err(SessionRuntimeError::BackgroundSpawn)?;
+        Ok(())
+    }
 }
 
 impl RecordingRuntime for LiveRuntimeHandle {
@@ -125,9 +154,7 @@ impl RecordingRuntime for LiveRuntimeHandle {
     }
 
     fn stop_recording(&self) -> Result<(), RecordingRuntimeError> {
-        LiveRuntimeHandle::stop_recording(self)
-            .map(|_| ())
-            .map_err(runtime_error)
+        self.stop_recording_in_background().map_err(runtime_error)
     }
 }
 
@@ -137,6 +164,7 @@ pub enum SessionRuntimeError {
     Recording(RecordingError),
     Transcription(TranscriptionRunError),
     WaitForStop(std::io::Error),
+    BackgroundSpawn(std::io::Error),
 }
 
 impl std::fmt::Display for SessionRuntimeError {
@@ -147,6 +175,12 @@ impl std::fmt::Display for SessionRuntimeError {
             Self::Transcription(error) => write!(f, "Pepper X transcription error: {error}"),
             Self::WaitForStop(error) => {
                 write!(f, "Pepper X live stop signal failed: {error}")
+            }
+            Self::BackgroundSpawn(error) => {
+                write!(
+                    f,
+                    "Pepper X failed to start the live pipeline worker: {error}"
+                )
             }
         }
     }
@@ -246,16 +280,18 @@ where
     }
 
     pub fn stop_recording(&mut self) -> Result<TranscriptEntry, SessionRuntimeError> {
+        let request = self.finish_recording()?;
+        Ok((self.transcribe_recorded_wav)(request)?)
+    }
+
+    pub fn finish_recording(&mut self) -> Result<LivePipelineRequest, SessionRuntimeError> {
         let trigger_source = self
             .session
             .active_trigger_source()
             .ok_or(SessionError::NotRecording)?;
         self.session.stop_recording()?;
         let recorded_wav = self.recorder.stop_recording()?;
-        Ok((self.transcribe_recorded_wav)(LivePipelineRequest::new(
-            trigger_source,
-            recorded_wav,
-        ))?)
+        Ok(LivePipelineRequest::new(trigger_source, recorded_wav))
     }
 
     pub fn record_and_transcribe<W>(
