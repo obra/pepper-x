@@ -9,6 +9,7 @@ mod onboarding;
 mod overlay;
 mod session_runtime;
 mod settings;
+mod sound_effects;
 mod settings_view;
 mod startup_policy;
 mod transcript_log;

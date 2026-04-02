@@ -9,7 +9,9 @@ use crate::app_model::{AppModel, ModelBootstrapSummary, RuntimeReadinessSummary,
 use crate::settings::AppSetupState;
 use crate::settings_view::build_microphone_controls;
 use crate::transcript_log::state_root;
-use pepperx_models::{bootstrap_default_models_with_progress, default_cache_root};
+use pepperx_models::{
+    bootstrap_default_models_with_progress, default_cache_root, BootstrapProgress,
+};
 use pepperx_platform_gnome::atspi::{
     modifier_capture_probe, ProbeStatus, RecoveryAction, RecoveryProbe,
 };
@@ -255,7 +257,7 @@ fn setup_primary_label(model_bootstrap: &ModelBootstrapSummary) -> &'static str 
 }
 
 fn extension_connection_probe(readiness: &RuntimeReadinessSummary) -> RecoveryProbe {
-    if readiness.extension_connected {
+    if readiness.extension_connected.get() {
         RecoveryProbe {
             status: ProbeStatus::Ready,
             summary: "GNOME extension connected.".into(),
@@ -360,7 +362,7 @@ pub fn show_onboarding_window(
             ));
         })
     };
-    ensure_default_model_bootstrap(&app_model);
+    ensure_default_model_bootstrap(&app_model, refresh_ui.clone());
     refresh_ui();
 
     primary_button.connect_clicked({
@@ -389,7 +391,7 @@ pub fn show_onboarding_window(
                 && model_bootstrap.retry_available
             {
                 drop(wizard);
-                ensure_default_model_bootstrap(&app_model);
+                ensure_default_model_bootstrap(&app_model, refresh_ui.clone());
                 refresh_ui();
                 return;
             }
@@ -421,15 +423,36 @@ fn primary_button_enabled(
     wizard.can_continue(checklist)
 }
 
-fn ensure_default_model_bootstrap(app_model: &AppModel) {
+fn ensure_default_model_bootstrap(app_model: &AppModel, refresh_ui: Rc<dyn Fn()>) {
     let summary = app_model.model_bootstrap_summary();
     if summary.asr_ready || summary.retry_available {
         return;
     }
 
     let cache_root = default_cache_root();
-    let _ = bootstrap_default_models_with_progress(&cache_root, |progress| {
-        app_model.set_model_bootstrap_summary(ModelBootstrapSummary::from_progress(progress));
+    let (sender, receiver) = std::sync::mpsc::channel::<BootstrapProgress>();
+    std::thread::spawn(move || {
+        let _ = bootstrap_default_models_with_progress(&cache_root, |progress| {
+            let _ = sender.send(progress.clone());
+        });
+    });
+
+    let app_model = app_model.clone();
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+        let mut last_progress = None;
+        while let Ok(progress) = receiver.try_recv() {
+            last_progress = Some(progress);
+        }
+        if let Some(progress) = last_progress {
+            let done = progress.completed_models == progress.total_models
+                || progress.failure_message.is_some();
+            app_model.set_model_bootstrap_summary(ModelBootstrapSummary::from_progress(&progress));
+            refresh_ui();
+            if done {
+                return gtk::glib::ControlFlow::Break;
+            }
+        }
+        gtk::glib::ControlFlow::Continue
     });
 }
 
@@ -452,7 +475,7 @@ mod tests {
     fn ready_runtime() -> RuntimeReadinessSummary {
         RuntimeReadinessSummary {
             modifier_capture_supported: true,
-            extension_connected: true,
+            extension_connected: std::cell::Cell::new(true),
             service_version: "0.1.0".into(),
         }
     }
@@ -632,7 +655,7 @@ mod tests {
         let step_view = wizard.step_view(
             &ready_checklist(),
             &RuntimeReadinessSummary {
-                extension_connected: false,
+                extension_connected: std::cell::Cell::new(false),
                 ..ready_runtime()
             },
             &ModelBootstrapSummary::ready(),

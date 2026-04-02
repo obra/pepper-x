@@ -8,6 +8,7 @@ pub struct OverlayPresentation {
     pub indicator_label: String,
     pub visible: bool,
     pub busy: bool,
+    pub css_class: &'static str,
 }
 
 impl OverlayPresentation {
@@ -19,6 +20,7 @@ impl OverlayPresentation {
                 indicator_label: "Ready".into(),
                 visible: false,
                 busy: false,
+                css_class: "status-ready",
             },
             LiveStatus::Recording => Self {
                 headline: "Recording...".into(),
@@ -26,6 +28,7 @@ impl OverlayPresentation {
                 indicator_label: "Recording".into(),
                 visible: true,
                 busy: true,
+                css_class: "status-recording",
             },
             LiveStatus::Transcribing => Self {
                 headline: "Transcribing...".into(),
@@ -33,6 +36,7 @@ impl OverlayPresentation {
                 indicator_label: "Transcribing".into(),
                 visible: true,
                 busy: true,
+                css_class: "status-working",
             },
             LiveStatus::CleaningUp => Self {
                 headline: "Cleaning up...".into(),
@@ -40,6 +44,7 @@ impl OverlayPresentation {
                 indicator_label: "Cleaning up".into(),
                 visible: true,
                 busy: true,
+                css_class: "status-working",
             },
             LiveStatus::ClipboardFallback(message) => Self {
                 headline: "Copied to clipboard".into(),
@@ -47,6 +52,7 @@ impl OverlayPresentation {
                 indicator_label: "Clipboard fallback".into(),
                 visible: true,
                 busy: false,
+                css_class: "status-success",
             },
             LiveStatus::Error(message) => Self {
                 headline: "Pepper X needs attention".into(),
@@ -54,14 +60,25 @@ impl OverlayPresentation {
                 indicator_label: "Error".into(),
                 visible: true,
                 busy: false,
+                css_class: "status-error",
             },
         }
     }
 }
 
+const STATUS_CSS_CLASSES: &[&str] = &[
+    "status-ready",
+    "status-recording",
+    "status-working",
+    "status-success",
+    "status-error",
+];
+
 #[derive(Clone)]
 pub struct OverlayView {
     root: gtk::Revealer,
+    frame: gtk::Box,
+    status_dot: gtk::Label,
     spinner: gtk::Spinner,
     headline: gtk::Label,
     detail: gtk::Label,
@@ -72,14 +89,21 @@ impl OverlayView {
         let root = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideDown)
             .reveal_child(false)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Start)
             .build();
         let frame = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         frame.add_css_class("card");
         frame.add_css_class("toolbar");
-        frame.set_margin_top(12);
+        frame.set_margin_top(18);
         frame.set_margin_bottom(12);
-        frame.set_margin_start(12);
-        frame.set_margin_end(12);
+        frame.set_margin_start(48);
+        frame.set_margin_end(48);
+
+        let status_dot = gtk::Label::builder()
+            .label("\u{25CF}") // Unicode filled circle
+            .build();
+        status_dot.set_visible(false);
 
         let spinner = gtk::Spinner::new();
         spinner.set_spinning(false);
@@ -87,19 +111,24 @@ impl OverlayView {
 
         let copy_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
         copy_box.set_hexpand(true);
-        let headline = gtk::Label::builder().xalign(0.0).build();
-        headline.add_css_class("heading");
+        let headline = gtk::Label::builder()
+            .xalign(0.0)
+            .build();
+        headline.add_css_class("title-3");
         let detail = gtk::Label::builder().xalign(0.0).wrap(true).build();
         detail.add_css_class("caption");
         copy_box.append(&headline);
         copy_box.append(&detail);
 
+        frame.append(&status_dot);
         frame.append(&spinner);
         frame.append(&copy_box);
         root.set_child(Some(&frame));
 
         Self {
             root,
+            frame,
+            status_dot,
             spinner,
             headline,
             detail,
@@ -118,6 +147,22 @@ impl OverlayView {
         self.detail.set_visible(presentation.detail.is_some());
         self.spinner.set_visible(presentation.busy);
         self.spinner.set_spinning(presentation.busy);
+
+        // Colored status dot: red for recording, green for success, yellow for error
+        let dot_color = match status {
+            LiveStatus::Recording => Some("#e01b24"),       // red
+            LiveStatus::ClipboardFallback(_) => Some("#2ec27e"), // green
+            LiveStatus::Error(_) => Some("#e5a50a"),         // yellow
+            _ => None,
+        };
+        if let Some(color) = dot_color {
+            self.status_dot
+                .set_markup(&format!("<span foreground=\"{color}\">\u{25CF}</span>"));
+            self.status_dot.set_visible(true);
+        } else {
+            self.status_dot.set_visible(false);
+        }
+
         self.root.set_reveal_child(presentation.visible);
     }
 }

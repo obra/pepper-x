@@ -34,7 +34,7 @@ extension_root = pathlib.Path(sys.argv[1])
 metadata = json.loads((extension_root / "metadata.json").read_text())
 
 expected_uuid = "pepperx@obra"
-expected_shell_versions = ["48"]
+expected_shell_versions = ["48", "49", "50"]
 
 if metadata.get("uuid") != expected_uuid:
     raise SystemExit(f"metadata.json uuid must be {expected_uuid!r}")

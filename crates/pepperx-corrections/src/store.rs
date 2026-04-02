@@ -89,6 +89,52 @@ impl CorrectionStore {
         });
     }
 
+    /// Returns preferred transcriptions as a list of display strings (one per entry).
+    pub fn preferred_transcriptions(&self) -> Vec<String> {
+        self.preferred_transcriptions.values().cloned().collect()
+    }
+
+    /// Returns replacement rules formatted as "source -> replacement" strings.
+    pub fn replacement_rules(&self) -> Vec<(String, String)> {
+        self.replacement_rules
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Replaces all preferred transcriptions with the given list.
+    /// Each entry is stored with a lowercased source key equal to its value.
+    pub fn set_all_preferred_transcriptions(&mut self, entries: &[String]) {
+        self.preferred_transcriptions.clear();
+        for entry in entries {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let source = trimmed.to_lowercase();
+            self.apply_event(CorrectionEvent::PreferredTranscription {
+                source,
+                replacement: trimmed.to_string(),
+            });
+        }
+    }
+
+    /// Replaces all replacement rules with the given list of (source, replacement) pairs.
+    pub fn set_all_replacement_rules(&mut self, rules: &[(String, String)]) {
+        self.replacement_rules.clear();
+        for (source, replacement) in rules {
+            let source = source.trim().to_string();
+            let replacement = replacement.trim().to_string();
+            if source.is_empty() || replacement.is_empty() {
+                continue;
+            }
+            self.apply_event(CorrectionEvent::ReplacementRule {
+                source,
+                replacement,
+            });
+        }
+    }
+
     pub fn prompt_memory_text(&self) -> Option<String> {
         if self.preferred_transcriptions.is_empty() && self.replacement_rules.is_empty() {
             return None;
@@ -115,6 +161,53 @@ impl CorrectionStore {
         }
 
         Some(lines.join("\n"))
+    }
+
+    /// Clear the store file and rewrite it with the current in-memory state.
+    /// Call this after using `set_all_preferred_transcriptions` / `set_all_replacement_rules`
+    /// to compact the event log.
+    pub fn rewrite(&mut self) -> io::Result<()> {
+        // Snapshot current state
+        let preferred: Vec<(String, String)> = self
+            .preferred_transcriptions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let rules: Vec<(String, String)> = self
+            .replacement_rules
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // Clear file and in-memory state
+        self.clear()?;
+
+        // Rebuild from snapshot
+        for (source, replacement) in preferred {
+            self.apply_event(CorrectionEvent::PreferredTranscription {
+                source,
+                replacement,
+            });
+        }
+        for (source, replacement) in rules {
+            self.apply_event(CorrectionEvent::ReplacementRule {
+                source,
+                replacement,
+            });
+        }
+
+        self.persist()
+    }
+
+    pub fn clear(&mut self) -> io::Result<()> {
+        let store_path = self.root.join(STORE_FILE_NAME);
+        if store_path.exists() {
+            fs::remove_file(&store_path)?;
+        }
+        self.preferred_transcriptions.clear();
+        self.replacement_rules.clear();
+        self.pending_events.clear();
+        Ok(())
     }
 
     pub fn persist(&mut self) -> io::Result<()> {

@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use pepperx_asr::{transcribe_wav, TranscriptionError, TranscriptionRequest, TranscriptionResult};
+use pepperx_asr::{
+    filter_other_speakers, transcribe_wav, TranscriptionError, TranscriptionRequest,
+    TranscriptionResult,
+};
 use pepperx_audio::RecordingArtifact;
 use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 use pepperx_corrections::{learn_correction, CorrectionStore};
@@ -22,12 +25,12 @@ use pepperx_session::TriggerSource;
 use crate::history_store::{ArchiveWriteRequest, HistoryStore, RunRuntimeMetadata};
 use crate::settings::{corrections_store_path, AppSettings};
 use crate::transcript_log::{
-    nonempty_env_path, state_root, CleanupDiagnostics, InsertionDiagnostics, LearningDiagnostics,
-    TranscriptEntry,
+    nonempty_env_path, state_root, CleanupDiagnostics, DiarizationSummary, InsertionDiagnostics,
+    LearningDiagnostics, TranscriptEntry,
 };
 
 #[cfg(test)]
-const MODEL_NAME: &str = "nemo-parakeet-tdt-0.6b-v2-int8";
+const MODEL_NAME: &str = "nemotron-speech-streaming-en-0.6b";
 const DEFAULT_UINPUT_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-uinput-helper";
 const UINPUT_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
 const UINPUT_HELPER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -60,9 +63,28 @@ pub struct ArchivedRunRerunRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedCleanupRerunRequest {
+    pub run_id: String,
+    pub cleanup_model_id: Option<String>,
+    pub cleanup_prompt_profile: Option<String>,
+    pub custom_prompt_text: Option<String>,
+}
+
+/// Holds a pre-computed streaming transcript that was produced during
+/// recording.  When present, the pipeline skips the batch ASR step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamingTranscript {
+    pub transcript_text: String,
+    pub model_name: String,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LivePipelineRequest {
     recording_artifact: RecordingArtifact,
     trigger_source: TriggerSource,
+    prefetched_context: Option<SupportingContext>,
+    streaming_transcript: Option<StreamingTranscript>,
 }
 
 impl LivePipelineRequest {
@@ -70,7 +92,19 @@ impl LivePipelineRequest {
         Self {
             recording_artifact,
             trigger_source,
+            prefetched_context: None,
+            streaming_transcript: None,
         }
+    }
+
+    pub fn with_prefetched_context(mut self, context: SupportingContext) -> Self {
+        self.prefetched_context = Some(context);
+        self
+    }
+
+    pub fn with_streaming_transcript(mut self, transcript: StreamingTranscript) -> Self {
+        self.streaming_transcript = Some(transcript);
+        self
     }
 
     pub fn recording_artifact(&self) -> &RecordingArtifact {
@@ -79,6 +113,14 @@ impl LivePipelineRequest {
 
     pub fn trigger_source(&self) -> TriggerSource {
         self.trigger_source
+    }
+
+    pub fn take_prefetched_context(&mut self) -> Option<SupportingContext> {
+        self.prefetched_context.take()
+    }
+
+    pub fn take_streaming_transcript(&mut self) -> Option<StreamingTranscript> {
+        self.streaming_transcript.take()
     }
 }
 
@@ -168,32 +210,99 @@ pub(crate) fn transcribe_recorded_wav_to_log_with_status(
 }
 
 fn transcribe_recorded_wav_to_log_with_live_status(
-    request: LivePipelineRequest,
+    mut request: LivePipelineRequest,
     live_status: Option<SharedLiveStatus>,
 ) -> Result<TranscriptEntry, TranscriptionRunError> {
+    use std::time::Instant;
+
+    let pipeline_start = Instant::now();
+    let recording_elapsed = request.recording_artifact().elapsed();
+
     if let Some(live_status) = live_status.as_ref() {
         live_status.replace(LiveStatus::transcribing());
     }
 
+    let transcribe_elapsed = std::cell::Cell::new(Duration::ZERO);
+    let cleanup_elapsed = std::cell::Cell::new(Duration::ZERO);
+    let insert_elapsed = std::cell::Cell::new(Duration::ZERO);
+
     let settings = AppSettings::load_or_default();
+
+    // Speaker filtering: when enabled, run energy-based filtering before
+    // transcription so that only the target speaker's audio reaches the ASR.
+    let speaker_filter_result = if settings.ignore_other_speakers {
+        let original_wav = request.recording_artifact().wav_path().to_path_buf();
+        let filtered_wav = original_wav.with_extension("filtered.wav");
+        match filter_other_speakers(&original_wav, &filtered_wav) {
+            Ok(result) => {
+                if result.filtering_applied {
+                    eprintln!(
+                        "[Pepper X] speaker filter: kept {}/{} segments ({:.1}s -> {:.1}s)",
+                        result.target_speaker_segments,
+                        result.segment_count,
+                        result.original_duration.as_secs_f64(),
+                        result.filtered_duration.as_secs_f64(),
+                    );
+                } else if let Some(reason) = result.fallback_reason.as_deref() {
+                    eprintln!("[Pepper X] speaker filter: fallback ({reason})");
+                }
+                Some(result)
+            }
+            Err(error) => {
+                eprintln!("[Pepper X] speaker filter failed, using full recording: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // If the speaker filter produced a filtered WAV, create an updated
+    // recording artifact pointing at it so the transcription step uses the
+    // filtered audio.
+    let effective_artifact = match speaker_filter_result.as_ref() {
+        Some(result) if result.filtering_applied => {
+            pepperx_audio::RecordingArtifact::new(
+                &result.filtered_wav_path,
+                request.recording_artifact().selected_microphone().cloned(),
+                result.filtered_duration,
+            )
+        }
+        _ => request.recording_artifact().clone(),
+    };
+    // If the recording produced a streaming transcript, extract it before
+    // entering the pipeline so it can be used in place of batch ASR.
+    let streaming_transcript = request.take_streaming_transcript();
+
     let result = if settings.cleanup_enabled {
         let prompt_profile = settings.cleanup_prompt_profile.clone();
         let custom_prompt_text = settings.effective_cleanup_custom_prompt();
         let cache_root = default_cache_root();
-        let supporting_context = capture_cleanup_context();
+        let supporting_context = request
+            .take_prefetched_context()
+            .unwrap_or_else(capture_cleanup_context);
         archive_live_recording_with_cleanup_and_friendly_insert(
-            request.recording_artifact().clone(),
+            effective_artifact.clone(),
             request.trigger_source(),
-            transcribe_wav_result,
+            |wav_path| {
+                let t = Instant::now();
+                let result = streaming_transcript_or_batch(
+                    streaming_transcript.as_ref(),
+                    wav_path,
+                );
+                transcribe_elapsed.set(t.elapsed());
+                result
+            },
             Some(prompt_profile.clone()),
             supporting_context.clone(),
             |transcript_text| {
                 if let Some(live_status) = live_status.as_ref() {
                     live_status.replace(LiveStatus::cleaning_up());
                 }
+                let t = Instant::now();
                 let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
                 let correction_memory_text = load_correction_store().prompt_memory_text();
-                run_cleanup(&CleanupRequest {
+                let result = run_cleanup(&CleanupRequest {
                     transcript_text: transcript_text.into(),
                     model_path,
                     supporting_context_text: supporting_context.supporting_context_text.clone(),
@@ -201,10 +310,13 @@ fn transcribe_recorded_wav_to_log_with_live_status(
                     correction_memory_text,
                     prompt_profile: prompt_profile.clone(),
                     custom_prompt_text: custom_prompt_text.clone(),
-                })
+                });
+                cleanup_elapsed.set(t.elapsed());
+                result
             },
             |transcript_text| {
-                insert_with_uinput_fallback(
+                let t = Instant::now();
+                let result = insert_with_uinput_fallback(
                     transcript_text,
                     |transcript_text| {
                         insert_text_into_friendly_target(
@@ -213,16 +325,27 @@ fn transcribe_recorded_wav_to_log_with_live_status(
                         )
                     },
                     request_uinput_text_insertion,
-                )
+                );
+                insert_elapsed.set(t.elapsed());
+                result
             },
         )
     } else {
         archive_live_recording_with_friendly_insert(
-            request.recording_artifact().clone(),
+            effective_artifact.clone(),
             request.trigger_source(),
-            transcribe_wav_result,
+            |wav_path| {
+                let t = Instant::now();
+                let result = streaming_transcript_or_batch(
+                    streaming_transcript.as_ref(),
+                    wav_path,
+                );
+                transcribe_elapsed.set(t.elapsed());
+                result
+            },
             |transcript_text| {
-                insert_with_uinput_fallback(
+                let t = Instant::now();
+                let result = insert_with_uinput_fallback(
                     transcript_text,
                     |transcript_text| {
                         insert_text_into_friendly_target(
@@ -231,10 +354,36 @@ fn transcribe_recorded_wav_to_log_with_live_status(
                         )
                     },
                     request_uinput_text_insertion,
-                )
+                );
+                insert_elapsed.set(t.elapsed());
+                result
             },
         )
     };
+
+    // Attach speaker filter diagnostics to the transcript entry when
+    // the ignore-other-speakers setting was active.
+    let result = result.map(|mut entry| {
+        if let Some(filter_result) = speaker_filter_result.as_ref() {
+            let mut summary = DiarizationSummary::new(Vec::new(), filter_result.filtering_applied);
+            summary = summary.with_target_speaker("user");
+            if let Some(reason) = filter_result.fallback_reason.as_deref() {
+                summary = summary.with_fallback_reason(reason);
+            }
+            entry.diarization = Some(summary);
+        }
+        entry
+    });
+
+    let total_elapsed = pipeline_start.elapsed();
+    eprintln!(
+        "[Pepper X] perf: record={:.1}s transcribe={:.1}s cleanup={:.1}s insert={:.1}s total={:.1}s",
+        recording_elapsed.as_secs_f64(),
+        transcribe_elapsed.get().as_secs_f64(),
+        cleanup_elapsed.get().as_secs_f64(),
+        insert_elapsed.get().as_secs_f64(),
+        total_elapsed.as_secs_f64(),
+    );
 
     match result {
         Ok(entry) => {
@@ -438,8 +587,21 @@ fn connect_or_spawn_uinput_helper(
 }
 
 fn configured_uinput_helper_bin_path() -> PathBuf {
-    nonempty_env_path("PEPPERX_UINPUT_HELPER_BIN")
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_UINPUT_HELPER_BIN))
+    if let Some(path) = nonempty_env_path("PEPPERX_UINPUT_HELPER_BIN") {
+        return path;
+    }
+
+    // Look next to the current executable first (for development builds).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("pepperx-uinput-helper");
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+
+    PathBuf::from(DEFAULT_UINPUT_HELPER_BIN)
 }
 
 fn configured_uinput_helper_socket_path() -> Result<PathBuf, FriendlyInsertRunError> {
@@ -455,6 +617,30 @@ fn configured_uinput_helper_socket_path() -> Result<PathBuf, FriendlyInsertRunEr
     })?;
 
     Ok(runtime_dir.join("pepper-x").join("uinput-helper.sock"))
+}
+
+/// If a streaming transcript is available, wrap it as a [`TranscriptionResult`]
+/// without touching the WAV file.  Otherwise fall back to the normal batch ASR
+/// path.
+fn streaming_transcript_or_batch(
+    streaming: Option<&StreamingTranscript>,
+    wav_path: &Path,
+) -> Result<TranscriptionResult, TranscriptionRunError> {
+    if let Some(st) = streaming {
+        eprintln!(
+            "[Pepper X] using streaming transcript ({} ms): {:?}",
+            st.elapsed_ms,
+            st.transcript_text.chars().take(80).collect::<String>(),
+        );
+        return Ok(TranscriptionResult {
+            wav_path: wav_path.to_path_buf(),
+            transcript_text: st.transcript_text.clone(),
+            backend_name: pepperx_asr::BACKEND_NAME.to_string(),
+            model_name: st.model_name.clone(),
+            elapsed_ms: st.elapsed_ms,
+        });
+    }
+    transcribe_wav_result(wav_path)
 }
 
 fn transcribe_wav_result(wav_path: &Path) -> Result<TranscriptionResult, TranscriptionRunError> {
@@ -506,6 +692,163 @@ pub fn rerun_archived_run_to_log(
             };
             run_cleanup(&request)
         },
+    )
+}
+
+/// Run the ASR (and optionally cleanup) pipeline against an archived run
+/// without writing a new history entry.  Returns the ephemeral
+/// `TranscriptEntry` so the caller can display it inline.
+pub fn experiment_rerun_archived_run(
+    request: ArchivedRunRerunRequest,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let cache_root = default_cache_root();
+    let cleanup_cache_root = cache_root.clone();
+    let explicit_asr_model = request.asr_model_id.is_some();
+    let explicit_cleanup_model = request.cleanup_model_id.is_some();
+    experiment_rerun_archived_run_with(
+        request,
+        move |wav_path, model_id| {
+            let model_dir = if explicit_asr_model {
+                configured_requested_model_dir_for_model_id_with(model_id, &cache_root)?
+            } else {
+                configured_model_dir_for_model_id(model_id)?
+            };
+            let request = TranscriptionRequest::new(wav_path, &model_dir, model_id);
+            Ok(transcribe_wav(&request)?)
+        },
+        move |cleanup_model_id, request| {
+            let request = CleanupRequest {
+                model_path: if explicit_cleanup_model {
+                    configured_requested_cleanup_model_path_for_model_id_with(
+                        cleanup_model_id,
+                        &cleanup_cache_root,
+                    )?
+                } else {
+                    configured_cleanup_model_path_for_model_id(
+                        cleanup_model_id,
+                        &cleanup_cache_root,
+                    )?
+                },
+                ..request
+            };
+            run_cleanup(&request)
+        },
+    )
+}
+
+pub fn rerun_archived_cleanup_to_log(
+    request: ArchivedCleanupRerunRequest,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let cache_root = default_cache_root();
+    let explicit_cleanup_model = request.cleanup_model_id.is_some();
+    rerun_archived_cleanup_with(request, move |cleanup_model_id, cleanup_request| {
+        let cleanup_request = CleanupRequest {
+            model_path: if explicit_cleanup_model {
+                configured_requested_cleanup_model_path_for_model_id_with(
+                    cleanup_model_id,
+                    &cache_root,
+                )?
+            } else {
+                configured_cleanup_model_path_for_model_id(cleanup_model_id, &cache_root)?
+            },
+            ..cleanup_request
+        };
+        run_cleanup(&cleanup_request)
+    })
+}
+
+/// Run cleanup against an archived run without writing a new history entry.
+/// Returns the ephemeral `TranscriptEntry` so the caller can display it
+/// inline.
+pub fn experiment_rerun_archived_cleanup(
+    request: ArchivedCleanupRerunRequest,
+) -> Result<TranscriptEntry, TranscriptionRunError> {
+    let cache_root = default_cache_root();
+    let explicit_cleanup_model = request.cleanup_model_id.is_some();
+    experiment_rerun_archived_cleanup_with(request, move |cleanup_model_id, cleanup_request| {
+        let cleanup_request = CleanupRequest {
+            model_path: if explicit_cleanup_model {
+                configured_requested_cleanup_model_path_for_model_id_with(
+                    cleanup_model_id,
+                    &cache_root,
+                )?
+            } else {
+                configured_cleanup_model_path_for_model_id(cleanup_model_id, &cache_root)?
+            },
+            ..cleanup_request
+        };
+        run_cleanup(&cleanup_request)
+    })
+}
+
+fn rerun_archived_cleanup_with<C>(
+    request: ArchivedCleanupRerunRequest,
+    cleanup: C,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    C: FnOnce(&str, CleanupRequest) -> Result<CleanupResult, CleanupError>,
+{
+    let store = HistoryStore::open(state_root())?;
+    let original_run = store
+        .load_run(&request.run_id)?
+        .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
+    let settings = AppSettings::load_or_default();
+
+    let transcript_text = original_run.entry.transcript_text.clone();
+    let cleanup_model_id = request
+        .cleanup_model_id
+        .clone()
+        .or_else(|| {
+            original_run
+                .entry
+                .cleanup
+                .as_ref()
+                .map(|cleanup| cleanup.model_name.clone())
+        })
+        .unwrap_or_else(|| settings.preferred_cleanup_model.clone());
+    let prompt_profile = request
+        .cleanup_prompt_profile
+        .clone()
+        .or_else(|| original_run.prompt_profile.clone())
+        .unwrap_or_else(|| settings.cleanup_prompt_profile.clone());
+    let supporting_context = SupportingContext {
+        supporting_context_text: original_run.supporting_context_text.clone(),
+        ocr_text: original_run.ocr_text.clone(),
+        used_ocr: original_run
+            .entry
+            .cleanup
+            .as_ref()
+            .map(|cleanup| cleanup.used_ocr)
+            .unwrap_or(false),
+    };
+
+    let mut entry = original_run.entry.clone();
+    let custom_prompt_text = request
+        .custom_prompt_text
+        .or_else(|| settings.effective_cleanup_custom_prompt());
+    let cleanup_request = CleanupRequest {
+        transcript_text: transcript_text.clone(),
+        model_path: PathBuf::new(),
+        supporting_context_text: original_run.supporting_context_text.clone(),
+        ocr_text: original_run.ocr_text.clone(),
+        correction_memory_text: load_correction_store().prompt_memory_text(),
+        prompt_profile: prompt_profile.clone(),
+        custom_prompt_text,
+    };
+    record_cleanup(&mut entry, &supporting_context, |_transcript_text| {
+        cleanup(&cleanup_model_id, cleanup_request)
+    });
+
+    let parent_run_id = original_run
+        .parent_run_id
+        .clone()
+        .unwrap_or_else(|| original_run.run_id.clone());
+    archive_transcript_entry_with_request(
+        entry,
+        RunRuntimeMetadata::archived_rerun(),
+        Some(prompt_profile),
+        Some(&supporting_context),
+        Some(parent_run_id),
     )
 }
 
@@ -602,6 +945,154 @@ where
         archived_cleanup_metadata.then_some(&supporting_context),
         Some(original_run.run_id),
     )
+}
+
+/// Like `rerun_archived_run_with` but returns the entry without archiving.
+fn experiment_rerun_archived_run_with<T, C>(
+    request: ArchivedRunRerunRequest,
+    transcribe: T,
+    cleanup: C,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    T: FnOnce(&Path, &str) -> Result<TranscriptionResult, TranscriptionRunError>,
+    C: FnOnce(&str, CleanupRequest) -> Result<CleanupResult, CleanupError>,
+{
+    let store = HistoryStore::open(state_root())?;
+    let original_run = store
+        .load_run(&request.run_id)?
+        .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
+    let settings = AppSettings::load_or_default();
+    let archived_source_wav_path =
+        original_run
+            .archived_source_wav_path
+            .clone()
+            .ok_or_else(|| {
+                TranscriptionRunError::ArchivedRunMissingSourceWav(original_run.run_id.clone())
+            })?;
+    let asr_model_id = request
+        .asr_model_id
+        .clone()
+        .unwrap_or_else(|| original_run.entry.model_name.clone());
+    let result = transcribe(&archived_source_wav_path, &asr_model_id)?;
+    let mut entry = transcript_entry_from_result(result);
+    let cleanup_model_id = if request.cleanup_enabled {
+        request
+            .cleanup_model_id
+            .clone()
+            .or_else(|| {
+                original_run
+                    .entry
+                    .cleanup
+                    .as_ref()
+                    .map(|cleanup| cleanup.model_name.clone())
+            })
+            .or_else(|| Some(settings.preferred_cleanup_model.clone()))
+    } else {
+        None
+    };
+    let prompt_profile = if request.cleanup_enabled {
+        request
+            .cleanup_prompt_profile
+            .clone()
+            .or_else(|| original_run.prompt_profile.clone())
+            .or_else(|| Some(settings.cleanup_prompt_profile.clone()))
+    } else {
+        None
+    };
+    let supporting_context = SupportingContext {
+        supporting_context_text: original_run.supporting_context_text.clone(),
+        ocr_text: original_run.ocr_text.clone(),
+        used_ocr: original_run
+            .entry
+            .cleanup
+            .as_ref()
+            .map(|cleanup| cleanup.used_ocr)
+            .unwrap_or(false),
+    };
+
+    if let Some(cleanup_model_id) = cleanup_model_id.as_deref() {
+        let cleanup_request = CleanupRequest {
+            transcript_text: entry.transcript_text.clone(),
+            model_path: PathBuf::new(),
+            supporting_context_text: original_run.supporting_context_text.clone(),
+            ocr_text: original_run.ocr_text.clone(),
+            correction_memory_text: load_correction_store().prompt_memory_text(),
+            prompt_profile: prompt_profile
+                .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
+            custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+        };
+        record_cleanup(&mut entry, &supporting_context, |transcript_text| {
+            let request = CleanupRequest {
+                transcript_text: transcript_text.into(),
+                ..cleanup_request
+            };
+            cleanup(cleanup_model_id, request)
+        });
+    }
+
+    Ok(entry)
+}
+
+/// Like `rerun_archived_cleanup_with` but returns the entry without archiving.
+fn experiment_rerun_archived_cleanup_with<C>(
+    request: ArchivedCleanupRerunRequest,
+    cleanup: C,
+) -> Result<TranscriptEntry, TranscriptionRunError>
+where
+    C: FnOnce(&str, CleanupRequest) -> Result<CleanupResult, CleanupError>,
+{
+    let store = HistoryStore::open(state_root())?;
+    let original_run = store
+        .load_run(&request.run_id)?
+        .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
+    let settings = AppSettings::load_or_default();
+
+    let transcript_text = original_run.entry.transcript_text.clone();
+    let cleanup_model_id = request
+        .cleanup_model_id
+        .clone()
+        .or_else(|| {
+            original_run
+                .entry
+                .cleanup
+                .as_ref()
+                .map(|cleanup| cleanup.model_name.clone())
+        })
+        .unwrap_or_else(|| settings.preferred_cleanup_model.clone());
+    let prompt_profile = request
+        .cleanup_prompt_profile
+        .clone()
+        .or_else(|| original_run.prompt_profile.clone())
+        .unwrap_or_else(|| settings.cleanup_prompt_profile.clone());
+    let supporting_context = SupportingContext {
+        supporting_context_text: original_run.supporting_context_text.clone(),
+        ocr_text: original_run.ocr_text.clone(),
+        used_ocr: original_run
+            .entry
+            .cleanup
+            .as_ref()
+            .map(|cleanup| cleanup.used_ocr)
+            .unwrap_or(false),
+    };
+
+    let mut entry = original_run.entry.clone();
+    let custom_prompt_text = request
+        .custom_prompt_text
+        .or_else(|| settings.effective_cleanup_custom_prompt());
+    let cleanup_request = CleanupRequest {
+        transcript_text: transcript_text.clone(),
+        model_path: PathBuf::new(),
+        supporting_context_text: original_run.supporting_context_text.clone(),
+        ocr_text: original_run.ocr_text.clone(),
+        correction_memory_text: load_correction_store().prompt_memory_text(),
+        prompt_profile: prompt_profile.clone(),
+        custom_prompt_text,
+    };
+    record_cleanup(&mut entry, &supporting_context, |_transcript_text| {
+        cleanup(&cleanup_model_id, cleanup_request)
+    });
+
+    Ok(entry)
 }
 
 pub(crate) fn archive_transcription_result(
@@ -901,7 +1392,7 @@ fn archive_live_transcription_failure(
     let failure_entry = TranscriptEntry::new(
         recording_artifact.wav_path(),
         "",
-        "sherpa-onnx",
+        pepperx_asr::BACKEND_NAME,
         settings.preferred_asr_model,
         Duration::ZERO,
     );
@@ -961,8 +1452,17 @@ fn describe_asr_error(error: &TranscriptionError) -> String {
 }
 
 fn configured_model_dir() -> Result<PathBuf, TranscriptionRunError> {
-    if let Some(model_dir) = nonempty_env_path("PEPPERX_PARAKEET_MODEL_DIR") {
-        return Ok(model_dir);
+    match std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR") {
+        Some(value) if !value.is_empty() => return Ok(PathBuf::from(value)),
+        Some(_) => {
+            let default_model_id = pepperx_models::default_model(ModelKind::Asr).id;
+            return Err(TranscriptionRunError::UnreadyAsrModel {
+                model_id: default_model_id.into(),
+                install_path: PathBuf::from(""),
+                missing_files: vec!["PEPPERX_PARAKEET_MODEL_DIR is empty".into()],
+            });
+        }
+        None => {}
     }
 
     let settings = AppSettings::load_or_default();
@@ -1096,7 +1596,10 @@ fn record_cleanup<F>(
 {
     entry.cleanup = Some(match cleanup(&entry.transcript_text) {
         Ok(result) => cleanup_diagnostics_from_result(result),
-        Err(error) => cleanup_diagnostics_from_error(&error, supporting_context.used_ocr),
+        Err(error) => {
+            eprintln!("[Pepper X] cleanup failed: {error}");
+            cleanup_diagnostics_from_error(&error, supporting_context.used_ocr)
+        }
     });
 }
 
@@ -1126,7 +1629,7 @@ fn cleanup_diagnostics_from_error(
     diagnostics
 }
 
-fn capture_cleanup_context() -> SupportingContext {
+pub(crate) fn capture_cleanup_context() -> SupportingContext {
     if context_capture_is_disabled() {
         return SupportingContext::default();
     }
@@ -1147,7 +1650,7 @@ fn context_capture_is_disabled() -> bool {
     )
 }
 
-fn load_correction_store() -> CorrectionStore {
+pub(crate) fn load_correction_store() -> CorrectionStore {
     let store_root = corrections_store_path();
     CorrectionStore::load(&store_root).unwrap_or_else(|error| {
         eprintln!(
@@ -1302,7 +1805,7 @@ mod app_shell {
         assert!(matches!(
             error,
             TranscriptionRunError::UnreadyAsrModel { model_id, .. }
-                if model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
+                if model_id == "nemotron-speech-streaming-en-0.6b"
         ));
         set_or_remove_env_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir);
     }
@@ -1311,7 +1814,7 @@ mod app_shell {
     fn model_status_transcription_rejects_unready_selected_asr_model() {
         let _guard = lock_env();
         let settings = AppSettings {
-            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+            preferred_asr_model: "nemotron-speech-streaming-en-0.6b".into(),
             ..AppSettings::default()
         };
         let previous_model_dir = std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR");
@@ -1330,7 +1833,7 @@ mod app_shell {
         assert!(matches!(
             error,
             TranscriptionRunError::UnreadyAsrModel { model_id, .. }
-                if model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
+                if model_id == "nemotron-speech-streaming-en-0.6b"
         ));
         set_or_remove_env_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir);
         let _ = std::fs::remove_dir_all(cache_root);
@@ -1351,7 +1854,7 @@ mod app_shell {
         std::fs::write(&override_path, b"GGUFpepper-x-cleanup-model").unwrap();
         std::env::set_var("PEPPERX_CLEANUP_MODEL_PATH", &override_path);
         let settings = AppSettings {
-            preferred_cleanup_model: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             ..AppSettings::default()
         };
         let cache_root = std::env::temp_dir().join(format!(
@@ -1427,10 +1930,10 @@ mod app_shell {
         std::fs::write(&override_path, b"override-model").unwrap();
         std::env::set_var("PEPPERX_CLEANUP_MODEL_PATH", &override_path);
         let expected_path =
-            materialize_ready_model(&cache_root, "qwen2.5-1.5b-instruct-q4_k_m.gguf");
+            materialize_ready_model(&cache_root, "qwen3.5-0.8b-q4_k_m.gguf");
 
         let configured_path = configured_requested_cleanup_model_path_for_model_id_with(
-            "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            "qwen3.5-0.8b-q4_k_m.gguf",
             &cache_root,
         )
         .expect("explicit rerun cleanup model should resolve from the catalog cache");
@@ -1457,7 +1960,7 @@ mod app_shell {
         ));
 
         let error = configured_requested_model_dir_for_model_id_with(
-            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "qwen3.5-2b-q4_k_m.gguf",
             &cache_root,
         )
         .unwrap_err();
@@ -1465,7 +1968,7 @@ mod app_shell {
         assert!(matches!(
             error,
             TranscriptionRunError::UnknownAsrModel(model_id)
-                if model_id == "qwen2.5-3b-instruct-q4_k_m.gguf"
+                if model_id == "qwen3.5-2b-q4_k_m.gguf"
         ));
     }
 
@@ -1481,14 +1984,14 @@ mod app_shell {
         ));
 
         let error = configured_requested_cleanup_model_path_for_model_id_with(
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
             &cache_root,
         )
         .unwrap_err();
 
         assert_eq!(
             error,
-            CleanupError::UnsupportedModel("nemo-parakeet-tdt-0.6b-v2-int8".into())
+            CleanupError::UnsupportedModel("nemo-parakeet-tdt-0.6b-v3-int8".into())
         );
     }
 
@@ -1525,7 +2028,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: state_root.join("loop2.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -1593,7 +2096,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -1602,7 +2105,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -1617,7 +2120,7 @@ mod app_shell {
             entry.cleanup,
             Some(CleanupDiagnostics::succeeded(
                 "llama.cpp",
-                "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "qwen3.5-2b-q4_k_m.gguf",
                 "Hello from Pepper X.",
                 Duration::from_millis(19),
             ))
@@ -1651,7 +2154,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -1716,7 +2219,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -1739,7 +2242,7 @@ mod app_shell {
         let expected_model_path = cache_home
             .join("pepper-x")
             .join("models")
-            .join("cleanup/qwen2.5-3b-instruct-q4_k_m.gguf");
+            .join("cleanup/Qwen3.5-2B-Q4_K_M.gguf");
 
         assert_eq!(entry.transcript_text, "hello from pepper x");
         assert_eq!(entry.display_text(), "hello from pepper x");
@@ -1791,7 +2294,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -1800,7 +2303,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: true,
@@ -1813,7 +2316,7 @@ mod app_shell {
             entry.cleanup,
             Some(CleanupDiagnostics {
                 backend_name: "llama.cpp".into(),
-                model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                 cleaned_text: Some("Hello from Pepper X.".into()),
                 elapsed_ms: 19,
                 used_ocr: true,
@@ -1850,7 +2353,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -1863,7 +2366,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: true,
@@ -1919,7 +2422,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -1928,7 +2431,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "hello from pepper x".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -1980,7 +2483,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "pepper x and pepper".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -1989,7 +2492,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "pepper x and pepper".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -2035,7 +2538,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2093,7 +2596,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: state_root.join("loop4.wav"),
                 transcript_text: "paste through clipboard".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2148,7 +2651,7 @@ mod app_shell {
         let mut entry = TranscriptEntry::new(
             "/tmp/live-status.wav",
             "hello from pepper x",
-            "sherpa-onnx",
+            "parakeet-rs",
             MODEL_NAME,
             Duration::from_millis(42),
         );
@@ -2168,7 +2671,7 @@ mod app_shell {
         let mut entry = TranscriptEntry::new(
             "/tmp/live-status.wav",
             "hello from pepper x",
-            "sherpa-onnx",
+            "parakeet-rs",
             MODEL_NAME,
             Duration::from_millis(42),
         );
@@ -2285,6 +2788,7 @@ mod app_shell {
 
     #[test]
     fn uinput_insert_uses_libexec_helper_path_by_default() {
+        let _guard = lock_env();
         let previous_helper_bin = std::env::var_os("PEPPERX_UINPUT_HELPER_BIN");
         std::env::remove_var("PEPPERX_UINPUT_HELPER_BIN");
 
@@ -2295,17 +2799,12 @@ mod app_shell {
             PathBuf::from("/usr/libexec/pepper-x/pepperx-uinput-helper")
         );
 
-        match previous_helper_bin {
-            Some(previous_helper_bin) => {
-                std::env::set_var("PEPPERX_UINPUT_HELPER_BIN", previous_helper_bin)
-            }
-            None => std::env::remove_var("PEPPERX_UINPUT_HELPER_BIN"),
-        }
+        set_or_remove_env_var("PEPPERX_UINPUT_HELPER_BIN", previous_helper_bin);
     }
 
     #[test]
     fn uinput_insert_archives_last_fallback_diagnostics() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-uinput-insert-success-{}-{}",
             std::process::id(),
@@ -2321,7 +2820,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: state_root.join("loop4-uinput.wav"),
                 transcript_text: "type into wine".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2395,7 +2894,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: state_root.join("loop2.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2448,7 +2947,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: state_root.join("loop4.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2512,7 +3011,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: state_root.join("loop4.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2572,7 +3071,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2581,7 +3080,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -2613,7 +3112,7 @@ mod app_shell {
             entry.cleanup,
             Some(CleanupDiagnostics::succeeded(
                 "llama.cpp",
-                "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "qwen3.5-2b-q4_k_m.gguf",
                 "Hello from Pepper X.",
                 Duration::from_millis(19),
             ))
@@ -2655,7 +3154,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: state_root.join("loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2664,7 +3163,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -2693,7 +3192,7 @@ mod app_shell {
             entries[0].cleanup,
             Some(CleanupDiagnostics::succeeded(
                 "llama.cpp",
-                "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "qwen3.5-2b-q4_k_m.gguf",
                 "Hello from Pepper X.",
                 Duration::from_millis(19),
             ))
@@ -2745,7 +3244,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: state_root.join("loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2899,7 +3398,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: wav_path.clone(),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2909,7 +3408,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -2978,7 +3477,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: wav_path.clone(),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -2988,7 +3487,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -3074,7 +3573,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: wav_path.clone(),
                 transcript_text: "echo pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -3084,7 +3583,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "echo Pepper X".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -3170,7 +3669,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: wav_path.clone(),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -3180,7 +3679,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -3239,7 +3738,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -3248,7 +3747,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -3327,7 +3826,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -3336,7 +3835,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello from Pepper X.".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -3387,7 +3886,7 @@ mod app_shell {
             TranscriptionResult {
                 wav_path: PathBuf::from("/tmp/loop5.wav"),
                 transcript_text: "hello from pepper x".into(),
-                backend_name: "sherpa-onnx".into(),
+                backend_name: "parakeet-rs".into(),
                 model_name: MODEL_NAME.into(),
                 elapsed_ms: 42,
             },
@@ -3396,7 +3895,7 @@ mod app_shell {
             |_| {
                 Ok(CleanupResult {
                     backend_name: "llama.cpp".into(),
-                    model_name: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    model_name: "qwen3.5-2b-q4_k_m.gguf".into(),
                     cleaned_text: "Hello".into(),
                     elapsed_ms: 19,
                     used_ocr: false,
@@ -3452,13 +3951,13 @@ mod app_shell {
         let mut original_entry = TranscriptEntry::new(
             &source_wav_path,
             "hello from pepper x",
-            "sherpa-onnx",
+            "parakeet-rs",
             MODEL_NAME,
             Duration::from_millis(42),
         );
         original_entry.cleanup = Some(CleanupDiagnostics::succeeded(
             "llama.cpp",
-            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "qwen3.5-2b-q4_k_m.gguf",
             "Hello from Pepper X.",
             Duration::from_millis(19),
         ));
@@ -3481,7 +3980,7 @@ mod app_shell {
                 run_id: original_run.run_id.clone(),
                 asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
                 cleanup_enabled: true,
-                cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
+                cleanup_model_id: Some("qwen3.5-0.8b-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             },
             |wav_path: &Path, model_id: &str| {
@@ -3489,7 +3988,7 @@ mod app_shell {
                 Ok(TranscriptionResult {
                     wav_path: wav_path.to_path_buf(),
                     transcript_text: "hello from pepper ex".into(),
-                    backend_name: "sherpa-onnx".into(),
+                    backend_name: "parakeet-rs".into(),
                     model_name: model_id.into(),
                     elapsed_ms: 11,
                 })
@@ -3529,7 +4028,7 @@ mod app_shell {
         );
         assert_eq!(
             observed_cleanup_model.as_deref(),
-            Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+            Some("qwen3.5-0.8b-q4_k_m.gguf")
         );
         assert_eq!(cleanup_request.prompt_profile, "literal-dictation");
         assert_eq!(
@@ -3553,7 +4052,7 @@ mod app_shell {
                 .cleanup
                 .as_ref()
                 .map(|cleanup| cleanup.model_name.as_str()),
-            Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+            Some("qwen3.5-0.8b-q4_k_m.gguf")
         );
 
         match previous_state_root {
@@ -3586,13 +4085,13 @@ mod app_shell {
         let mut original_entry = TranscriptEntry::new(
             &source_wav_path,
             "hello from pepper x",
-            "sherpa-onnx",
+            "parakeet-rs",
             MODEL_NAME,
             Duration::from_millis(42),
         );
         original_entry.cleanup = Some(CleanupDiagnostics::succeeded(
             "llama.cpp",
-            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "qwen3.5-2b-q4_k_m.gguf",
             "Hello from Pepper X.",
             Duration::from_millis(19),
         ));
@@ -3619,7 +4118,7 @@ mod app_shell {
                 Ok(TranscriptionResult {
                     wav_path: wav_path.to_path_buf(),
                     transcript_text: "hello from pepper ex".into(),
-                    backend_name: "sherpa-onnx".into(),
+                    backend_name: "parakeet-rs".into(),
                     model_name: model_id.into(),
                     elapsed_ms: 11,
                 })
@@ -3673,7 +4172,7 @@ mod app_shell {
 
         AppSettings {
             cleanup_enabled: true,
-            preferred_cleanup_model: "qwen2.5-1.5b-instruct-q4_k_m.gguf".into(),
+            preferred_cleanup_model: "qwen3.5-0.8b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "literal-dictation".into(),
             ..AppSettings::default()
         }
@@ -3686,7 +4185,7 @@ mod app_shell {
         let original_entry = TranscriptEntry::new(
             &source_wav_path,
             "hello from pepper x",
-            "sherpa-onnx",
+            "parakeet-rs",
             MODEL_NAME,
             Duration::from_millis(42),
         );
@@ -3711,7 +4210,7 @@ mod app_shell {
                 Ok(TranscriptionResult {
                     wav_path: wav_path.to_path_buf(),
                     transcript_text: "hello from pepper ex".into(),
-                    backend_name: "sherpa-onnx".into(),
+                    backend_name: "parakeet-rs".into(),
                     model_name: model_id.into(),
                     elapsed_ms: 11,
                 })
@@ -3741,7 +4240,7 @@ mod app_shell {
 
         assert_eq!(
             observed_cleanup_model.as_deref(),
-            Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+            Some("qwen3.5-0.8b-q4_k_m.gguf")
         );
         assert_eq!(cleanup_request.prompt_profile, "literal-dictation");
         assert_eq!(entry.display_text(), "Hello from Pepper Ex.");
@@ -3751,9 +4250,214 @@ mod app_shell {
                 .cleanup
                 .as_ref()
                 .map(|cleanup| cleanup.model_name.as_str()),
-            Some("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+            Some("qwen3.5-0.8b-q4_k_m.gguf")
         );
         assert_eq!(rerun.prompt_profile.as_deref(), Some("literal-dictation"));
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn rerun_archived_cleanup_reruns_cleanup_only_with_existing_transcript() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-rerun-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let source_wav_path = state_root.join("source.wav");
+        std::fs::write(&source_wav_path, b"pepper-x-rerun-audio").unwrap();
+
+        let mut original_entry = TranscriptEntry::new(
+            &source_wav_path,
+            "hello from pepper x",
+            "parakeet-rs",
+            MODEL_NAME,
+            Duration::from_millis(42),
+        );
+        original_entry.cleanup = Some(CleanupDiagnostics::succeeded(
+            "llama.cpp",
+            "qwen3.5-2b-q4_k_m.gguf",
+            "Hello from Pepper X.",
+            Duration::from_millis(19),
+        ));
+
+        let original_run = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .archive_run(
+                &ArchiveWriteRequest::new(original_entry)
+                    .with_prompt_profile("ordinary-dictation")
+                    .with_supporting_context("line before\nline after")
+                    .with_ocr_text("ocr fallback text"),
+            )
+            .expect("archive original run");
+        let mut observed_cleanup_model = None;
+        let mut observed_cleanup_request = None;
+
+        let entry = rerun_archived_cleanup_with(
+            ArchivedCleanupRerunRequest {
+                run_id: original_run.run_id.clone(),
+                cleanup_model_id: Some("qwen3.5-0.8b-q4_k_m.gguf".into()),
+                cleanup_prompt_profile: Some("literal-dictation".into()),
+                custom_prompt_text: None,
+            },
+            |cleanup_model_id: &str, request: CleanupRequest| {
+                observed_cleanup_model = Some(cleanup_model_id.to_string());
+                observed_cleanup_request = Some(request.clone());
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: cleanup_model_id.into(),
+                    cleaned_text: "Hello from Pepper X!".into(),
+                    elapsed_ms: 7,
+                    used_ocr: true,
+                })
+            },
+        )
+        .expect("rerun archived cleanup");
+        let archived_runs = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .recent_runs()
+            .expect("load archived runs");
+        let rerun = archived_runs
+            .into_iter()
+            .next()
+            .expect("rerun should be archived");
+        let cleanup_request = observed_cleanup_request.expect("cleanup request should be recorded");
+
+        assert_eq!(
+            observed_cleanup_model.as_deref(),
+            Some("qwen3.5-0.8b-q4_k_m.gguf")
+        );
+        assert_eq!(cleanup_request.prompt_profile, "literal-dictation");
+        assert_eq!(
+            cleanup_request.supporting_context_text.as_deref(),
+            Some("line before\nline after")
+        );
+        assert_eq!(cleanup_request.ocr_text.as_deref(), Some("ocr fallback text"));
+        assert_eq!(entry.transcript_text, "hello from pepper x");
+        assert_eq!(entry.display_text(), "Hello from Pepper X!");
+        assert_eq!(
+            rerun
+                .entry
+                .cleanup
+                .as_ref()
+                .map(|cleanup| cleanup.model_name.as_str()),
+            Some("qwen3.5-0.8b-q4_k_m.gguf")
+        );
+        assert_eq!(rerun.prompt_profile.as_deref(), Some("literal-dictation"));
+        assert_eq!(
+            rerun.parent_run_id.as_deref(),
+            Some(original_run.run_id.as_str())
+        );
+
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn rerun_archived_cleanup_on_rerun_links_back_to_original_parent() {
+        let _guard = env_lock().lock().unwrap();
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-rerun-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
+        std::env::set_var("PEPPERX_STATE_ROOT", &state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+        let source_wav_path = state_root.join("source.wav");
+        std::fs::write(&source_wav_path, b"pepper-x-rerun-audio").unwrap();
+
+        let original_entry = TranscriptEntry::new(
+            &source_wav_path,
+            "hello from pepper x",
+            "parakeet-rs",
+            MODEL_NAME,
+            Duration::from_millis(42),
+        );
+
+        let original_run = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .archive_run(&ArchiveWriteRequest::new(original_entry))
+            .expect("archive original run");
+
+        let mut rerun_entry = TranscriptEntry::new(
+            &source_wav_path,
+            "hello from pepper x",
+            "parakeet-rs",
+            MODEL_NAME,
+            Duration::from_millis(42),
+        );
+        rerun_entry.cleanup = Some(CleanupDiagnostics::succeeded(
+            "llama.cpp",
+            "qwen3.5-2b-q4_k_m.gguf",
+            "Hello from Pepper X.",
+            Duration::from_millis(19),
+        ));
+
+        let rerun_run = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .archive_run(
+                &ArchiveWriteRequest::new(rerun_entry)
+                    .with_parent_run_id(original_run.run_id.clone()),
+            )
+            .expect("archive rerun");
+
+        let _cleanup_rerun_entry = rerun_archived_cleanup_with(
+            ArchivedCleanupRerunRequest {
+                run_id: rerun_run.run_id.clone(),
+                cleanup_model_id: Some("qwen3.5-0.8b-q4_k_m.gguf".into()),
+                cleanup_prompt_profile: None,
+                custom_prompt_text: None,
+            },
+            |cleanup_model_id: &str, _request: CleanupRequest| {
+                Ok(CleanupResult {
+                    backend_name: "llama.cpp".into(),
+                    model_name: cleanup_model_id.into(),
+                    cleaned_text: "Hello from Pepper X!".into(),
+                    elapsed_ms: 7,
+                    used_ocr: false,
+                })
+            },
+        )
+        .expect("cleanup rerun of rerun");
+
+        let archived_runs = HistoryStore::open(&state_root)
+            .expect("open history store")
+            .recent_runs()
+            .expect("load archived runs");
+        let cleanup_rerun = archived_runs
+            .into_iter()
+            .next()
+            .expect("cleanup rerun should be archived");
+
+        assert_eq!(
+            cleanup_rerun.parent_run_id.as_deref(),
+            Some(original_run.run_id.as_str()),
+            "cleanup rerun of a rerun should link to the original parent"
+        );
 
         match previous_state_root {
             Some(previous_state_root) => {

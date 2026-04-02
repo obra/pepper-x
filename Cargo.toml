@@ -9,6 +9,7 @@ members = [
     "crates/pepperx-session",
     "crates/pepperx-platform-gnome",
     "crates/pepperx-cleanup",
+    "crates/pepperx-cleanup-helper",
     "crates/pepperx-uinput-helper",
 ]
 resolver = "2"

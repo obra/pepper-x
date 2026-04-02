@@ -330,7 +330,7 @@ fn friendly_insert_target_class_from_application_id(
         | "com.microsoft.Edge"
         | "vivaldi"
         | "com.vivaldi.Vivaldi" => FriendlyInsertTargetClass::BrowserTextarea,
-        "ghostty" | "xterm" | "gnome-terminal" | "gnome-terminal-server" => {
+        "ghostty" | "xterm" | "gnome-terminal" | "gnome-terminal-server" | "ptyxis" => {
             FriendlyInsertTargetClass::Terminal
         }
         "wine" | "wine64-preloader" => FriendlyInsertTargetClass::Hostile,
@@ -563,23 +563,7 @@ pub fn select_friendly_insert_backend(
             }
         }
         FriendlyInsertExpectation::LiveSupported => {
-            if !matches!(
-                actual_target_class,
-                FriendlyInsertTargetClass::TextEditor
-                    | FriendlyInsertTargetClass::BrowserTextarea
-                    | FriendlyInsertTargetClass::Terminal
-            ) {
-                return Err(FriendlyInsertFailure {
-                    backend_name: FRIENDLY_INSERT_BACKEND_NAME,
-                    reason: FriendlyInsertError::UnsupportedApplication {
-                        expected_application_id: policy.expected_application_id().into(),
-                        actual_application_id: target.application_id.clone(),
-                    },
-                    target_application_name: None,
-                    target_class: Some(target_class),
-                    attempted_backends: Vec::new(),
-                });
-            }
+            // All applications are accepted; backend selection handles fallback.
         }
     }
 
@@ -716,21 +700,16 @@ pub fn insert_text_into_friendly_target(
                 after_text: String::new(),
             })
         }
-        CLIPBOARD_PASTE_BACKEND_NAME => {
-            let mut adapter = clipboard_paste_adapter().map_err(|error| {
-                with_selected_backend_failure(&target.selection, &target.application_name, error)
-            })?;
-
-            run_clipboard_paste_with_adapter(
-                text,
+        UINPUT_TEXT_BACKEND_NAME => {
+            // uinput text insertion is handled by the external uinput helper.
+            // Return a SelectedBackendFailure so the caller routes to the helper.
+            Err(with_selected_backend_failure(
                 &target.selection,
                 &target.application_name,
-                target.target_class,
-                &mut adapter,
-            )
-            .map_err(|error| {
-                with_selected_backend_failure(&target.selection, &target.application_name, error)
-            })
+                FriendlyInsertRunError::Access(
+                    "uinput text insertion is handled by the uinput helper".into(),
+                ),
+            ))
         }
         _ => Err(FriendlyInsertRunError::Access(format!(
             "friendly insertion backend {} is not implemented",
@@ -769,14 +748,9 @@ fn run_clipboard_paste_with_adapter<A: ClipboardPasteAdapter>(
 }
 
 fn clipboard_paste_adapter() -> Result<GdkClipboardPasteAdapter, FriendlyInsertRunError> {
-    if !gtk::is_initialized_main_thread() {
-        gtk::init().map_err(|error| {
-            FriendlyInsertRunError::Access(format!(
-                "failed to initialize GTK clipboard access: {error}"
-            ))
-        })?;
-    }
-
+    // GTK must be initialized on the main thread. If it's already initialized
+    // (by the application), we can safely access the default display from any
+    // thread. If not, we cannot initialize it here from a worker thread.
     let display = gtk::gdk::Display::default().ok_or_else(|| {
         FriendlyInsertRunError::Access(
             "GTK clipboard mediation requires a live default display".into(),
@@ -800,23 +774,25 @@ fn fallback_chain_for_target_class(
     target_class: FriendlyInsertTargetClass,
 ) -> &'static [FriendlyInsertBackend] {
     match target_class {
-        FriendlyInsertTargetClass::TextEditor => &[FriendlyInsertBackend::EditableText],
+        FriendlyInsertTargetClass::TextEditor => &[
+            FriendlyInsertBackend::EditableText,
+            FriendlyInsertBackend::UinputText,
+        ],
         FriendlyInsertTargetClass::BrowserTextarea => &[
             FriendlyInsertBackend::EditableText,
-            FriendlyInsertBackend::ClipboardPaste,
+            FriendlyInsertBackend::UinputText,
         ],
         FriendlyInsertTargetClass::Terminal => &[
             FriendlyInsertBackend::EditableText,
             FriendlyInsertBackend::StringInjection,
-            FriendlyInsertBackend::ClipboardPaste,
+            FriendlyInsertBackend::UinputText,
         ],
         FriendlyInsertTargetClass::Hostile => &[
             FriendlyInsertBackend::EditableText,
             FriendlyInsertBackend::StringInjection,
-            FriendlyInsertBackend::ClipboardPaste,
             FriendlyInsertBackend::UinputText,
         ],
-        FriendlyInsertTargetClass::Unsupported => &[],
+        FriendlyInsertTargetClass::Unsupported => &[FriendlyInsertBackend::UinputText],
     }
 }
 
@@ -833,15 +809,10 @@ fn backend_matches_target(
             target_class == FriendlyInsertTargetClass::Terminal && target.supports_text
         }
         FriendlyInsertBackend::ClipboardPaste => {
-            target.is_editable
-                && matches!(
-                    target_class,
-                    FriendlyInsertTargetClass::BrowserTextarea
-                        | FriendlyInsertTargetClass::Terminal
-                        | FriendlyInsertTargetClass::Hostile
-                )
+            // Clipboard paste is no longer used; prefer UinputText instead.
+            false
         }
-        FriendlyInsertBackend::UinputText => target_class == FriendlyInsertTargetClass::Hostile,
+        FriendlyInsertBackend::UinputText => true,
     }
 }
 
@@ -1667,8 +1638,8 @@ mod accessible_insert_validation {
     }
 
     #[test]
-    fn accessible_insert_rejects_non_editable_targets() {
-        let error = select_friendly_insert_backend(
+    fn accessible_insert_falls_back_to_uinput_for_non_editable_targets() {
+        let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "org.gnome.TextEditor".into(),
                 is_editable: false,
@@ -1678,17 +1649,15 @@ mod accessible_insert_validation {
             },
             &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
-        assert_eq!(error.reason, FriendlyInsertError::TargetNotEditable);
-        assert_eq!(error.target_class, Some("text-editor"));
-        assert_eq!(error.attempted_backends, vec![FRIENDLY_INSERT_BACKEND_NAME]);
+        assert_eq!(selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
+        assert_eq!(selection.target_class, "text-editor");
     }
 
     #[test]
-    fn accessible_insert_rejects_targets_without_editable_text() {
-        let error = select_friendly_insert_backend(
+    fn accessible_insert_falls_back_to_uinput_without_editable_text() {
+        let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "org.gnome.TextEditor".into(),
                 is_editable: true,
@@ -1698,15 +1667,14 @@ mod accessible_insert_validation {
             },
             &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
-        assert_eq!(error.reason, FriendlyInsertError::MissingEditableText);
+        assert_eq!(selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
     }
 
     #[test]
-    fn accessible_insert_rejects_targets_without_caret_surface() {
-        let error = select_friendly_insert_backend(
+    fn accessible_insert_falls_back_to_uinput_without_caret_surface() {
+        let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "org.gnome.TextEditor".into(),
                 is_editable: true,
@@ -1716,10 +1684,9 @@ mod accessible_insert_validation {
             },
             &FriendlyInsertPolicy::exact("org.gnome.TextEditor"),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
-        assert_eq!(error.reason, FriendlyInsertError::MissingCaretSurface);
+        assert_eq!(selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
     }
 
     #[test]
@@ -1802,7 +1769,7 @@ mod accessible_insert_validation {
     }
 
     #[test]
-    fn fallback_insert_selects_clipboard_after_text_paths_fail() {
+    fn fallback_insert_selects_uinput_after_editable_text_fails() {
         let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "firefox".into(),
@@ -1815,17 +1782,12 @@ mod accessible_insert_validation {
         )
         .unwrap();
 
-        let snapshot = format!("{selection:?}");
-
-        assert!(snapshot.contains("backend_name: \"clipboard-paste\""));
-        assert!(snapshot.contains("target_class: \"browser-textarea\""));
-        assert!(
-            snapshot.contains("attempted_backends: [\"atspi-editable-text\", \"clipboard-paste\"]")
-        );
+        assert_eq!(selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
+        assert_eq!(selection.target_class, "browser-textarea");
     }
 
     #[test]
-    fn fallback_insert_keeps_uinput_last_for_hostile_targets() {
+    fn fallback_insert_uses_uinput_for_non_editable_hostile_targets() {
         let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "wine".into(),
@@ -1838,17 +1800,12 @@ mod accessible_insert_validation {
         )
         .unwrap();
 
-        let snapshot = format!("{selection:?}");
-
-        assert!(snapshot.contains("backend_name: \"uinput-text\""));
-        assert!(snapshot.contains("target_class: \"hostile\""));
-        assert!(snapshot.contains(
-            "attempted_backends: [\"atspi-editable-text\", \"atspi-key-string\", \"clipboard-paste\", \"uinput-text\"]"
-        ));
+        assert_eq!(selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
+        assert_eq!(selection.target_class, "hostile");
     }
 
     #[test]
-    fn fallback_insert_prefers_clipboard_before_uinput_for_editable_hostile_targets() {
+    fn fallback_insert_uses_uinput_for_editable_hostile_targets_without_atspi() {
         let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "wine".into(),
@@ -1861,18 +1818,13 @@ mod accessible_insert_validation {
         )
         .unwrap();
 
-        let snapshot = format!("{selection:?}");
-
-        assert!(snapshot.contains("backend_name: \"clipboard-paste\""));
-        assert!(snapshot.contains("target_class: \"hostile\""));
-        assert!(snapshot.contains(
-            "attempted_backends: [\"atspi-editable-text\", \"atspi-key-string\", \"clipboard-paste\"]"
-        ));
+        assert_eq!(selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
+        assert_eq!(selection.target_class, "hostile");
     }
 
     #[test]
-    fn fallback_insert_rejects_terminal_targets_without_text_surface() {
-        let error = select_friendly_insert_backend(
+    fn fallback_insert_uses_uinput_for_terminal_targets_without_text_surface() {
+        let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "gnome-terminal-server".into(),
                 is_editable: false,
@@ -1882,19 +1834,10 @@ mod accessible_insert_validation {
             },
             &FriendlyInsertPolicy::exact("gnome-terminal-server"),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.backend_name, FRIENDLY_INSERT_BACKEND_NAME);
-        assert_eq!(error.reason, FriendlyInsertError::TargetNotEditable);
-        assert_eq!(error.target_class, Some("terminal"));
-        assert_eq!(
-            error.attempted_backends,
-            vec![
-                FRIENDLY_INSERT_BACKEND_NAME,
-                STRING_INJECTION_BACKEND_NAME,
-                CLIPBOARD_PASTE_BACKEND_NAME,
-            ]
-        );
+        assert_eq!(selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
+        assert_eq!(selection.target_class, "terminal");
     }
 
     #[test]
@@ -1934,8 +1877,8 @@ mod accessible_insert_validation {
     }
 
     #[test]
-    fn accessible_insert_live_policy_rejects_hostile_targets() {
-        let error = select_friendly_insert_backend(
+    fn accessible_insert_live_policy_accepts_hostile_targets_via_uinput() {
+        let selection = select_friendly_insert_backend(
             &FriendlyFocusedTarget {
                 application_id: "wine".into(),
                 is_editable: false,
@@ -1945,16 +1888,10 @@ mod accessible_insert_validation {
             },
             &FriendlyInsertPolicy::live_supported(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(
-            error.reason,
-            FriendlyInsertError::UnsupportedApplication {
-                expected_application_id: "supported-live-target".into(),
-                actual_application_id: "wine".into(),
-            }
-        );
-        assert_eq!(error.target_class, Some("hostile"));
+        assert_eq!(selection.backend_name, UINPUT_TEXT_BACKEND_NAME);
+        assert_eq!(selection.target_class, "hostile");
     }
 }
 

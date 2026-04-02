@@ -14,22 +14,34 @@ const SETTINGS_ACTION_LABEL = 'Open Pepper X Settings';
 const HISTORY_ACTION_LABEL = 'Open Pepper X History';
 const STATUS_POLL_INTERVAL_MS = 500;
 
+const ICON_READY = 'audio-input-microphone-symbolic';
+const ICON_RECORDING = 'media-record-symbolic';
+const ICON_WORKING = 'content-loading-symbolic';
+const ICON_ERROR = 'dialog-warning-symbolic';
+const ICON_DISCONNECTED = 'network-offline-symbolic';
+
 const PepperXIndicator = GObject.registerClass(
 class PepperXIndicator extends PanelMenu.Button {
     _init(onOpenSettings, onOpenHistory) {
         super._init(0.0, 'Pepper X');
 
-        const icon = new St.Icon({
-            icon_name: 'audio-input-microphone-symbolic',
+        this._icon = new St.Icon({
+            icon_name: ICON_READY,
             style_class: 'system-status-icon',
         });
-        this.add_child(icon);
+        this.add_child(this._icon);
 
         this._statusItem = new PopupMenu.PopupMenuItem(`${STATUS_LABEL_PREFIX}: Connecting`, {
             reactive: false,
             can_focus: false,
         });
         this.menu.addMenuItem(this._statusItem);
+
+        this._versionItem = new PopupMenu.PopupMenuItem('Pepper X v0.1.0', {
+            reactive: false,
+            can_focus: false,
+        });
+        this.menu.addMenuItem(this._versionItem);
 
         const settingsItem = new PopupMenu.PopupMenuItem(SETTINGS_ACTION_LABEL);
         settingsItem.connect('activate', () => onOpenSettings());
@@ -42,6 +54,31 @@ class PepperXIndicator extends PanelMenu.Button {
 
     setStatus(statusLabel) {
         this._statusItem.label.text = `${STATUS_LABEL_PREFIX}: ${statusLabel}`;
+    }
+
+    setIconForState(state) {
+        let iconName;
+        switch (state) {
+        case 'recording':
+            iconName = ICON_RECORDING;
+            break;
+        case 'transcribing':
+        case 'cleaning-up':
+            iconName = ICON_WORKING;
+            break;
+        case 'error':
+            iconName = ICON_ERROR;
+            break;
+        case 'disconnected':
+            iconName = ICON_DISCONNECTED;
+            break;
+        case 'ready':
+        default:
+            iconName = ICON_READY;
+            break;
+        }
+        if (this._icon.icon_name !== iconName)
+            this._icon.icon_name = iconName;
     }
 });
 
@@ -122,7 +159,14 @@ export default class PepperXExtension extends Extension {
 
     _refreshIndicatorState() {
         if (!this._client) {
-            return;
+            // Retry connection with a fresh proxy
+            try {
+                this._client = createPepperXClient();
+                this._bootstrapConnection();
+            } catch (error) {
+                this._setDisconnectedState();
+                return;
+            }
         }
 
         try {
@@ -131,8 +175,10 @@ export default class PepperXExtension extends Extension {
 
             const liveStatus = this._client.getLiveStatus();
             this._indicator?.setStatus(this._statusLabelFor(liveStatus));
+            this._indicator?.setIconForState(liveStatus.state);
         } catch (error) {
             this._capabilities = null;
+            this._client = null;
             this._setDisconnectedState();
             console.error(`${LOG_PREFIX} Failed to refresh Pepper X status`, error);
         }
@@ -140,6 +186,7 @@ export default class PepperXExtension extends Extension {
 
     _setDisconnectedState() {
         this._indicator?.setStatus('Disconnected');
+        this._indicator?.setIconForState('disconnected');
     }
 
     _statusLabelFor(liveStatus) {
@@ -159,4 +206,5 @@ export default class PepperXExtension extends Extension {
             return this._capabilities?.modifierOnlySupported ? 'Ready' : 'Degraded';
         }
     }
+
 }

@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    time::{Duration, Instant},
 };
 
 #[cfg(target_os = "linux")]
@@ -226,8 +227,14 @@ fn enumerate_linux_microphones() -> Result<MicrophoneInventory, DeviceEnumeratio
         })
         .register();
 
+    let enumeration_deadline = Instant::now() + Duration::from_secs(5);
     while !done.get() && enumeration_error.borrow().is_none() {
-        mainloop.run();
+        if Instant::now() >= enumeration_deadline {
+            return Err(DeviceEnumerationError::new(
+                "PipeWire microphone enumeration timed out",
+            ));
+        }
+        mainloop.loop_().iterate(Duration::from_millis(100));
     }
 
     if let Some(error) = enumeration_error.borrow_mut().take() {

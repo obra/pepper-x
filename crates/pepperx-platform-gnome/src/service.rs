@@ -41,9 +41,10 @@ impl ServiceHandle {
     ) -> zbus::Result<Self> {
         let service = PepperXService::new(command_sender, recording_runtime, live_status);
         let connection = ConnectionBuilder::session()?
-            .name(SERVICE_NAME)?
             .serve_at(OBJECT_PATH, service.clone())?
             .build()?;
+
+        connection.request_name(SERVICE_NAME)?;
 
         Ok(Self {
             _connection: connection,

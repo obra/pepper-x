@@ -1,14 +1,16 @@
 use hound::{SampleFormat, WavReader};
-use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig};
+use parakeet_rs::Nemotron;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-pub const BACKEND_NAME: &str = "sherpa-onnx";
-const MODEL_TYPE_NEMO_TRANSDUCER: &str = "nemo_transducer";
-const ENCODER_FILE_NAME: &str = "encoder.int8.onnx";
-const DECODER_FILE_NAME: &str = "decoder.int8.onnx";
-const JOINER_FILE_NAME: &str = "joiner.int8.onnx";
-const TOKENS_FILE_NAME: &str = "tokens.txt";
+pub const BACKEND_NAME: &str = "parakeet-rs";
+
+const ENCODER_FILE_NAME: &str = "encoder.onnx";
+const DECODER_JOINT_FILE_NAME: &str = "decoder_joint.onnx";
+const TOKENIZER_FILE_NAME: &str = "tokenizer.model";
+
+/// Number of f32 samples in a 560ms chunk at 16 kHz.
+const STREAMING_CHUNK_SAMPLES: usize = 8960;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptionRequest {
@@ -52,47 +54,146 @@ pub enum TranscriptionError {
     DecodeFailed(PathBuf),
 }
 
+// ---------------------------------------------------------------------------
+// Batch mode -- transcribe a complete WAV file in one shot
+// ---------------------------------------------------------------------------
+
 pub fn transcribe_wav(
     request: &TranscriptionRequest,
 ) -> Result<TranscriptionResult, TranscriptionError> {
     validate_wav_path(&request.wav_path)?;
-    let (wav_path, sample_rate, samples) = load_wav(&request.wav_path)?;
-    let model_paths = ModelPaths::discover(&request.model_dir)?;
-    let mut config = OfflineRecognizerConfig::default();
-    config.model_config.transducer = OfflineTransducerModelConfig {
-        encoder: Some(model_paths.encoder.to_string_lossy().into_owned()),
-        decoder: Some(model_paths.decoder.to_string_lossy().into_owned()),
-        joiner: Some(model_paths.joiner.to_string_lossy().into_owned()),
-    };
-    config.model_config.tokens = Some(model_paths.tokens.to_string_lossy().into_owned());
-    config.model_config.model_type = Some(MODEL_TYPE_NEMO_TRANSDUCER.into());
-    config.model_config.provider = Some("cpu".into());
+    validate_model_dir(&request.model_dir)?;
 
-    let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
+    let mut model = Nemotron::from_pretrained(&request.model_dir, None).map_err(|_| {
         TranscriptionError::RecognizerInitializationFailed(request.model_dir.clone())
     })?;
-    let stream = recognizer.create_stream();
+
+    let canonical_wav_path = std::fs::canonicalize(&request.wav_path)
+        .map_err(|_| TranscriptionError::MissingWavFile(request.wav_path.clone()))?;
+
     let start = Instant::now();
-    stream.accept_waveform(sample_rate, &samples);
-    recognizer.decode(&stream);
-    let result = stream
-        .get_result()
-        .ok_or_else(|| TranscriptionError::DecodeFailed(request.wav_path.clone()))?;
+    let transcript_text = model
+        .transcribe_file(&canonical_wav_path)
+        .map_err(|_| TranscriptionError::DecodeFailed(request.wav_path.clone()))?;
 
     Ok(TranscriptionResult {
-        wav_path,
-        transcript_text: result.text,
+        wav_path: canonical_wav_path,
+        transcript_text,
         backend_name: BACKEND_NAME.to_string(),
         model_name: request.model_name.clone(),
         elapsed_ms: start.elapsed().as_millis() as u64,
     })
 }
 
+// ---------------------------------------------------------------------------
+// Streaming mode -- feed 560ms chunks during recording
+// ---------------------------------------------------------------------------
+
+pub struct StreamingTranscriber {
+    model: Nemotron,
+    /// Leftover samples from the previous `feed_chunk` call that did not fill
+    /// a complete 560ms window.
+    pending: Vec<f32>,
+}
+
+impl StreamingTranscriber {
+    /// Create a new streaming transcriber backed by the Nemotron model in
+    /// `model_dir`.
+    pub fn new(model_dir: &Path) -> Result<Self, TranscriptionError> {
+        validate_model_dir(model_dir)?;
+        let model = Nemotron::from_pretrained(model_dir, None)
+            .map_err(|_| TranscriptionError::RecognizerInitializationFailed(model_dir.into()))?;
+        Ok(Self {
+            model,
+            pending: Vec::with_capacity(STREAMING_CHUNK_SAMPLES),
+        })
+    }
+
+    /// Feed raw mono 16 kHz f32 samples.  Returns the current partial
+    /// transcript after processing any complete 560ms windows contained in
+    /// `samples` (combined with any leftover samples from previous calls).
+    pub fn feed_chunk(&mut self, samples: &[f32]) -> Result<String, TranscriptionError> {
+        self.pending.extend_from_slice(samples);
+
+        while self.pending.len() >= STREAMING_CHUNK_SAMPLES {
+            let chunk: [f32; STREAMING_CHUNK_SAMPLES] = self.pending
+                [..STREAMING_CHUNK_SAMPLES]
+                .try_into()
+                .expect("slice length verified");
+            self.model
+                .transcribe_chunk(&chunk)
+                .map_err(|_| TranscriptionError::DecodeFailed(PathBuf::from("<streaming>")))?;
+            self.pending.drain(..STREAMING_CHUNK_SAMPLES);
+        }
+
+        Ok(self.model.get_transcript())
+    }
+
+    /// Flush any remaining buffered samples (zero-padded to a full 560ms
+    /// window) and return the final accumulated transcript.
+    pub fn flush(&mut self) -> Result<String, TranscriptionError> {
+        if !self.pending.is_empty() {
+            let mut padded = [0.0f32; STREAMING_CHUNK_SAMPLES];
+            let n = self.pending.len().min(STREAMING_CHUNK_SAMPLES);
+            padded[..n].copy_from_slice(&self.pending[..n]);
+            self.model
+                .transcribe_chunk(&padded)
+                .map_err(|_| TranscriptionError::DecodeFailed(PathBuf::from("<streaming>")))?;
+            self.pending.clear();
+        }
+
+        Ok(self.model.get_transcript())
+    }
+
+    /// Return the full accumulated transcript so far without flushing pending
+    /// samples.
+    pub fn transcript(&self) -> String {
+        self.model.get_transcript()
+    }
+
+    /// Reset the model state so this transcriber can be reused for a new
+    /// utterance.
+    pub fn reset(&mut self) {
+        self.model.reset();
+        self.pending.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
 fn validate_wav_path(wav_path: &Path) -> Result<(), TranscriptionError> {
     if wav_path.is_file() {
         Ok(())
     } else {
         Err(TranscriptionError::MissingWavFile(wav_path.to_path_buf()))
+    }
+}
+
+fn validate_model_dir(model_dir: &Path) -> Result<(), TranscriptionError> {
+    for file_name in [
+        ENCODER_FILE_NAME,
+        DECODER_JOINT_FILE_NAME,
+        TOKENIZER_FILE_NAME,
+    ] {
+        required_model_file(model_dir, file_name)?;
+    }
+    Ok(())
+}
+
+fn required_model_file(
+    model_dir: &Path,
+    file_name: &'static str,
+) -> Result<PathBuf, TranscriptionError> {
+    let path = model_dir.join(file_name);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(TranscriptionError::IncompleteModelDir {
+            model_dir: model_dir.to_path_buf(),
+            missing_file: file_name,
+        })
     }
 }
 
@@ -139,40 +240,6 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-struct ModelPaths {
-    encoder: PathBuf,
-    decoder: PathBuf,
-    joiner: PathBuf,
-    tokens: PathBuf,
-}
-
-impl ModelPaths {
-    fn discover(model_dir: &Path) -> Result<Self, TranscriptionError> {
-        Ok(Self {
-            encoder: required_model_file(model_dir, ENCODER_FILE_NAME)?,
-            decoder: required_model_file(model_dir, DECODER_FILE_NAME)?,
-            joiner: required_model_file(model_dir, JOINER_FILE_NAME)?,
-            tokens: required_model_file(model_dir, TOKENS_FILE_NAME)?,
-        })
-    }
-}
-
-fn required_model_file(
-    model_dir: &Path,
-    file_name: &'static str,
-) -> Result<PathBuf, TranscriptionError> {
-    let path = model_dir.join(file_name);
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(TranscriptionError::IncompleteModelDir {
-            model_dir: model_dir.to_path_buf(),
-            missing_file: file_name,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,7 +253,7 @@ mod tests {
         let request = TranscriptionRequest::new(
             "/tmp/does-not-exist.wav",
             unique_test_root("model-dir"),
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "nemotron-speech-streaming-en-0.6b",
         );
 
         let error = transcribe_wav(&request).unwrap_err();
@@ -203,8 +270,11 @@ mod tests {
         fs::create_dir_all(&model_dir).unwrap();
         let wav_path = model_dir.join("existing.wav");
         fs::copy(fixture_path(), &wav_path).unwrap();
-        let request =
-            TranscriptionRequest::new(&wav_path, &model_dir, "nemo-parakeet-tdt-0.6b-v2-int8");
+        let request = TranscriptionRequest::new(
+            &wav_path,
+            &model_dir,
+            "nemotron-speech-streaming-en-0.6b",
+        );
 
         let error = transcribe_wav(&request).unwrap_err();
 
@@ -212,14 +282,14 @@ mod tests {
             error,
             TranscriptionError::IncompleteModelDir {
                 model_dir,
-                missing_file: "encoder.int8.onnx",
+                missing_file: "encoder.onnx",
             }
         );
     }
 
     #[test]
-    fn transcriber_exposes_sherpa_backend_name() {
-        assert_eq!(BACKEND_NAME, "sherpa-onnx");
+    fn transcriber_exposes_parakeet_backend_name() {
+        assert_eq!(BACKEND_NAME, "parakeet-rs");
     }
 
     #[cfg(target_os = "linux")]
@@ -246,8 +316,11 @@ mod tests {
             std::env::var("PEPPERX_PARAKEET_MODEL_DIR")
                 .expect("PEPPERX_PARAKEET_MODEL_DIR must point at a Parakeet model bundle"),
         );
-        let request =
-            TranscriptionRequest::new(fixture_path(), model_dir, "nemo-parakeet-tdt-0.6b-v2-int8");
+        let request = TranscriptionRequest::new(
+            fixture_path(),
+            model_dir,
+            "nemotron-speech-streaming-en-0.6b",
+        );
 
         let result = transcribe_wav(&request).expect("transcribe fixture");
 

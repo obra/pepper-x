@@ -373,7 +373,8 @@ fn record_and_transcribe<F>(
 where
     F: FnOnce() -> std::io::Result<()>,
 {
-    let runtime = LiveRuntimeHandle::new(selected_microphone, SharedLiveStatus::new());
+    let settings = crate::settings::AppSettings::load_or_default();
+    let runtime = LiveRuntimeHandle::new(selected_microphone, SharedLiveStatus::new(), settings.play_sounds);
     runtime
         .record_and_transcribe(TriggerSource::ShellAction, wait_for_stop)
         .map_err(|error| TranscriptionRunError::LiveRecording(error.to_string()))
@@ -498,7 +499,7 @@ mod cli_mode {
             "--asr-model".to_string(),
             "nemo-parakeet-tdt-0.6b-v3-int8".to_string(),
             "--cleanup-model".to_string(),
-            "qwen2.5-1.5b-instruct-q4_k_m.gguf".to_string(),
+            "qwen3.5-0.8b-q4_k_m.gguf".to_string(),
             "--cleanup-prompt-profile".to_string(),
             "literal-dictation".to_string(),
         ])
@@ -509,7 +510,7 @@ mod cli_mode {
             StartupMode::RerunArchivedRun {
                 run_id: "run-123".into(),
                 asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
-                cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
+                cleanup_model_id: Some("qwen3.5-0.8b-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             }
         );
@@ -527,14 +528,14 @@ mod cli_mode {
         let command = parse_args([
             "pepper-x".to_string(),
             "--bootstrap-model".to_string(),
-            "nemo-parakeet-tdt-0.6b-v2-int8".to_string(),
+            "nemo-parakeet-tdt-0.6b-v3-int8".to_string(),
         ])
         .unwrap();
 
         assert_eq!(
             command,
             StartupMode::BootstrapModel {
-                model_id: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+                model_id: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
             }
         );
     }
@@ -544,14 +545,14 @@ mod cli_mode {
         let command = parse_args([
             "pepper-x".to_string(),
             "--set-default-cleanup-model".to_string(),
-            "qwen2.5-3b-instruct-q4_k_m.gguf".to_string(),
+            "qwen3.5-2b-q4_k_m.gguf".to_string(),
         ])
         .unwrap();
 
         assert_eq!(
             command,
             StartupMode::SetDefaultCleanupModel {
-                model_id: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                model_id: "qwen3.5-2b-q4_k_m.gguf".into(),
             }
         );
     }
@@ -577,8 +578,8 @@ mod cli_mode {
         let expected = TranscriptEntry::new(
             &wav_path,
             "hello from live pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
             Duration::from_millis(64),
         );
 
@@ -611,7 +612,7 @@ mod cli_mode {
         let expected = TranscriptEntry::new(
             &wav_path,
             "hello from rerun pepper x",
-            "sherpa-onnx",
+            "parakeet-rs",
             "nemo-parakeet-tdt-0.6b-v3-int8",
             Duration::from_millis(41),
         );
@@ -621,7 +622,7 @@ mod cli_mode {
             StartupMode::RerunArchivedRun {
                 run_id: "run-123".into(),
                 asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
-                cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
+                cleanup_model_id: Some("qwen3.5-0.8b-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             },
             || unreachable!(),
@@ -642,7 +643,7 @@ mod cli_mode {
                 run_id: "run-123".into(),
                 asr_model_id: Some("nemo-parakeet-tdt-0.6b-v3-int8".into()),
                 cleanup_enabled: true,
-                cleanup_model_id: Some("qwen2.5-1.5b-instruct-q4_k_m.gguf".into()),
+                cleanup_model_id: Some("qwen3.5-0.8b-q4_k_m.gguf".into()),
                 cleanup_prompt_profile: Some("literal-dictation".into()),
             })
         );
@@ -668,7 +669,7 @@ mod cli_mode {
         let expected = TranscriptEntry::new(
             &wav_path,
             "hello from rerun pepper x",
-            "sherpa-onnx",
+            "parakeet-rs",
             "nemo-parakeet-tdt-0.6b-v3-int8",
             Duration::from_millis(41),
         );
@@ -822,13 +823,13 @@ mod cli_mode {
         let mut expected = TranscriptEntry::new(
             &wav_path,
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
             Duration::from_millis(37),
         );
         expected.cleanup = Some(crate::transcript_log::CleanupDiagnostics::succeeded(
             "llama.cpp",
-            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "qwen3.5-2b-q4_k_m.gguf",
             "Hello from Pepper X.",
             Duration::from_millis(19),
         ));
@@ -880,8 +881,8 @@ mod cli_mode {
         let expected = TranscriptEntry::new(
             &wav_path,
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
             Duration::from_millis(37),
         );
         let mut observed_path = None;
@@ -913,13 +914,13 @@ mod cli_mode {
         let mut expected = TranscriptEntry::new(
             &wav_path,
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
             Duration::from_millis(37),
         );
         expected.cleanup = Some(crate::transcript_log::CleanupDiagnostics::succeeded(
             "llama.cpp",
-            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "qwen3.5-2b-q4_k_m.gguf",
             "Hello from Pepper X.",
             Duration::from_millis(19),
         ));
@@ -950,8 +951,8 @@ mod cli_mode {
         let expected = TranscriptEntry::new(
             &wav_path,
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemo-parakeet-tdt-0.6b-v3-int8",
             Duration::from_millis(37),
         );
         let mut observed_path = None;

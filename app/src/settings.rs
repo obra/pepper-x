@@ -18,6 +18,22 @@ pub const LAUNCH_AT_LOGIN_DESKTOP_FILE_PATH: &str = "/etc/xdg/autostart/pepper-x
 const LAUNCH_AT_LOGIN_DESKTOP_TEMPLATE: &str =
     include_str!("../../packaging/deb/pepper-x-autostart.desktop");
 
+fn default_play_sounds() -> bool {
+    true
+}
+
+fn default_enable_post_paste_learning() -> bool {
+    true
+}
+
+fn default_hold_trigger_keys() -> String {
+    "56,100,125,126".into()
+}
+
+fn default_toggle_trigger_keys() -> String {
+    "56,57,100,125,126".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecordingTriggerMode {
@@ -36,6 +52,21 @@ pub struct AppSettings {
     pub preferred_cleanup_model: String,
     pub cleanup_prompt_profile: String,
     pub cleanup_custom_prompt: String,
+    #[serde(default = "default_play_sounds")]
+    pub play_sounds: bool,
+    #[serde(default)]
+    pub enable_window_context: bool,
+    #[serde(default = "default_hold_trigger_keys")]
+    pub hold_trigger_keys: String,
+    #[serde(default = "default_toggle_trigger_keys")]
+    pub toggle_trigger_keys: String,
+    #[serde(default)]
+    pub ignore_other_speakers: bool,
+    #[serde(default = "default_enable_post_paste_learning")]
+    pub enable_post_paste_learning: bool,
+    /// Legacy field — migrated to `hold_trigger_keys` on load.
+    #[serde(default, skip_serializing)]
+    pub(crate) preferred_trigger_keys: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +101,13 @@ impl Default for AppSettings {
             preferred_cleanup_model: default_model(ModelKind::Cleanup).id.into(),
             cleanup_prompt_profile: DEFAULT_CLEANUP_PROMPT_PROFILE.into(),
             cleanup_custom_prompt: String::new(),
+            play_sounds: true,
+            enable_window_context: false,
+            hold_trigger_keys: default_hold_trigger_keys(),
+            toggle_trigger_keys: default_toggle_trigger_keys(),
+            ignore_other_speakers: false,
+            enable_post_paste_learning: true,
+            preferred_trigger_keys: None,
         }
     }
 }
@@ -95,6 +133,12 @@ impl AppSettings {
                 ),
             )
         })?;
+        // Migrate legacy preferred_trigger_keys -> hold_trigger_keys
+        if let Some(legacy_keys) = settings.preferred_trigger_keys.take() {
+            if settings.hold_trigger_keys == default_hold_trigger_keys() {
+                settings.hold_trigger_keys = legacy_keys;
+            }
+        }
         if let Ok(launch_at_login) = current_launch_at_login_state() {
             settings.launch_at_login = launch_at_login;
         }
@@ -396,8 +440,8 @@ mod tests {
     fn model_status_settings_round_trip_default_models_and_cleanup_prompt_profile() {
         let settings = AppSettings {
             cleanup_enabled: true,
-            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
-            preferred_cleanup_model: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
+            preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "ordinary-dictation".into(),
             cleanup_custom_prompt: String::new(),
             ..AppSettings::default()
@@ -414,10 +458,16 @@ mod tests {
                 "preferred_recording_trigger_mode": "modifier-only",
                 "preferred_microphone": null,
                 "cleanup_enabled": true,
-                "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v2-int8",
-                "preferred_cleanup_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v3-int8",
+                "preferred_cleanup_model": "qwen3.5-2b-q4_k_m.gguf",
                 "cleanup_prompt_profile": "ordinary-dictation",
-                "cleanup_custom_prompt": ""
+                "cleanup_custom_prompt": "",
+                "play_sounds": true,
+                "enable_window_context": false,
+                "hold_trigger_keys": "56,100,125,126",
+                "toggle_trigger_keys": "56,57,100,125,126",
+                "ignore_other_speakers": false,
+                "enable_post_paste_learning": true
             })
         );
         assert_eq!(restored.preferred_asr_model, settings.preferred_asr_model);
@@ -459,10 +509,16 @@ mod tests {
                     "display_name": "Blue Yeti"
                 },
                 "cleanup_enabled": true,
-                "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v2-int8",
-                "preferred_cleanup_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "preferred_asr_model": "nemotron-speech-streaming-en-0.6b",
+                "preferred_cleanup_model": "qwen3.5-2b-q4_k_m.gguf",
                 "cleanup_prompt_profile": "ordinary-dictation",
-                "cleanup_custom_prompt": ""
+                "cleanup_custom_prompt": "",
+                "play_sounds": true,
+                "enable_window_context": false,
+                "hold_trigger_keys": "56,100,125,126",
+                "toggle_trigger_keys": "56,57,100,125,126",
+                "ignore_other_speakers": false,
+                "enable_post_paste_learning": true
             })
         );
     }
@@ -488,10 +544,16 @@ mod tests {
                 "preferred_recording_trigger_mode": "modifier-only",
                 "preferred_microphone": null,
                 "cleanup_enabled": false,
-                "preferred_asr_model": "nemo-parakeet-tdt-0.6b-v2-int8",
-                "preferred_cleanup_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+                "preferred_asr_model": "nemotron-speech-streaming-en-0.6b",
+                "preferred_cleanup_model": "qwen3.5-2b-q4_k_m.gguf",
                 "cleanup_prompt_profile": "literal-dictation",
-                "cleanup_custom_prompt": "Keep product names verbatim."
+                "cleanup_custom_prompt": "Keep product names verbatim.",
+                "play_sounds": true,
+                "enable_window_context": false,
+                "hold_trigger_keys": "56,100,125,126",
+                "toggle_trigger_keys": "56,57,100,125,126",
+                "ignore_other_speakers": false,
+                "enable_post_paste_learning": true
             })
         );
         assert!(restored.launch_at_login);

@@ -108,6 +108,15 @@ impl LiveStatus {
         Self::Error(message.into())
     }
 
+    /// Returns `true` when the pipeline is actively processing (recording,
+    /// transcribing, or cleaning up).
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self,
+            Self::Recording | Self::Transcribing | Self::CleaningUp
+        )
+    }
+
     pub fn to_dbus_payload(&self) -> LiveStatusPayload {
         match self {
             Self::Ready => (LIVE_STATUS_READY.into(), String::new()),

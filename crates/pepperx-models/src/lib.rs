@@ -50,16 +50,13 @@ mod tests {
         let models = supported_models();
 
         assert!(models.iter().any(|model| {
-            model.id == "nemo-parakeet-tdt-0.6b-v2-int8" && model.kind == ModelKind::Asr
+            model.id == "nemotron-speech-streaming-en-0.6b" && model.kind == ModelKind::Asr
         }));
         assert!(models.iter().any(|model| {
-            model.id == "nemo-parakeet-tdt-0.6b-v3-int8" && model.kind == ModelKind::Asr
+            model.id == "qwen3.5-2b-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
         }));
         assert!(models.iter().any(|model| {
-            model.id == "qwen2.5-3b-instruct-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
-        }));
-        assert!(models.iter().any(|model| {
-            model.id == "qwen2.5-1.5b-instruct-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
+            model.id == "qwen3.5-0.8b-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
         }));
     }
 
@@ -87,22 +84,22 @@ mod tests {
         std::fs::create_dir_all(&cache_root).unwrap();
         let model = supported_models()
             .iter()
-            .find(|model| model.id == "nemo-parakeet-tdt-0.6b-v2-int8")
+            .find(|model| model.id == "nemotron-speech-streaming-en-0.6b")
             .expect("catalog should include the default ASR model");
 
         let missing = model_readiness(model, &cache_root);
         assert!(!missing.is_ready);
         assert!(missing
             .missing_files
-            .contains(&String::from("encoder.int8.onnx")));
+            .contains(&String::from("encoder.onnx")));
 
         let install_dir = model_install_dir(model, &cache_root);
         std::fs::create_dir_all(&install_dir).unwrap();
         for file_name in [
-            "encoder.int8.onnx",
-            "decoder.int8.onnx",
-            "joiner.int8.onnx",
-            "tokens.txt",
+            "encoder.onnx",
+            "encoder.onnx.data",
+            "decoder_joint.onnx",
+            "tokenizer.model",
         ] {
             std::fs::write(install_dir.join(file_name), b"pepper-x").unwrap();
         }

@@ -1,13 +1,20 @@
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, SynchronizationCode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
+use xkbcommon::xkb;
 
 const SOCKET_ENV: &str = "PEPPERX_UINPUT_HELPER_SOCKET";
 const STARTUP_DELAY: Duration = Duration::from_millis(250);
+const KEY_HOLD_DELAY: Duration = Duration::from_millis(2);
+const INTER_KEY_DELAY: Duration = Duration::from_millis(1);
+
+/// Evdev keycodes start at 8 below XKB keycodes (XKB keycode = evdev keycode + 8).
+const XKB_EVDEV_OFFSET: u32 = 8;
 
 #[derive(Debug, Deserialize)]
 struct UinputInsertRequest {
@@ -22,8 +29,8 @@ struct UinputInsertResponse {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct KeyStroke {
-    key: KeyCode,
+struct KeyChord {
+    keycode: KeyCode,
     shift: bool,
 }
 
@@ -52,13 +59,15 @@ fn run() -> Result<(), String> {
             socket_path.display()
         )
     })?;
-    let mut device = create_virtual_keyboard()?;
+
+    let char_map = build_xkb_char_map()?;
+    let mut device = create_virtual_keyboard(&char_map)?;
 
     loop {
         let (stream, _) = listener
             .accept()
             .map_err(|error| format!("failed to accept helper connection: {error}"))?;
-        handle_connection(stream, &mut device)?;
+        handle_connection(stream, &mut device, &char_map)?;
     }
 }
 
@@ -74,11 +83,160 @@ fn configured_socket_path() -> Result<PathBuf, String> {
         .join("uinput-helper.sock"))
 }
 
-fn create_virtual_keyboard() -> Result<VirtualDevice, String> {
-    let mut keys = AttributeSet::<KeyCode>::new();
-    for key in supported_key_codes() {
-        keys.insert(*key);
+// ---------------------------------------------------------------------------
+// XKB keymap → character mapping
+// ---------------------------------------------------------------------------
+
+fn build_xkb_char_map() -> Result<HashMap<char, KeyChord>, String> {
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+
+    let layout = std::env::var("PEPPERX_XKB_LAYOUT").unwrap_or_else(|_| detect_layout());
+    let variant = std::env::var("PEPPERX_XKB_VARIANT").unwrap_or_default();
+
+    let keymap = xkb::Keymap::new_from_names(
+        &context,
+        "",      // rules (default)
+        "",      // model (default)
+        &layout,
+        &variant,
+        None,    // options
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .ok_or_else(|| {
+        format!("failed to compile XKB keymap for layout '{layout}', variant '{variant}'")
+    })?;
+
+    let state = xkb::State::new(&keymap);
+    let mut char_map = HashMap::new();
+
+    let min_keycode = keymap.min_keycode().raw();
+    let max_keycode = keymap.max_keycode().raw();
+
+    for raw_kc in min_keycode..=max_keycode {
+        let xkb_keycode = xkb::Keycode::new(raw_kc);
+        let num_levels = keymap.num_levels_for_key(xkb_keycode, 0);
+
+        for level in 0..num_levels {
+            // For now, only support levels 0 and 1 (unshifted and shifted).
+            // AltGr and other modifiers can be added later.
+            if level > 1 {
+                continue;
+            }
+
+            let syms = keymap.key_get_syms_by_level(xkb_keycode, 0, level);
+
+            for sym in syms {
+                let ch = xkb::keysym_to_utf32(*sym);
+                if ch == 0 || ch > 0x10FFFF {
+                    continue;
+                }
+                let Some(ch) = char::from_u32(ch) else {
+                    continue;
+                };
+
+                // Skip control characters except newline and tab
+                if ch.is_control() && ch != '\n' && ch != '\t' {
+                    continue;
+                }
+
+                // Only map if we haven't seen this character at a simpler level
+                if char_map.contains_key(&ch) {
+                    continue;
+                }
+
+                // Convert XKB keycode to evdev keycode
+                let evdev_code = raw_kc - XKB_EVDEV_OFFSET;
+
+                // Determine if shift is needed: level 0 = no shift, level 1 = shift
+                let shift = level == 1;
+
+                char_map.insert(
+                    ch,
+                    KeyChord {
+                        keycode: KeyCode::new(evdev_code as u16),
+                        shift,
+                    },
+                );
+            }
+        }
     }
+
+    // Ensure space, enter, tab are mapped even if the keymap is weird
+    char_map
+        .entry(' ')
+        .or_insert(KeyChord { keycode: KeyCode::KEY_SPACE, shift: false });
+    char_map
+        .entry('\n')
+        .or_insert(KeyChord { keycode: KeyCode::KEY_ENTER, shift: false });
+    char_map
+        .entry('\t')
+        .or_insert(KeyChord { keycode: KeyCode::KEY_TAB, shift: false });
+
+    eprintln!(
+        "[Pepper X uinput] XKB layout '{layout}' loaded, {} characters mapped",
+        char_map.len()
+    );
+
+    Ok(char_map)
+}
+
+fn detect_layout() -> String {
+    // Try reading from gsettings
+    if let Ok(output) = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.input-sources", "sources"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Format: [('xkb', 'us'), ('xkb', 'de')]
+        // Extract the first layout
+        if let Some(start) = stdout.find("'xkb', '") {
+            let rest = &stdout[start + 8..];
+            if let Some(end) = rest.find('\'') {
+                let layout = &rest[..end];
+                if !layout.is_empty() {
+                    eprintln!("[Pepper X uinput] detected layout from gsettings: {layout}");
+                    return layout.to_string();
+                }
+            }
+        }
+    }
+
+    // Try /etc/default/keyboard
+    if let Ok(content) = std::fs::read_to_string("/etc/default/keyboard") {
+        for line in content.lines() {
+            if let Some(layout) = line.strip_prefix("XKBLAYOUT=") {
+                let layout = layout.trim_matches('"').trim();
+                if !layout.is_empty() {
+                    let first = layout.split(',').next().unwrap_or(layout);
+                    eprintln!(
+                        "[Pepper X uinput] detected layout from /etc/default/keyboard: {first}"
+                    );
+                    return first.to_string();
+                }
+            }
+        }
+    }
+
+    eprintln!("[Pepper X uinput] no layout detected, defaulting to 'us'");
+    "us".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Virtual keyboard
+// ---------------------------------------------------------------------------
+
+fn create_virtual_keyboard(
+    char_map: &HashMap<char, KeyChord>,
+) -> Result<VirtualDevice, String> {
+    let mut keys = AttributeSet::<KeyCode>::new();
+
+    // Register all keycodes from the character map
+    for chord in char_map.values() {
+        keys.insert(chord.keycode);
+    }
+    // Always include modifiers
+    keys.insert(KeyCode::KEY_LEFTSHIFT);
+    keys.insert(KeyCode::KEY_RIGHTSHIFT);
 
     let device = VirtualDevice::builder()
         .map_err(|error| format!("failed to create uinput builder: {error}"))?
@@ -88,12 +246,19 @@ fn create_virtual_keyboard() -> Result<VirtualDevice, String> {
         .build()
         .map_err(|error| format!("failed to create Pepper X uinput device: {error}"))?;
 
-    // Give the kernel time to publish the virtual keyboard before the first write.
     std::thread::sleep(STARTUP_DELAY);
     Ok(device)
 }
 
-fn handle_connection(mut stream: UnixStream, device: &mut VirtualDevice) -> Result<(), String> {
+// ---------------------------------------------------------------------------
+// Connection handling
+// ---------------------------------------------------------------------------
+
+fn handle_connection(
+    mut stream: UnixStream,
+    device: &mut VirtualDevice,
+    char_map: &HashMap<char, KeyChord>,
+) -> Result<(), String> {
     let request: UinputInsertRequest = serde_json::from_reader(BufReader::new(
         stream
             .try_clone()
@@ -101,7 +266,7 @@ fn handle_connection(mut stream: UnixStream, device: &mut VirtualDevice) -> Resu
     ))
     .map_err(|error| format!("failed to parse helper request: {error}"))?;
 
-    let response = match type_text(device, &request.text) {
+    let response = match type_text(device, &request.text, char_map) {
         Ok(()) => UinputInsertResponse {
             ok: true,
             error: None,
@@ -120,24 +285,44 @@ fn handle_connection(mut stream: UnixStream, device: &mut VirtualDevice) -> Resu
     Ok(())
 }
 
-fn type_text(device: &mut VirtualDevice, text: &str) -> Result<(), String> {
+// ---------------------------------------------------------------------------
+// Text emission
+// ---------------------------------------------------------------------------
+
+fn type_text(
+    device: &mut VirtualDevice,
+    text: &str,
+    char_map: &HashMap<char, KeyChord>,
+) -> Result<(), String> {
+    // Pre-validate: ensure every character is mappable before typing anything
     for ch in text.chars() {
-        let stroke = keystroke_for_char(ch)?;
-        emit_keystroke(device, stroke)?;
+        if !char_map.contains_key(&ch) {
+            return Err(format!(
+                "unmappable character {:?} (U+{:04X}) in current keyboard layout",
+                ch, ch as u32
+            ));
+        }
+    }
+
+    for ch in text.chars() {
+        let chord = char_map[&ch];
+        emit_chord(device, chord)?;
+        std::thread::sleep(INTER_KEY_DELAY);
     }
 
     Ok(())
 }
 
-fn emit_keystroke(device: &mut VirtualDevice, stroke: KeyStroke) -> Result<(), String> {
-    if stroke.shift {
+fn emit_chord(device: &mut VirtualDevice, chord: KeyChord) -> Result<(), String> {
+    if chord.shift {
         emit_key(device, KeyCode::KEY_LEFTSHIFT, 1)?;
     }
 
-    emit_key(device, stroke.key, 1)?;
-    emit_key(device, stroke.key, 0)?;
+    emit_key(device, chord.keycode, 1)?;
+    std::thread::sleep(KEY_HOLD_DELAY);
+    emit_key(device, chord.keycode, 0)?;
 
-    if stroke.shift {
+    if chord.shift {
         emit_key(device, KeyCode::KEY_LEFTSHIFT, 0)?;
     }
 
@@ -156,463 +341,4 @@ fn emit_key(device: &mut VirtualDevice, key: KeyCode, value: i32) -> Result<(), 
     device
         .emit(&events)
         .map_err(|error| format!("failed to emit uinput key event: {error}"))
-}
-
-fn supported_key_codes() -> &'static [KeyCode] {
-    &[
-        KeyCode::KEY_A,
-        KeyCode::KEY_B,
-        KeyCode::KEY_C,
-        KeyCode::KEY_D,
-        KeyCode::KEY_E,
-        KeyCode::KEY_F,
-        KeyCode::KEY_G,
-        KeyCode::KEY_H,
-        KeyCode::KEY_I,
-        KeyCode::KEY_J,
-        KeyCode::KEY_K,
-        KeyCode::KEY_L,
-        KeyCode::KEY_M,
-        KeyCode::KEY_N,
-        KeyCode::KEY_O,
-        KeyCode::KEY_P,
-        KeyCode::KEY_Q,
-        KeyCode::KEY_R,
-        KeyCode::KEY_S,
-        KeyCode::KEY_T,
-        KeyCode::KEY_U,
-        KeyCode::KEY_V,
-        KeyCode::KEY_W,
-        KeyCode::KEY_X,
-        KeyCode::KEY_Y,
-        KeyCode::KEY_Z,
-        KeyCode::KEY_0,
-        KeyCode::KEY_1,
-        KeyCode::KEY_2,
-        KeyCode::KEY_3,
-        KeyCode::KEY_4,
-        KeyCode::KEY_5,
-        KeyCode::KEY_6,
-        KeyCode::KEY_7,
-        KeyCode::KEY_8,
-        KeyCode::KEY_9,
-        KeyCode::KEY_SPACE,
-        KeyCode::KEY_ENTER,
-        KeyCode::KEY_TAB,
-        KeyCode::KEY_MINUS,
-        KeyCode::KEY_EQUAL,
-        KeyCode::KEY_LEFTBRACE,
-        KeyCode::KEY_RIGHTBRACE,
-        KeyCode::KEY_SEMICOLON,
-        KeyCode::KEY_APOSTROPHE,
-        KeyCode::KEY_GRAVE,
-        KeyCode::KEY_BACKSLASH,
-        KeyCode::KEY_COMMA,
-        KeyCode::KEY_DOT,
-        KeyCode::KEY_SLASH,
-        KeyCode::KEY_LEFTSHIFT,
-    ]
-}
-
-fn keystroke_for_char(ch: char) -> Result<KeyStroke, String> {
-    use evdev::KeyCode as K;
-
-    let stroke = match ch {
-        'a' => KeyStroke {
-            key: K::KEY_A,
-            shift: false,
-        },
-        'b' => KeyStroke {
-            key: K::KEY_B,
-            shift: false,
-        },
-        'c' => KeyStroke {
-            key: K::KEY_C,
-            shift: false,
-        },
-        'd' => KeyStroke {
-            key: K::KEY_D,
-            shift: false,
-        },
-        'e' => KeyStroke {
-            key: K::KEY_E,
-            shift: false,
-        },
-        'f' => KeyStroke {
-            key: K::KEY_F,
-            shift: false,
-        },
-        'g' => KeyStroke {
-            key: K::KEY_G,
-            shift: false,
-        },
-        'h' => KeyStroke {
-            key: K::KEY_H,
-            shift: false,
-        },
-        'i' => KeyStroke {
-            key: K::KEY_I,
-            shift: false,
-        },
-        'j' => KeyStroke {
-            key: K::KEY_J,
-            shift: false,
-        },
-        'k' => KeyStroke {
-            key: K::KEY_K,
-            shift: false,
-        },
-        'l' => KeyStroke {
-            key: K::KEY_L,
-            shift: false,
-        },
-        'm' => KeyStroke {
-            key: K::KEY_M,
-            shift: false,
-        },
-        'n' => KeyStroke {
-            key: K::KEY_N,
-            shift: false,
-        },
-        'o' => KeyStroke {
-            key: K::KEY_O,
-            shift: false,
-        },
-        'p' => KeyStroke {
-            key: K::KEY_P,
-            shift: false,
-        },
-        'q' => KeyStroke {
-            key: K::KEY_Q,
-            shift: false,
-        },
-        'r' => KeyStroke {
-            key: K::KEY_R,
-            shift: false,
-        },
-        's' => KeyStroke {
-            key: K::KEY_S,
-            shift: false,
-        },
-        't' => KeyStroke {
-            key: K::KEY_T,
-            shift: false,
-        },
-        'u' => KeyStroke {
-            key: K::KEY_U,
-            shift: false,
-        },
-        'v' => KeyStroke {
-            key: K::KEY_V,
-            shift: false,
-        },
-        'w' => KeyStroke {
-            key: K::KEY_W,
-            shift: false,
-        },
-        'x' => KeyStroke {
-            key: K::KEY_X,
-            shift: false,
-        },
-        'y' => KeyStroke {
-            key: K::KEY_Y,
-            shift: false,
-        },
-        'z' => KeyStroke {
-            key: K::KEY_Z,
-            shift: false,
-        },
-        'A' => KeyStroke {
-            key: K::KEY_A,
-            shift: true,
-        },
-        'B' => KeyStroke {
-            key: K::KEY_B,
-            shift: true,
-        },
-        'C' => KeyStroke {
-            key: K::KEY_C,
-            shift: true,
-        },
-        'D' => KeyStroke {
-            key: K::KEY_D,
-            shift: true,
-        },
-        'E' => KeyStroke {
-            key: K::KEY_E,
-            shift: true,
-        },
-        'F' => KeyStroke {
-            key: K::KEY_F,
-            shift: true,
-        },
-        'G' => KeyStroke {
-            key: K::KEY_G,
-            shift: true,
-        },
-        'H' => KeyStroke {
-            key: K::KEY_H,
-            shift: true,
-        },
-        'I' => KeyStroke {
-            key: K::KEY_I,
-            shift: true,
-        },
-        'J' => KeyStroke {
-            key: K::KEY_J,
-            shift: true,
-        },
-        'K' => KeyStroke {
-            key: K::KEY_K,
-            shift: true,
-        },
-        'L' => KeyStroke {
-            key: K::KEY_L,
-            shift: true,
-        },
-        'M' => KeyStroke {
-            key: K::KEY_M,
-            shift: true,
-        },
-        'N' => KeyStroke {
-            key: K::KEY_N,
-            shift: true,
-        },
-        'O' => KeyStroke {
-            key: K::KEY_O,
-            shift: true,
-        },
-        'P' => KeyStroke {
-            key: K::KEY_P,
-            shift: true,
-        },
-        'Q' => KeyStroke {
-            key: K::KEY_Q,
-            shift: true,
-        },
-        'R' => KeyStroke {
-            key: K::KEY_R,
-            shift: true,
-        },
-        'S' => KeyStroke {
-            key: K::KEY_S,
-            shift: true,
-        },
-        'T' => KeyStroke {
-            key: K::KEY_T,
-            shift: true,
-        },
-        'U' => KeyStroke {
-            key: K::KEY_U,
-            shift: true,
-        },
-        'V' => KeyStroke {
-            key: K::KEY_V,
-            shift: true,
-        },
-        'W' => KeyStroke {
-            key: K::KEY_W,
-            shift: true,
-        },
-        'X' => KeyStroke {
-            key: K::KEY_X,
-            shift: true,
-        },
-        'Y' => KeyStroke {
-            key: K::KEY_Y,
-            shift: true,
-        },
-        'Z' => KeyStroke {
-            key: K::KEY_Z,
-            shift: true,
-        },
-        '0' => KeyStroke {
-            key: K::KEY_0,
-            shift: false,
-        },
-        '1' => KeyStroke {
-            key: K::KEY_1,
-            shift: false,
-        },
-        '2' => KeyStroke {
-            key: K::KEY_2,
-            shift: false,
-        },
-        '3' => KeyStroke {
-            key: K::KEY_3,
-            shift: false,
-        },
-        '4' => KeyStroke {
-            key: K::KEY_4,
-            shift: false,
-        },
-        '5' => KeyStroke {
-            key: K::KEY_5,
-            shift: false,
-        },
-        '6' => KeyStroke {
-            key: K::KEY_6,
-            shift: false,
-        },
-        '7' => KeyStroke {
-            key: K::KEY_7,
-            shift: false,
-        },
-        '8' => KeyStroke {
-            key: K::KEY_8,
-            shift: false,
-        },
-        '9' => KeyStroke {
-            key: K::KEY_9,
-            shift: false,
-        },
-        '!' => KeyStroke {
-            key: K::KEY_1,
-            shift: true,
-        },
-        '@' => KeyStroke {
-            key: K::KEY_2,
-            shift: true,
-        },
-        '#' => KeyStroke {
-            key: K::KEY_3,
-            shift: true,
-        },
-        '$' => KeyStroke {
-            key: K::KEY_4,
-            shift: true,
-        },
-        '%' => KeyStroke {
-            key: K::KEY_5,
-            shift: true,
-        },
-        '^' => KeyStroke {
-            key: K::KEY_6,
-            shift: true,
-        },
-        '&' => KeyStroke {
-            key: K::KEY_7,
-            shift: true,
-        },
-        '*' => KeyStroke {
-            key: K::KEY_8,
-            shift: true,
-        },
-        '(' => KeyStroke {
-            key: K::KEY_9,
-            shift: true,
-        },
-        ')' => KeyStroke {
-            key: K::KEY_0,
-            shift: true,
-        },
-        ' ' => KeyStroke {
-            key: K::KEY_SPACE,
-            shift: false,
-        },
-        '\n' => KeyStroke {
-            key: K::KEY_ENTER,
-            shift: false,
-        },
-        '\t' => KeyStroke {
-            key: K::KEY_TAB,
-            shift: false,
-        },
-        '-' => KeyStroke {
-            key: K::KEY_MINUS,
-            shift: false,
-        },
-        '_' => KeyStroke {
-            key: K::KEY_MINUS,
-            shift: true,
-        },
-        '=' => KeyStroke {
-            key: K::KEY_EQUAL,
-            shift: false,
-        },
-        '+' => KeyStroke {
-            key: K::KEY_EQUAL,
-            shift: true,
-        },
-        '[' => KeyStroke {
-            key: K::KEY_LEFTBRACE,
-            shift: false,
-        },
-        '{' => KeyStroke {
-            key: K::KEY_LEFTBRACE,
-            shift: true,
-        },
-        ']' => KeyStroke {
-            key: K::KEY_RIGHTBRACE,
-            shift: false,
-        },
-        '}' => KeyStroke {
-            key: K::KEY_RIGHTBRACE,
-            shift: true,
-        },
-        ';' => KeyStroke {
-            key: K::KEY_SEMICOLON,
-            shift: false,
-        },
-        ':' => KeyStroke {
-            key: K::KEY_SEMICOLON,
-            shift: true,
-        },
-        '\'' => KeyStroke {
-            key: K::KEY_APOSTROPHE,
-            shift: false,
-        },
-        '"' => KeyStroke {
-            key: K::KEY_APOSTROPHE,
-            shift: true,
-        },
-        '`' => KeyStroke {
-            key: K::KEY_GRAVE,
-            shift: false,
-        },
-        '~' => KeyStroke {
-            key: K::KEY_GRAVE,
-            shift: true,
-        },
-        '\\' => KeyStroke {
-            key: K::KEY_BACKSLASH,
-            shift: false,
-        },
-        '|' => KeyStroke {
-            key: K::KEY_BACKSLASH,
-            shift: true,
-        },
-        ',' => KeyStroke {
-            key: K::KEY_COMMA,
-            shift: false,
-        },
-        '<' => KeyStroke {
-            key: K::KEY_COMMA,
-            shift: true,
-        },
-        '.' => KeyStroke {
-            key: K::KEY_DOT,
-            shift: false,
-        },
-        '>' => KeyStroke {
-            key: K::KEY_DOT,
-            shift: true,
-        },
-        '/' => KeyStroke {
-            key: K::KEY_SLASH,
-            shift: false,
-        },
-        '?' => KeyStroke {
-            key: K::KEY_SLASH,
-            shift: true,
-        },
-        _ => {
-            return Err(format!(
-                "Pepper X uinput helper cannot type unsupported character {:?}",
-                ch
-            ))
-        }
-    };
-
-    Ok(stroke)
 }

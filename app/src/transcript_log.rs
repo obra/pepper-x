@@ -7,7 +7,7 @@ use std::time::Duration;
 const LOG_FILE_NAME: &str = "transcript-log.jsonl";
 const APP_STATE_DIR_NAME: &str = "pepper-x";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptEntry {
     pub source_wav_path: PathBuf,
     pub transcript_text: String,
@@ -20,6 +20,8 @@ pub struct TranscriptEntry {
     pub insertion: Option<InsertionDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learning: Option<LearningDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diarization: Option<DiarizationSummary>,
 }
 
 impl TranscriptEntry {
@@ -39,6 +41,7 @@ impl TranscriptEntry {
             cleanup: None,
             insertion: None,
             learning: None,
+            diarization: None,
         }
     }
 
@@ -132,6 +135,64 @@ impl LearningDiagnostics {
             source_text: source_text.into(),
             replacement_text: replacement_text.into(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiarizationSegment {
+    pub speaker: String,
+    pub start_secs: f64,
+    pub end_secs: f64,
+}
+
+impl DiarizationSegment {
+    pub fn new(speaker: impl Into<String>, start_secs: f64, end_secs: f64) -> Self {
+        Self {
+            speaker: speaker.into(),
+            start_secs,
+            end_secs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiarizationSummary {
+    pub target_speaker: Option<String>,
+    pub segments: Vec<DiarizationSegment>,
+    pub filtering_used: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+impl DiarizationSummary {
+    pub fn new(segments: Vec<DiarizationSegment>, filtering_used: bool) -> Self {
+        Self {
+            target_speaker: None,
+            segments,
+            filtering_used,
+            fallback_reason: None,
+        }
+    }
+
+    pub fn with_target_speaker(mut self, target_speaker: impl Into<String>) -> Self {
+        self.target_speaker = Some(target_speaker.into());
+        self
+    }
+
+    pub fn with_fallback_reason(mut self, fallback_reason: impl Into<String>) -> Self {
+        self.fallback_reason = Some(fallback_reason.into());
+        self
+    }
+
+    pub fn distinct_speakers(&self) -> Vec<&str> {
+        let mut speakers: Vec<&str> = self
+            .segments
+            .iter()
+            .map(|seg| seg.speaker.as_str())
+            .collect();
+        speakers.sort();
+        speakers.dedup();
+        speakers
     }
 }
 
@@ -296,8 +357,8 @@ mod tests {
         let mut expected = TranscriptEntry::new(
             "/tmp/loop1/sample.wav",
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(1234),
         );
         expected.insertion = Some(
@@ -399,8 +460,8 @@ mod tests {
         let expected = TranscriptEntry::new(
             root.join("sample.wav"),
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(42),
         );
 
@@ -614,5 +675,133 @@ mod tests {
         let copied = std::fs::read_to_string(copy_log.log_path()).expect("read copied log");
         assert!(copied.contains("\"learning\":{"));
         assert!(copied.contains("\"action\":\"prompt-memory\""));
+    }
+
+    #[test]
+    fn transcript_log_round_trips_diarization_summary_from_jsonl() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        let mut entry = TranscriptEntry::new(
+            root.join("diarized.wav"),
+            "hello from pepper x",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
+            Duration::from_millis(42),
+        );
+        entry.diarization = Some(
+            DiarizationSummary::new(
+                vec![
+                    DiarizationSegment::new("Speaker 0", 0.0, 2.5),
+                    DiarizationSegment::new("Speaker 1", 2.5, 5.0),
+                    DiarizationSegment::new("Speaker 0", 5.0, 7.5),
+                ],
+                true,
+            )
+            .with_target_speaker("Speaker 0"),
+        );
+
+        log.append(&entry).expect("append entry");
+
+        let reloaded = log
+            .recent_entries()
+            .expect("load entries")
+            .into_iter()
+            .next()
+            .expect("load diarized entry");
+
+        let diarization = reloaded.diarization.expect("diarization should be present");
+        assert_eq!(diarization.target_speaker.as_deref(), Some("Speaker 0"));
+        assert!(diarization.filtering_used);
+        assert_eq!(diarization.fallback_reason, None);
+        assert_eq!(diarization.segments.len(), 3);
+        assert_eq!(diarization.segments[0].speaker, "Speaker 0");
+        assert!((diarization.segments[0].start_secs - 0.0).abs() < f64::EPSILON);
+        assert!((diarization.segments[0].end_secs - 2.5).abs() < f64::EPSILON);
+        assert_eq!(diarization.segments[1].speaker, "Speaker 1");
+        assert!((diarization.segments[1].start_secs - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn transcript_log_round_trips_diarization_with_fallback_reason() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        let mut entry = TranscriptEntry::new(
+            root.join("fallback.wav"),
+            "short audio",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
+            Duration::from_millis(10),
+        );
+        entry.diarization = Some(
+            DiarizationSummary::new(
+                vec![DiarizationSegment::new("Speaker 0", 0.0, 1.0)],
+                true,
+            )
+            .with_fallback_reason("recording too short for diarization"),
+        );
+
+        log.append(&entry).expect("append entry");
+
+        let reloaded = log
+            .recent_entries()
+            .expect("load entries")
+            .into_iter()
+            .next()
+            .expect("load fallback entry");
+
+        let diarization = reloaded.diarization.expect("diarization should be present");
+        assert!(diarization.filtering_used);
+        assert_eq!(diarization.target_speaker, None);
+        assert_eq!(
+            diarization.fallback_reason.as_deref(),
+            Some("recording too short for diarization")
+        );
+        assert_eq!(diarization.segments.len(), 1);
+    }
+
+    #[test]
+    fn transcript_log_loads_entries_without_diarization_field() {
+        let root = temp_root();
+        let log = TranscriptLog::open(&root).expect("open log");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(
+                br#"{"source_wav_path":"no-diarization.wav","transcript_text":"hello","backend_name":"sherpa-onnx","model_name":"nemo-parakeet-tdt-0.6b-v3-int8","elapsed_ms":7}"#,
+            )
+            .expect("append entry without diarization");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.log_path())
+            .expect("open transcript log")
+            .write_all(b"\n")
+            .expect("append newline");
+
+        let entry = log
+            .recent_entries()
+            .expect("load entries")
+            .into_iter()
+            .next()
+            .expect("load entry without diarization");
+
+        assert_eq!(entry.diarization, None);
+    }
+
+    #[test]
+    fn diarization_summary_distinct_speakers_deduplicates_and_sorts() {
+        let summary = DiarizationSummary::new(
+            vec![
+                DiarizationSegment::new("Speaker 1", 0.0, 1.0),
+                DiarizationSegment::new("Speaker 0", 1.0, 2.0),
+                DiarizationSegment::new("Speaker 1", 2.0, 3.0),
+                DiarizationSegment::new("Speaker 0", 3.0, 4.0),
+            ],
+            false,
+        );
+
+        let speakers = summary.distinct_speakers();
+        assert_eq!(speakers, vec!["Speaker 0", "Speaker 1"]);
     }
 }

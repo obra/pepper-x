@@ -1,52 +1,37 @@
 use adw::prelude::*;
-use gtk::Orientation;
 use pepperx_ipc::LiveStatus;
+use pepperx_platform_gnome::evdev_modifier_capture::SharedTriggerConfig;
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::app_model::{RuntimeReadinessSummary, SettingsSurfaceState};
-use crate::diagnostics_view::DiagnosticsView;
 use crate::history_view::build_history_browser;
 use crate::overlay::OverlayView;
 use crate::settings_view::SettingsView;
+use crate::transcript_log::TranscriptEntry;
 use pepperx_models::{ModelInventoryEntry, ModelKind};
 
 use crate::history_store::ArchivedRun;
 use crate::settings::AppSettings;
 
-const SETTINGS_PAGE_NAME: &str = "settings";
-const HISTORY_PAGE_NAME: &str = "history";
-const DIAGNOSTICS_PAGE_NAME: &str = "diagnostics";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PageScaffoldKind {
     Form,
-    Browser,
-    CardList,
 }
 
+/// All content now lives inside the SettingsView sidebar. These variants
+/// exist for test-level introspection of the window's logical sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowPage {
     Settings,
     History,
-    Diagnostics,
 }
 
 impl WindowPage {
-    fn page_name(self) -> &'static str {
-        match self {
-            Self::Settings => SETTINGS_PAGE_NAME,
-            Self::History => HISTORY_PAGE_NAME,
-            Self::Diagnostics => DIAGNOSTICS_PAGE_NAME,
-        }
-    }
-
     fn container_kind(self) -> PageScaffoldKind {
         match self {
-            Self::Settings => PageScaffoldKind::Form,
-            Self::History => PageScaffoldKind::Browser,
-            Self::Diagnostics => PageScaffoldKind::CardList,
+            Self::Settings | Self::History => PageScaffoldKind::Form,
         }
     }
 }
@@ -57,7 +42,7 @@ struct WindowContentProviders {
     diagnostics_summary: Rc<dyn Fn() -> String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct WindowContentSnapshot {
     history_runs: Vec<ArchivedRun>,
     settings_surface_state: SettingsSurfaceState,
@@ -68,18 +53,18 @@ struct WindowContentSnapshot {
 pub struct MainWindow {
     app: adw::Application,
     content_providers: Rc<WindowContentProviders>,
-    rerun_archived_run: Option<Rc<dyn Fn(String)>>,
+    rerun_archived_run: Option<Rc<dyn Fn(String, String) -> Option<TranscriptEntry>>>,
+    rerun_cleanup: Option<Rc<dyn Fn(String, String, Option<String>) -> Option<TranscriptEntry>>>,
+    play_audio: Option<Rc<dyn Fn(PathBuf)>>,
     live_status: Rc<RefCell<LiveStatus>>,
     state: Rc<RefCell<Option<WindowState>>>,
+    shared_trigger_config: Option<SharedTriggerConfig>,
 }
 
 struct WindowState {
     window: adw::ApplicationWindow,
     overlay_view: OverlayView,
-    shell_stack: gtk::Stack,
     settings_view: SettingsView,
-    diagnostics_view: DiagnosticsView,
-    history_container: gtk::Box,
 }
 
 impl WindowContentProviders {
@@ -149,8 +134,11 @@ impl MainWindow {
                 diagnostics_summary: Rc::new(diagnostics_summary),
             }),
             rerun_archived_run: None,
+            rerun_cleanup: None,
+            play_audio: None,
             live_status: Rc::new(RefCell::new(LiveStatus::ready())),
             state: Rc::new(RefCell::new(None)),
+            shared_trigger_config: None,
         }
     }
 
@@ -159,7 +147,9 @@ impl MainWindow {
         history_runs: H,
         settings_surface_state: S,
         diagnostics_summary: D,
-        rerun_archived_run: Option<Rc<dyn Fn(String)>>,
+        rerun_archived_run: Option<Rc<dyn Fn(String, String) -> Option<TranscriptEntry>>>,
+        rerun_cleanup: Option<Rc<dyn Fn(String, String, Option<String>) -> Option<TranscriptEntry>>>,
+        play_audio: Option<Rc<dyn Fn(PathBuf)>>,
     ) -> Self
     where
         H: Fn() -> Vec<ArchivedRun> + 'static,
@@ -173,7 +163,13 @@ impl MainWindow {
             diagnostics_summary,
         );
         window.rerun_archived_run = rerun_archived_run;
+        window.rerun_cleanup = rerun_cleanup;
+        window.play_audio = play_audio;
         window
+    }
+
+    pub fn set_shared_trigger_config(&mut self, config: SharedTriggerConfig) {
+        self.shared_trigger_config = Some(config);
     }
 
     #[cfg(test)]
@@ -182,33 +178,39 @@ impl MainWindow {
     }
 
     pub fn present_settings(&self) {
-        self.present_page(WindowPage::Settings);
+        self.ensure_window();
+        self.refresh_content();
+
+        if let Some(state) = self.state.borrow().as_ref() {
+            state.window.present();
+        }
     }
 
     pub fn present_history(&self) {
-        self.present_page(WindowPage::History);
+        // History is now a sidebar section inside SettingsView. Just present
+        // the window -- the user can navigate to the History section via the
+        // sidebar.
+        self.present_settings();
     }
 
     pub fn set_live_status(&self, status: &LiveStatus) {
+        let previous = self.live_status.borrow().clone();
         *self.live_status.borrow_mut() = status.clone();
 
         if let Some(state) = self.state.borrow().as_ref() {
             state.overlay_view.set_live_status(status);
         }
+
+        // When the pipeline transitions from a busy state to a terminal state,
+        // a recording cycle just completed.  Refresh the history so the new
+        // run appears in the sidebar without requiring a manual navigation.
+        if previous.is_busy() && !status.is_busy() {
+            self.refresh_content();
+        }
     }
 
     fn current_content_snapshot(&self) -> WindowContentSnapshot {
         self.content_providers.snapshot()
-    }
-
-    fn present_page(&self, page: WindowPage) {
-        self.ensure_window();
-        self.refresh_content();
-
-        if let Some(state) = self.state.borrow().as_ref() {
-            state.shell_stack.set_visible_child_name(page.page_name());
-            state.window.present();
-        }
     }
 
     fn ensure_window(&self) {
@@ -217,32 +219,26 @@ impl MainWindow {
         }
 
         let snapshot = self.current_content_snapshot();
-        let shell_stack = gtk::Stack::builder()
-            .hexpand(true)
-            .vexpand(true)
-            .transition_type(gtk::StackTransitionType::Crossfade)
-            .build();
         let overlay_view = OverlayView::new();
         overlay_view.set_live_status(&self.live_status.borrow());
-        let settings_view = SettingsView::new(snapshot.settings_surface_state.clone());
-        shell_stack.add_titled(settings_view.widget(), Some(SETTINGS_PAGE_NAME), "Settings");
-        let history_container = gtk::Box::new(Orientation::Vertical, 0);
-        history_container.set_hexpand(true);
-        history_container.set_vexpand(true);
-        history_container.append(&build_history_browser(
+
+        // Build the history browser widget to embed in the SettingsView sidebar.
+        let history_widget = build_history_browser(
             &snapshot.history_runs,
             self.rerun_archived_run.clone(),
-        ));
-        shell_stack.add_titled(&history_container, Some(HISTORY_PAGE_NAME), "History");
-        let diagnostics_view = DiagnosticsView::new(snapshot.diagnostics_summary.as_str());
-        shell_stack.add_titled(
-            diagnostics_view.widget(),
-            Some(DIAGNOSTICS_PAGE_NAME),
-            "Diagnostics",
+            self.rerun_cleanup.clone(),
+            self.play_audio.clone(),
         );
 
-        let stack_switcher = gtk::StackSwitcher::new();
-        stack_switcher.set_stack(Some(&shell_stack));
+        let settings_view = SettingsView::new_with_extras(
+            snapshot.settings_surface_state.clone(),
+            Some(history_widget.upcast()),
+            self.rerun_archived_run.clone(),
+            self.rerun_cleanup.clone(),
+            self.play_audio.clone(),
+            snapshot.diagnostics_summary.clone(),
+            self.shared_trigger_config.clone(),
+        );
 
         let header_bar = adw::HeaderBar::builder()
             .title_widget(&adw::WindowTitle::new(
@@ -250,14 +246,13 @@ impl MainWindow {
                 "GNOME-first local dictation shell",
             ))
             .build();
-        header_bar.pack_start(&stack_switcher);
 
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header_bar);
-        let content = gtk::Box::new(Orientation::Vertical, 0);
-        content.append(overlay_view.widget());
-        content.append(&shell_stack);
-        view.set_content(Some(&content));
+        let overlay_layer = gtk::Overlay::new();
+        overlay_layer.set_child(Some(settings_view.widget()));
+        overlay_layer.add_overlay(overlay_view.widget());
+        view.set_content(Some(&overlay_layer));
 
         let window = adw::ApplicationWindow::builder()
             .application(&self.app)
@@ -270,10 +265,7 @@ impl MainWindow {
         *self.state.borrow_mut() = Some(WindowState {
             window,
             overlay_view,
-            shell_stack,
             settings_view,
-            diagnostics_view,
-            history_container,
         });
     }
 
@@ -288,12 +280,14 @@ impl MainWindow {
             .settings_view
             .set_surface_state(&snapshot.settings_surface_state);
         state
-            .diagnostics_view
-            .set_summary(&snapshot.diagnostics_summary);
+            .settings_view
+            .set_diagnostics_summary(&snapshot.diagnostics_summary);
         replace_history_browser(
-            &state.history_container,
+            state.settings_view.history_container(),
             &snapshot.history_runs,
             self.rerun_archived_run.clone(),
+            self.rerun_cleanup.clone(),
+            self.play_audio.clone(),
         );
     }
 }
@@ -354,7 +348,7 @@ pub(crate) fn diagnostics_summary_text(
             "Modifier-only capture supported: {}",
             readiness.modifier_capture_supported
         ),
-        format!("Extension connected: {}", readiness.extension_connected),
+        format!("Extension connected: {}", readiness.extension_connected.get()),
         format!("Service version: {}", readiness.service_version),
     ];
 
@@ -491,12 +485,19 @@ fn default_diagnostics_summary() -> String {
 fn replace_history_browser(
     container: &gtk::Box,
     runs: &[ArchivedRun],
-    rerun_archived_run: Option<Rc<dyn Fn(String)>>,
+    rerun_archived_run: Option<Rc<dyn Fn(String, String) -> Option<TranscriptEntry>>>,
+    rerun_cleanup: Option<Rc<dyn Fn(String, String, Option<String>) -> Option<TranscriptEntry>>>,
+    play_audio: Option<Rc<dyn Fn(PathBuf)>>,
 ) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
-    container.append(&build_history_browser(runs, rerun_archived_run));
+    container.append(&build_history_browser(
+        runs,
+        rerun_archived_run,
+        rerun_cleanup,
+        play_audio,
+    ));
 }
 
 #[cfg(test)]
@@ -508,7 +509,7 @@ mod app_shell {
     use crate::settings::AppSettings;
     use crate::settings_view::{
         settings_page_scaffold, SettingsContainerKind, SettingsControl, SettingsSelectControl,
-        SettingsSwitchControl, SettingsTextAreaControl,
+        SettingsShortcutRecorderControl, SettingsSwitchControl, SettingsTextAreaControl,
     };
     use crate::transcript_log::{InsertionDiagnostics, LearningDiagnostics, TranscriptEntry};
     use pepperx_ipc::Capabilities;
@@ -535,8 +536,8 @@ mod app_shell {
     #[test]
     fn model_status_settings_summary_shows_cache_root_and_selected_models() {
         let settings = AppSettings {
-            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
-            preferred_cleanup_model: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
+            preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "ordinary-dictation".into(),
             ..AppSettings::default()
         };
@@ -546,41 +547,41 @@ mod app_shell {
             &cache_root,
             &[
                 ModelInventoryEntry {
-                    id: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+                    id: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
                     kind: ModelKind::Asr,
                     readiness: ModelReadiness {
-                        install_path: cache_root.join("asr/nemo-parakeet-tdt-0.6b-v2-int8"),
+                        install_path: cache_root.join("asr/nemo-parakeet-tdt-0.6b-v3-int8"),
                         is_ready: true,
                         missing_files: Vec::new(),
                     },
                 },
                 ModelInventoryEntry {
-                    id: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    id: "qwen3.5-2b-q4_k_m.gguf".into(),
                     kind: ModelKind::Cleanup,
                     readiness: ModelReadiness {
-                        install_path: cache_root.join("cleanup/qwen2.5-3b-instruct-q4_k_m.gguf"),
+                        install_path: cache_root.join("cleanup/qwen3.5-2b-q4_k_m.gguf"),
                         is_ready: false,
-                        missing_files: vec!["qwen2.5-3b-instruct-q4_k_m.gguf".into()],
+                        missing_files: vec!["qwen3.5-2b-q4_k_m.gguf".into()],
                     },
                 },
             ],
         );
 
         assert!(summary.contains("Model cache: /tmp/pepper-x-models"));
-        assert!(summary.contains("Default ASR model: nemo-parakeet-tdt-0.6b-v2-int8"));
-        assert!(summary.contains("Default cleanup model: qwen2.5-3b-instruct-q4_k_m.gguf"));
+        assert!(summary.contains("Default ASR model: nemo-parakeet-tdt-0.6b-v3-int8"));
+        assert!(summary.contains("Default cleanup model: qwen3.5-2b-q4_k_m.gguf"));
         assert!(summary.contains("Cleanup prompt profile: ordinary-dictation"));
-        assert!(summary.contains("ASR model nemo-parakeet-tdt-0.6b-v2-int8: ready"));
+        assert!(summary.contains("ASR model nemo-parakeet-tdt-0.6b-v3-int8: ready"));
         assert!(summary.contains(
-            "Cleanup model qwen2.5-3b-instruct-q4_k_m.gguf: missing qwen2.5-3b-instruct-q4_k_m.gguf"
+            "Cleanup model qwen3.5-2b-q4_k_m.gguf: missing qwen3.5-2b-q4_k_m.gguf"
         ));
     }
 
     #[test]
     fn diagnostics_summary_shows_model_readiness_cache_paths_and_capabilities() {
         let settings = AppSettings {
-            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
-            preferred_cleanup_model: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
+            preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "ordinary-dictation".into(),
             ..AppSettings::default()
         };
@@ -590,40 +591,40 @@ mod app_shell {
             &cache_root,
             &[
                 ModelInventoryEntry {
-                    id: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+                    id: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
                     kind: ModelKind::Asr,
                     readiness: ModelReadiness {
-                        install_path: cache_root.join("asr/nemo-parakeet-tdt-0.6b-v2-int8"),
+                        install_path: cache_root.join("asr/nemo-parakeet-tdt-0.6b-v3-int8"),
                         is_ready: true,
                         missing_files: Vec::new(),
                     },
                 },
                 ModelInventoryEntry {
-                    id: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+                    id: "qwen3.5-2b-q4_k_m.gguf".into(),
                     kind: ModelKind::Cleanup,
                     readiness: ModelReadiness {
-                        install_path: cache_root.join("cleanup/qwen2.5-3b-instruct-q4_k_m.gguf"),
+                        install_path: cache_root.join("cleanup/qwen3.5-2b-q4_k_m.gguf"),
                         is_ready: false,
-                        missing_files: vec!["qwen2.5-3b-instruct-q4_k_m.gguf".into()],
+                        missing_files: vec!["qwen3.5-2b-q4_k_m.gguf".into()],
                     },
                 },
             ],
             None,
             &RuntimeReadinessSummary {
                 modifier_capture_supported: true,
-                extension_connected: false,
+                extension_connected: std::cell::Cell::new(false),
                 service_version: "0.1.0".into(),
             },
         );
 
         assert!(summary.contains("Model cache root: /tmp/pepper-x-models"));
-        assert!(summary.contains("Selected ASR model: nemo-parakeet-tdt-0.6b-v2-int8"));
-        assert!(summary.contains("Selected cleanup model: qwen2.5-3b-instruct-q4_k_m.gguf"));
+        assert!(summary.contains("Selected ASR model: nemo-parakeet-tdt-0.6b-v3-int8"));
+        assert!(summary.contains("Selected cleanup model: qwen3.5-2b-q4_k_m.gguf"));
         assert!(summary.contains("Active cleanup prompt profile: ordinary-dictation"));
         assert!(summary.contains(
-            "ASR install: /tmp/pepper-x-models/asr/nemo-parakeet-tdt-0.6b-v2-int8 (ready)"
+            "ASR install: /tmp/pepper-x-models/asr/nemo-parakeet-tdt-0.6b-v3-int8 (ready)"
         ));
-        assert!(summary.contains("Cleanup install: /tmp/pepper-x-models/cleanup/qwen2.5-3b-instruct-q4_k_m.gguf (missing qwen2.5-3b-instruct-q4_k_m.gguf)"));
+        assert!(summary.contains("Cleanup install: /tmp/pepper-x-models/cleanup/qwen3.5-2b-q4_k_m.gguf (missing qwen3.5-2b-q4_k_m.gguf)"));
         assert!(summary.contains("Modifier-only capture supported: true"));
         assert!(summary.contains("Extension connected: false"));
     }
@@ -635,13 +636,13 @@ mod app_shell {
         let mut entry = TranscriptEntry::new(
             "/tmp/loop5.wav",
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(21),
         );
         let mut cleanup = crate::transcript_log::CleanupDiagnostics::failed(
             "llama.cpp",
-            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "qwen3.5-2b-q4_k_m.gguf",
             "cleanup model timed out",
         );
         cleanup.elapsed_ms = 19;
@@ -677,17 +678,28 @@ mod app_shell {
             .build();
         let settings_surface_state = Rc::new(RefCell::new(SettingsSurfaceState {
             cleanup_enabled: true,
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
+            preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "ordinary-dictation".into(),
             cleanup_custom_prompt: String::from("settings v1"),
             launch_at_login: false,
+            play_sounds: true,
+            enable_window_context: true,
+            hold_trigger_keys: "56,100,125,126".into(),
+            toggle_trigger_keys: "56,57,100,125,126".into(),
+            ignore_other_speakers: false,
+            enable_post_paste_learning: true,
+            correction_memory_text: None,
+            preferred_transcriptions_text: String::new(),
+            replacement_rules_text: String::new(),
             feedback_message: None,
         }));
         let diagnostics_summary = Rc::new(RefCell::new(String::from("diagnostics v1")));
         let history_runs = Rc::new(RefCell::new(vec![archived_run(TranscriptEntry::new(
             "/tmp/run-1.wav",
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(21),
         ))]));
         let window = MainWindow::new_with_providers(
@@ -716,9 +728,20 @@ mod app_shell {
 
         settings_surface_state.replace(SettingsSurfaceState {
             cleanup_enabled: false,
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
+            preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "literal-dictation".into(),
             cleanup_custom_prompt: String::from("settings v2"),
             launch_at_login: true,
+            play_sounds: true,
+            enable_window_context: true,
+            hold_trigger_keys: "56,100,125,126".into(),
+            toggle_trigger_keys: "56,57,100,125,126".into(),
+            ignore_other_speakers: false,
+            enable_post_paste_learning: true,
+            correction_memory_text: None,
+            preferred_transcriptions_text: String::new(),
+            replacement_rules_text: String::new(),
             feedback_message: Some("Saved settings".into()),
         });
         diagnostics_summary.replace(String::from("diagnostics v2"));
@@ -737,20 +760,14 @@ mod app_shell {
 
     #[test]
     fn window_page_routes_cover_all_shell_states() {
-        assert_eq!(WindowPage::Settings.page_name(), SETTINGS_PAGE_NAME);
-        assert_eq!(WindowPage::History.page_name(), HISTORY_PAGE_NAME);
-        assert_eq!(WindowPage::Diagnostics.page_name(), DIAGNOSTICS_PAGE_NAME);
+        // All content now lives in the SettingsView sidebar; no top-level tabs.
         assert_eq!(
             WindowPage::Settings.container_kind(),
             PageScaffoldKind::Form
         );
         assert_eq!(
             WindowPage::History.container_kind(),
-            PageScaffoldKind::Browser
-        );
-        assert_eq!(
-            WindowPage::Diagnostics.container_kind(),
-            PageScaffoldKind::CardList
+            PageScaffoldKind::Form
         );
     }
 
@@ -758,20 +775,73 @@ mod app_shell {
     fn window_settings_page_scaffold_builds_structured_rows() {
         let scaffold = settings_page_scaffold(&SettingsSurfaceState {
             cleanup_enabled: true,
+            preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
+            preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "ordinary-dictation".into(),
             cleanup_custom_prompt: "Keep Linux app names verbatim.".into(),
             launch_at_login: true,
+            play_sounds: true,
+            enable_window_context: true,
+            hold_trigger_keys: "56,100,125,126".into(),
+            toggle_trigger_keys: "56,57,100,125,126".into(),
+            ignore_other_speakers: false,
+            enable_post_paste_learning: true,
+            correction_memory_text: Some("Preferred transcript examples:\n- raw: hello\n  preferred: Hello".into()),
+            preferred_transcriptions_text: "Hello".into(),
+            replacement_rules_text: String::new(),
             feedback_message: Some("Saved settings".into()),
         });
 
         assert_eq!(scaffold.container_kind, SettingsContainerKind::Form);
-        assert_eq!(scaffold.sections.len(), 2);
-        assert_eq!(scaffold.sections[0].title, "Cleanup");
-        assert_eq!(scaffold.sections[1].title, "General");
+        assert_eq!(scaffold.sections.len(), 7);
+        assert_eq!(scaffold.sections[0].title, "Recording");
+        assert_eq!(scaffold.sections[1].title, "Cleanup");
+        assert_eq!(scaffold.sections[2].title, "Corrections");
+        assert_eq!(scaffold.sections[3].title, "Models");
+        assert_eq!(scaffold.sections[4].title, "History");
+        assert_eq!(scaffold.sections[5].title, "General");
+        assert_eq!(scaffold.sections[6].title, "Diagnostics");
         assert_eq!(scaffold.feedback_message.as_deref(), Some("Saved settings"));
 
+        // Recording page: shortcut recorders + sound effects toggle
         assert!(matches!(
             &scaffold.sections[0].controls[0],
+            SettingsControl::ShortcutRecorder(SettingsShortcutRecorderControl {
+                title,
+                current_shortcut,
+                ..
+            }) if title == "Hold to Record"
+                && current_shortcut == "Alt + Super"
+        ));
+        assert!(matches!(
+            &scaffold.sections[0].controls[1],
+            SettingsControl::ShortcutRecorder(SettingsShortcutRecorderControl {
+                title,
+                current_shortcut,
+                ..
+            }) if title == "Toggle Recording"
+                && current_shortcut == "Alt + Space + Super"
+        ));
+        assert!(matches!(
+            &scaffold.sections[0].controls[2],
+            SettingsControl::Switch(SettingsSwitchControl {
+                title,
+                active: true,
+                ..
+            }) if title == "Sound effects"
+        ));
+        assert!(matches!(
+            &scaffold.sections[0].controls[3],
+            SettingsControl::Switch(SettingsSwitchControl {
+                title,
+                active: false,
+                ..
+            }) if title == "Ignore other speakers"
+        ));
+
+        // Cleanup page
+        assert!(matches!(
+            &scaffold.sections[1].controls[0],
             SettingsControl::Switch(SettingsSwitchControl {
                 title,
                 active: true,
@@ -779,7 +849,15 @@ mod app_shell {
             }) if title == "Enable cleanup"
         ));
         assert!(matches!(
-            &scaffold.sections[0].controls[1],
+            &scaffold.sections[1].controls[1],
+            SettingsControl::Switch(SettingsSwitchControl {
+                title,
+                active: true,
+                ..
+            }) if title == "Window context"
+        ));
+        assert!(matches!(
+            &scaffold.sections[1].controls[2],
             SettingsControl::Select(SettingsSelectControl {
                 title,
                 selected,
@@ -790,7 +868,7 @@ mod app_shell {
                 && options == &vec!["ordinary-dictation".to_string(), "literal-dictation".to_string()]
         ));
         assert!(matches!(
-            &scaffold.sections[0].controls[2],
+            &scaffold.sections[1].controls[3],
             SettingsControl::TextArea(SettingsTextAreaControl {
                 title,
                 text,
@@ -799,14 +877,60 @@ mod app_shell {
             }) if title == "Custom cleanup prompt"
                 && text == "Keep Linux app names verbatim."
         ));
+
+        // Corrections page
         assert!(matches!(
-            &scaffold.sections[1].controls[0],
+            &scaffold.sections[2].controls[0],
+            SettingsControl::TextArea(SettingsTextAreaControl {
+                title,
+                text,
+                enabled: true,
+                ..
+            }) if title == "Preferred transcriptions"
+                && text == "Hello"
+        ));
+        assert!(matches!(
+            &scaffold.sections[2].controls[1],
+            SettingsControl::TextArea(SettingsTextAreaControl {
+                title,
+                text,
+                enabled: true,
+                ..
+            }) if title == "Commonly misheard"
+                && text.is_empty()
+        ));
+
+        // Models page
+        assert!(matches!(
+            &scaffold.sections[3].controls[0],
+            SettingsControl::Select(SettingsSelectControl {
+                title,
+                ..
+            }) if title == "Transcription model"
+        ));
+        assert!(matches!(
+            &scaffold.sections[3].controls[1],
+            SettingsControl::Select(SettingsSelectControl {
+                title,
+                ..
+            }) if title == "Cleanup model"
+        ));
+
+        // History page (content injected at runtime, scaffold has no controls)
+        assert!(scaffold.sections[4].controls.is_empty());
+
+        // General page
+        assert!(matches!(
+            &scaffold.sections[5].controls[0],
             SettingsControl::Switch(SettingsSwitchControl {
                 title,
                 active: true,
                 ..
             }) if title == "Launch at login"
         ));
+
+        // Diagnostics page (content injected at runtime, scaffold has no controls)
+        assert!(scaffold.sections[6].controls.is_empty());
     }
 
     #[test]
@@ -827,8 +951,8 @@ mod app_shell {
         let mut entry = TranscriptEntry::new(
             "/tmp/loop2.wav",
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(84),
         );
         entry.insertion = Some(
@@ -848,8 +972,8 @@ mod app_shell {
         let mut entry = TranscriptEntry::new(
             "/tmp/loop2.wav",
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(84),
         );
         entry.insertion = Some(
@@ -888,8 +1012,8 @@ mod app_shell {
         let mut run = archived_run(TranscriptEntry::new(
             "/tmp/loop5.wav",
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(21),
         ));
         run.prompt_profile = Some("ordinary-dictation".into());
@@ -904,8 +1028,8 @@ mod app_shell {
         let mut entry = TranscriptEntry::new(
             "/tmp/loop5.wav",
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(21),
         );
         entry.learning = Some(LearningDiagnostics::prompt_memory(

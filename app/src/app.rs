@@ -2,7 +2,7 @@ use adw::prelude::*;
 use pepperx_ipc::SharedLiveStatus;
 use pepperx_models::{default_cache_root, model_inventory};
 use pepperx_platform_gnome::{
-    atspi::ModifierCaptureHandle,
+    evdev_modifier_capture::{EvdevModifierCaptureHandle, TriggerConfig},
     service::{AppCommand, PepperXService, ServiceHandle},
 };
 use std::cell::{Cell, RefCell};
@@ -19,7 +19,10 @@ use crate::session_runtime::LiveRuntimeHandle;
 use crate::settings::{AppSettings, AppSetupState};
 use crate::startup_policy::startup_launch_policy;
 use crate::transcript_log::{state_root, TranscriptEntry};
-use crate::transcription::{rerun_archived_run_to_log, ArchivedRunRerunRequest};
+use crate::transcription::{
+    experiment_rerun_archived_cleanup, experiment_rerun_archived_run,
+    ArchivedCleanupRerunRequest, ArchivedRunRerunRequest,
+};
 use crate::window::{diagnostics_summary_text, MainWindow};
 
 pub const APPLICATION_ID: &str = "com.obra.PepperX";
@@ -45,14 +48,56 @@ pub fn run() {
     let cache_root = default_cache_root();
     let (command_sender, command_receiver) = mpsc::channel();
     let live_status = SharedLiveStatus::new();
+    let live_runtime = build_live_runtime(&settings, live_status.clone());
+    let live_runtime_for_pump = live_runtime.clone();
     let service_handle = ServiceHandle::start(
         command_sender,
-        build_live_runtime(&settings, live_status.clone()),
+        live_runtime,
         live_status.clone(),
     )
     .expect("failed to start GNOME IPC service");
     let service = service_handle.service();
-    let _modifier_capture = start_modifier_capture(service.clone());
+    let modifier_capture = start_modifier_capture(service.clone(), &settings);
+
+    // Pre-warm the cleanup helper: load the model and pre-decode the system
+    // prompt in the background so the first recording doesn't pay the ~4s cost.
+    {
+        let settings = settings.clone();
+        std::thread::Builder::new()
+            .name("pepperx-cleanup-warmup".into())
+            .spawn(move || {
+                use pepperx_cleanup::{prefill_cleanup_system_prompt, CleanupRequest};
+                use pepperx_models::{catalog_model, default_cache_root, model_readiness};
+
+                if !settings.cleanup_enabled {
+                    return;
+                }
+                let model = match catalog_model(&settings.preferred_cleanup_model) {
+                    Some(m) => m,
+                    None => return,
+                };
+                let cache_root = default_cache_root();
+                let readiness = model_readiness(model, &cache_root);
+                if !readiness.is_ready {
+                    return;
+                }
+
+                let request = CleanupRequest {
+                    transcript_text: String::new(),
+                    model_path: readiness.install_path,
+                    supporting_context_text: None,
+                    ocr_text: None,
+                    correction_memory_text: None,
+                    prompt_profile: settings.cleanup_prompt_profile.clone(),
+                    custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+                };
+                prefill_cleanup_system_prompt(&request);
+            })
+            .ok();
+    }
+    let shared_trigger_config = modifier_capture
+        .as_ref()
+        .map(|h| h.shared_config().clone());
     let app_model = Rc::new(AppModel::for_startup(
         &setup_state,
         &settings,
@@ -62,9 +107,7 @@ pub fn run() {
     let diagnostics_app_model = app_model.clone();
     let settings_app_model = app_model.clone();
     let onboarding_window = Rc::new(RefCell::new(None::<adw::ApplicationWindow>));
-    let rerun_window = Rc::new(RefCell::new(None::<MainWindow>));
-    let rerun_window_handle = rerun_window.clone();
-    let window = MainWindow::new_with_providers_and_rerun(
+    let mut window = MainWindow::new_with_providers_and_rerun(
         &app,
         load_history_runs_or_empty,
         move || {
@@ -83,11 +126,11 @@ pub fn run() {
                 &diagnostics_app_model.readiness,
             )
         },
-        Some(Rc::new(move |run_id| {
+        Some(Rc::new(move |run_id, asr_model_id: String| {
             let settings = AppSettings::load_or_default();
             let request = ArchivedRunRerunRequest {
                 run_id,
-                asr_model_id: Some(settings.preferred_asr_model.clone()),
+                asr_model_id: Some(asr_model_id),
                 cleanup_enabled: settings.cleanup_enabled,
                 cleanup_model_id: settings
                     .cleanup_enabled
@@ -97,17 +140,73 @@ pub fn run() {
                     .then(|| settings.cleanup_prompt_profile.clone()),
             };
 
-            match rerun_archived_run_to_log(request) {
-                Ok(_) => {
-                    if let Some(window) = rerun_window_handle.borrow().as_ref() {
-                        window.present_history();
-                    }
+            match experiment_rerun_archived_run(request) {
+                Ok(entry) => Some(entry),
+                Err(error) => {
+                    eprintln!("[Pepper X] failed to rerun archived run: {error}");
+                    None
                 }
-                Err(error) => eprintln!("[Pepper X] failed to rerun archived run: {error}"),
             }
         })),
+        Some(Rc::new(
+            move |run_id, cleanup_model_id: String, custom_prompt: Option<String>| {
+                let settings = AppSettings::load_or_default();
+                let request = ArchivedCleanupRerunRequest {
+                    run_id,
+                    cleanup_model_id: Some(cleanup_model_id),
+                    cleanup_prompt_profile: Some(settings.cleanup_prompt_profile.clone()),
+                    custom_prompt_text: custom_prompt,
+                };
+
+                match experiment_rerun_archived_cleanup(request) {
+                    Ok(entry) => Some(entry),
+                    Err(error) => {
+                        eprintln!("[Pepper X] failed to rerun cleanup: {error}");
+                        None
+                    }
+                }
+            },
+        )),
+        Some(Rc::new(|wav_path| {
+            std::thread::spawn(move || {
+                let result = std::process::Command::new("pw-play")
+                    .arg(&wav_path)
+                    .status();
+                match result {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => {
+                        eprintln!(
+                            "[Pepper X] pw-play exited with status {status} for {}",
+                            wav_path.display()
+                        );
+                    }
+                    Err(_) => {
+                        let result = std::process::Command::new("paplay")
+                            .arg(&wav_path)
+                            .status();
+                        match result {
+                            Ok(status) if status.success() => {}
+                            Ok(status) => {
+                                eprintln!(
+                                    "[Pepper X] paplay exited with status {status} for {}",
+                                    wav_path.display()
+                                );
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "[Pepper X] failed to play audio {}: {error}",
+                                    wav_path.display()
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        })),
     );
-    *rerun_window.borrow_mut() = Some(window.clone());
+    if let Some(config) = shared_trigger_config {
+        window.set_shared_trigger_config(config);
+    }
 
     let startup_launch_policy = startup_launch_policy();
     let skipped_initial_activation = Rc::new(Cell::new(false));
@@ -119,7 +218,9 @@ pub fn run() {
         app_model.clone(),
         onboarding_window.clone(),
         live_status.clone(),
+        service.clone(),
         command_receiver,
+        live_runtime_for_pump,
     );
     app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
@@ -172,7 +273,7 @@ fn run_headless() {
         live_status.clone(),
     )
     .expect("failed to start GNOME IPC service");
-    let _modifier_capture = start_modifier_capture(service_handle.service());
+    let _modifier_capture = start_modifier_capture(service_handle.service(), &settings);
     let _command_receiver = command_receiver;
     let main_loop = gtk::glib::MainLoop::new(None, false);
 
@@ -201,11 +302,17 @@ fn build_live_runtime(
     std::sync::Arc::new(LiveRuntimeHandle::new(
         settings.preferred_microphone.clone(),
         live_status,
+        settings.play_sounds,
     ))
 }
 
-fn start_modifier_capture(service: PepperXService) -> Option<ModifierCaptureHandle> {
-    match ModifierCaptureHandle::start(APPLICATION_ID, service.clone()) {
+fn start_modifier_capture(
+    service: PepperXService,
+    settings: &AppSettings,
+) -> Option<EvdevModifierCaptureHandle> {
+    let hold_config = TriggerConfig::from_setting(&settings.hold_trigger_keys);
+    let toggle_config = TriggerConfig::from_setting(&settings.toggle_trigger_keys);
+    match EvdevModifierCaptureHandle::start(service.clone(), hold_config, toggle_config) {
         Ok(handle) => {
             service.set_modifier_only_supported(true);
             Some(handle)
@@ -257,8 +364,11 @@ fn install_command_pump(
     app_model: Rc<AppModel>,
     onboarding_window: Rc<RefCell<Option<adw::ApplicationWindow>>>,
     live_status: SharedLiveStatus,
+    service: PepperXService,
     receiver: Receiver<AppCommand>,
+    live_runtime: std::sync::Arc<LiveRuntimeHandle>,
 ) {
+    let last_play_sounds = Cell::new(true);
     gtk::glib::timeout_add_local(Duration::from_millis(50), move || {
         while let Ok(command) = receiver.try_recv() {
             match command {
@@ -269,7 +379,17 @@ fn install_command_pump(
             }
         }
 
+        let capabilities = service.current_capabilities();
+        app_model.update_extension_connected(capabilities.extension_connected);
         window.set_live_status(&live_status.snapshot());
+
+        // Sync play_sounds setting to runtime (settings toggle saves to disk,
+        // we propagate to the live runtime here).
+        let settings = AppSettings::load_or_default();
+        if settings.play_sounds != last_play_sounds.get() {
+            live_runtime.set_play_sounds(settings.play_sounds);
+            last_play_sounds.set(settings.play_sounds);
+        }
 
         gtk::glib::ControlFlow::Continue
     });
@@ -450,7 +570,7 @@ mod app_shell {
             Some(InitialSurface::Settings)
         );
         assert!(app_model.readiness.modifier_capture_supported);
-        assert!(!app_model.readiness.extension_connected);
+        assert!(!app_model.readiness.extension_connected.get());
     }
 
     #[test]
@@ -515,8 +635,8 @@ mod app_shell {
         let expected = TranscriptEntry::new(
             state_root.join("loop1.wav"),
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(42),
         );
         let previous_state_root = std::env::var_os("PEPPERX_STATE_ROOT");
@@ -532,8 +652,8 @@ mod app_shell {
                 archive_transcription_result(TranscriptionResult {
                     wav_path: wav_path.to_path_buf(),
                     transcript_text: "hello from pepper x".into(),
-                    backend_name: "sherpa-onnx".into(),
-                    model_name: "nemo-parakeet-tdt-0.6b-v2-int8".into(),
+                    backend_name: "parakeet-rs".into(),
+                    model_name: "nemotron-speech-streaming-en-0.6b".into(),
                     elapsed_ms: 42,
                 })
             },
@@ -561,14 +681,14 @@ mod app_shell {
         let summary = history_summary_text(&[archived_run(TranscriptEntry::new(
             "/tmp/loop1.wav",
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(84),
         ))]);
 
         assert!(summary.contains("hello from pepper x"));
-        assert!(summary.contains("sherpa-onnx"));
-        assert!(summary.contains("nemo-parakeet-tdt-0.6b-v2-int8"));
+        assert!(summary.contains("parakeet-rs"));
+        assert!(summary.contains("nemotron-speech-streaming-en-0.6b"));
         assert!(!summary.contains("arrive in a later task"));
     }
 }

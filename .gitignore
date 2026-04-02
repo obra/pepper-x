@@ -1,6 +1,6 @@
 /target/
 **/target/
-
+inspo/
 .direnv/
 .env
 .env.*

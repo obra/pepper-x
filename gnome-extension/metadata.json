@@ -2,6 +2,6 @@
   "uuid": "pepperx@obra",
   "name": "Pepper X",
   "description": "Thin GNOME Shell bridge for the Pepper X app-first shell.",
-  "shell-version": ["48"],
+  "shell-version": ["48", "49", "50"],
   "url": "https://github.com/obra/pepper-x"
 }

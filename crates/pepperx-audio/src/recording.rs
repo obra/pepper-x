@@ -35,6 +35,14 @@ const SIGNAL_LEVEL_THRESHOLD: f32 = 0.02;
 const SIGNAL_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 #[cfg(target_os = "linux")]
 const SIGNAL_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+#[cfg(target_os = "linux")]
+const POST_STOP_FLUSH_DURATION: Duration = Duration::from_millis(200);
+#[cfg(target_os = "linux")]
+const POST_STOP_FLUSH_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Number of f32 samples in a 560ms chunk at 16 kHz, matching the streaming
+/// transcriber's window size.
+const STREAMING_CHUNK_SAMPLES: usize = 8960;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingRequest {
@@ -61,6 +69,11 @@ impl RecordingRequest {
         self.selected_microphone.as_ref()
     }
 }
+
+/// A sender that receives audio chunks (Vec<f32>) during recording for
+/// streaming transcription.  The chunks are 560ms worth of mono 16 kHz f32
+/// samples (8960 samples each).
+pub type ChunkSink = std::sync::mpsc::Sender<Vec<f32>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingArtifact {
@@ -101,7 +114,7 @@ pub struct RecordingError {
 }
 
 impl RecordingError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -140,7 +153,7 @@ impl SignalLevelSample {
         Self::from_normalized_samples(&normalized_samples)
     }
 
-    fn from_normalized_samples(normalized_samples: &[f32]) -> Self {
+    pub(crate) fn from_normalized_samples(normalized_samples: &[f32]) -> Self {
         let normalized_level = normalized_samples
             .iter()
             .copied()
@@ -220,6 +233,11 @@ pub struct ActiveRecording {
     control_sender: pw::channel::Sender<RecordingCommand>,
     #[cfg(target_os = "linux")]
     worker: Option<thread::JoinHandle<Result<RecordingArtifact, RecordingError>>>,
+    /// Optional channel for streaming audio chunks to an external consumer
+    /// (e.g. a streaming transcriber).  Set via
+    /// [`start_recording_with_chunk_sink`].
+    #[allow(dead_code)]
+    chunk_sink: Option<ChunkSink>,
 }
 
 impl ActiveRecording {
@@ -253,14 +271,24 @@ impl ActiveRecording {
 }
 
 pub fn start_recording(request: RecordingRequest) -> Result<ActiveRecording, RecordingError> {
+    start_recording_with_chunk_sink(request, None)
+}
+
+/// Start a recording and, if `chunk_sink` is `Some`, send 560ms audio chunks
+/// through it as they arrive from PipeWire.  This allows a streaming
+/// transcriber to process audio in parallel with recording.
+pub fn start_recording_with_chunk_sink(
+    request: RecordingRequest,
+    chunk_sink: Option<ChunkSink>,
+) -> Result<ActiveRecording, RecordingError> {
     #[cfg(target_os = "linux")]
     {
-        return start_linux_recording(request);
+        return start_linux_recording(request, chunk_sink);
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = request;
+        let _ = (request, chunk_sink);
         Err(RecordingError::unsupported_platform())
     }
 }
@@ -291,12 +319,17 @@ pub fn sample_input_level(
 }
 
 #[cfg(target_os = "linux")]
-fn start_linux_recording(request: RecordingRequest) -> Result<ActiveRecording, RecordingError> {
+fn start_linux_recording(
+    request: RecordingRequest,
+    chunk_sink: Option<ChunkSink>,
+) -> Result<ActiveRecording, RecordingError> {
     let (control_sender, control_receiver) = pw::channel::channel();
     let (setup_sender, setup_receiver) = mpsc::channel();
     let worker_request = request.clone();
-    let worker =
-        thread::spawn(move || capture_recording(worker_request, control_receiver, setup_sender));
+    let worker_chunk_sink = chunk_sink.clone();
+    let worker = thread::spawn(move || {
+        capture_recording(worker_request, control_receiver, setup_sender, worker_chunk_sink)
+    });
 
     match setup_receiver
         .recv()
@@ -306,6 +339,7 @@ fn start_linux_recording(request: RecordingRequest) -> Result<ActiveRecording, R
             request,
             control_sender,
             worker: Some(worker),
+            chunk_sink,
         }),
         Err(error) => {
             let _ = worker.join();
@@ -345,18 +379,20 @@ fn probe_linux_signal_level(
     })?;
     let captured_audio = Rc::new(RefCell::new(CapturedAudio::default()));
     let recording_error = Rc::new(RefCell::new(None::<RecordingError>));
-    let stream = configure_capture_stream(
+    let (stream, _listener) = configure_capture_stream(
         &core,
         &mainloop,
         &captured_audio,
         &recording_error,
         target_node_id,
+        None,
     )
     .map_err(|error| {
         SignalLevelError::new(SignalLevelErrorKind::CaptureFailed, error.to_string())
     })?;
 
     let started_at = Instant::now();
+    let mut best_sample: Option<SignalLevelSample> = None;
     while started_at.elapsed() < SIGNAL_PROBE_TIMEOUT {
         if let Some(error) = recording_error.borrow_mut().take() {
             let _ = stream.disconnect();
@@ -373,15 +409,14 @@ fn probe_linux_signal_level(
             })
         };
         if let Some(sample) = sample {
-            let _ = stream.disconnect();
             if sample.signal_present() {
+                let _ = stream.disconnect();
                 return Ok(sample);
             }
-
-            return Err(SignalLevelError::new(
-                SignalLevelErrorKind::NoSignal,
-                "Pepper X did not detect microphone signal",
-            ));
+            best_sample = Some(match best_sample {
+                Some(prev) if prev.normalized_level() >= sample.normalized_level() => prev,
+                _ => sample,
+            });
         }
 
         mainloop.loop_().iterate(SIGNAL_PROBE_POLL_INTERVAL);
@@ -399,6 +434,7 @@ fn capture_recording(
     request: RecordingRequest,
     control_receiver: pw::channel::Receiver<RecordingCommand>,
     setup_sender: mpsc::Sender<Result<(), RecordingError>>,
+    chunk_sink: Option<ChunkSink>,
 ) -> Result<RecordingArtifact, RecordingError> {
     pw::init();
 
@@ -416,12 +452,13 @@ fn capture_recording(
     let captured_audio = Rc::new(RefCell::new(CapturedAudio::default()));
     let recording_error = Rc::new(RefCell::new(None::<RecordingError>));
     let stop_requested = Rc::new(Cell::new(false));
-    let stream = configure_capture_stream(
+    let (stream, _listener) = configure_capture_stream(
         &core,
         &mainloop,
         &captured_audio,
         &recording_error,
         target_node_id,
+        chunk_sink,
     )?;
 
     let _control = control_receiver.attach(mainloop.loop_(), {
@@ -439,6 +476,21 @@ fn capture_recording(
         .send(Ok(()))
         .map_err(|_| RecordingError::new("failed to report Pepper X recording setup success"))?;
     mainloop.run();
+
+    // After stop is requested, continue capturing for a short duration so that
+    // trailing speech that was still in the PipeWire buffer makes it into the
+    // recording.  This avoids clipping the last syllable when the user releases
+    // the modifier key slightly before finishing a word.
+    if stop_requested.get() && recording_error.borrow().is_none() {
+        let flush_start = Instant::now();
+        while flush_start.elapsed() < POST_STOP_FLUSH_DURATION {
+            mainloop.loop_().iterate(POST_STOP_FLUSH_POLL_INTERVAL);
+            if recording_error.borrow().is_some() {
+                break;
+            }
+        }
+    }
+
     let _ = stream.disconnect();
 
     if let Some(error) = recording_error.borrow_mut().take() {
@@ -549,7 +601,8 @@ fn configure_capture_stream(
     captured_audio: &Rc<RefCell<CapturedAudio>>,
     recording_error: &Rc<RefCell<Option<RecordingError>>>,
     target_node_id: Option<u32>,
-) -> Result<pw::stream::StreamRc, RecordingError> {
+    chunk_sink: Option<ChunkSink>,
+) -> Result<(pw::stream::StreamRc, Box<dyn std::any::Any>), RecordingError> {
     let stream = pw::stream::StreamRc::new(
         core.clone(),
         STREAM_NAME,
@@ -562,7 +615,7 @@ fn configure_capture_stream(
     )
     .map_err(|error| RecordingError::new(format!("failed to create PipeWire stream: {error}")))?;
 
-    let _listener = stream
+    let listener = stream
         .add_local_listener_with_user_data(spa::param::audio::AudioInfoRaw::new())
         .state_changed({
             let recording_error = recording_error.clone();
@@ -630,6 +683,12 @@ fn configure_capture_stream(
             let captured_audio = captured_audio.clone();
             let recording_error = recording_error.clone();
             let mainloop = mainloop.clone();
+            // State for streaming chunk dispatch — only allocated when a sink
+            // is provided.
+            let chunk_sink = Rc::new(RefCell::new(chunk_sink));
+            let streaming_pending: Rc<RefCell<Vec<f32>>> = Rc::new(RefCell::new(
+                Vec::with_capacity(STREAMING_CHUNK_SAMPLES),
+            ));
             move |stream, format| match stream.dequeue_buffer() {
                 None => {}
                 Some(mut buffer) => {
@@ -674,10 +733,33 @@ fn configure_capture_stream(
                     }
 
                     for sample_bytes in payload.chunks_exact(std::mem::size_of::<i16>()) {
-                        captured_audio.interleaved_samples.push(
-                            i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]) as f32
-                                / i16::MAX as f32,
-                        );
+                        let sample = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]) as f32
+                            / i16::MAX as f32;
+                        captured_audio.interleaved_samples.push(sample);
+
+                        // Also accumulate for the streaming chunk sink.
+                        if chunk_sink.borrow().is_some() {
+                            let mut pending = streaming_pending.borrow_mut();
+                            pending.push(sample);
+                            if pending.len() >= STREAMING_CHUNK_SAMPLES {
+                                let chunk_data: Vec<f32> =
+                                    pending.drain(..STREAMING_CHUNK_SAMPLES).collect();
+                                let mut sink_ref = chunk_sink.borrow_mut();
+                                if let Some(sink) = sink_ref.as_ref() {
+                                    // Non-blocking try_send is not available on
+                                    // std mpsc — .send() may block momentarily
+                                    // if the receiver is slow, but the
+                                    // transcriber thread processes chunks fast
+                                    // enough that this should not stall.  If the
+                                    // receiver has been dropped (e.g. the
+                                    // transcriber thread panicked), silently
+                                    // discard the sink so we stop trying.
+                                    if sink.send(chunk_data).is_err() {
+                                        *sink_ref = None;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -705,11 +787,11 @@ fn configure_capture_stream(
             RecordingError::new(format!("failed to connect PipeWire stream: {error}"))
         })?;
 
-    Ok(stream)
+    Ok((stream, Box::new(listener)))
 }
 
 #[cfg(target_os = "linux")]
-fn audio_capture_param_values() -> Result<Vec<u8>, RecordingError> {
+pub(crate) fn audio_capture_param_values() -> Result<Vec<u8>, RecordingError> {
     let mut audio_info = spa::param::audio::AudioInfoRaw::new();
     audio_info.set_format(spa::param::audio::AudioFormat::S16LE);
     audio_info.set_channels(1);

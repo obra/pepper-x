@@ -1,23 +1,118 @@
 use std::path::{Path, PathBuf};
 
 use pepperx_audio::recording::{
-    start_recording, ActiveRecording, RecordingArtifact, RecordingError, RecordingRequest,
+    start_recording, start_recording_with_chunk_sink, ActiveRecording, ChunkSink,
+    RecordingArtifact, RecordingError, RecordingRequest,
 };
 use pepperx_audio::SelectedMicrophone;
 use pepperx_ipc::{LiveStatus, SharedLiveStatus};
 use pepperx_platform_gnome::service::{RecordingRuntime, RecordingRuntimeError};
 use pepperx_session::{RecordingSession, SessionError, SessionState, TriggerSource};
+use pepperx_platform_gnome::context::SupportingContext;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::settings::AppSettings;
+use crate::sound_effects::{play_sound, SoundEvent};
 
 use crate::transcript_log::state_root;
 use crate::transcript_log::TranscriptEntry;
 use crate::transcription::{
-    transcribe_recorded_wav_to_log_with_status, LivePipelineRequest, TranscriptionRunError,
+    capture_cleanup_context, transcribe_recorded_wav_to_log_with_status, LivePipelineRequest,
+    StreamingTranscript, TranscriptionRunError,
 };
+
+/// Handle returned by [`spawn_streaming_transcriber`] that lets the caller
+/// flush remaining audio and retrieve the final transcript after recording
+/// stops.
+struct StreamingHandle {
+    /// Send audio chunks (Vec<f32>) to the transcriber thread.
+    chunk_sender: pepperx_audio::recording::ChunkSink,
+    /// Receives the final transcript once the transcriber thread finishes.
+    result_receiver: std::sync::mpsc::Receiver<Option<StreamingTranscript>>,
+}
+
+/// Spawn a background thread that creates a [`pepperx_asr::StreamingTranscriber`],
+/// reads audio chunks from `chunk_rx`, and feeds them in real-time.  When the
+/// channel is closed (sender dropped), the thread flushes remaining audio and
+/// sends the final transcript through `result_tx`.
+fn spawn_streaming_transcriber(
+    model_dir: std::path::PathBuf,
+    model_name: String,
+) -> Option<StreamingHandle> {
+    let (chunk_tx, chunk_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<Option<StreamingTranscript>>();
+
+    let builder = std::thread::Builder::new().name("pepperx-streaming-asr".into());
+    match builder.spawn(move || {
+        let mut transcriber = match pepperx_asr::StreamingTranscriber::new(&model_dir) {
+            Ok(t) => t,
+            Err(error) => {
+                eprintln!(
+                    "[Pepper X] streaming transcriber init failed, falling back to batch: {error:?}"
+                );
+                let _ = result_tx.send(None);
+                return;
+            }
+        };
+
+        let start = std::time::Instant::now();
+        for chunk in chunk_rx {
+            if let Err(error) = transcriber.feed_chunk(&chunk) {
+                eprintln!(
+                    "[Pepper X] streaming transcriber feed_chunk error, falling back to batch: {error:?}"
+                );
+                let _ = result_tx.send(None);
+                return;
+            }
+        }
+
+        // Channel closed — recording stopped.  Flush remaining samples.
+        match transcriber.flush() {
+            Ok(transcript_text) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                eprintln!(
+                    "[Pepper X] streaming ASR complete in {elapsed_ms} ms"
+                );
+                let _ = result_tx.send(Some(StreamingTranscript {
+                    transcript_text,
+                    model_name,
+                    elapsed_ms,
+                }));
+            }
+            Err(error) => {
+                eprintln!(
+                    "[Pepper X] streaming transcriber flush error, falling back to batch: {error:?}"
+                );
+                let _ = result_tx.send(None);
+            }
+        }
+    }) {
+        Ok(_) => Some(StreamingHandle {
+            chunk_sender: chunk_tx,
+            result_receiver: result_rx,
+        }),
+        Err(error) => {
+            eprintln!(
+                "[Pepper X] failed to spawn streaming transcriber thread: {error}"
+            );
+            None
+        }
+    }
+}
 
 pub trait Recorder {
     fn start_recording(&mut self, request: RecordingRequest) -> Result<(), RecordingError>;
+    fn start_recording_with_chunk_sink(
+        &mut self,
+        request: RecordingRequest,
+        chunk_sink: ChunkSink,
+    ) -> Result<(), RecordingError> {
+        // Default: ignore the chunk sink and fall back to plain recording.
+        let _ = chunk_sink;
+        self.start_recording(request)
+    }
     fn stop_recording(&mut self) -> Result<RecordingArtifact, RecordingError>;
 }
 
@@ -50,6 +145,21 @@ impl Recorder for PipeWireRecorder {
         Ok(())
     }
 
+    fn start_recording_with_chunk_sink(
+        &mut self,
+        request: RecordingRequest,
+        chunk_sink: ChunkSink,
+    ) -> Result<(), RecordingError> {
+        debug_assert!(
+            self.active_recording.is_none(),
+            "PipeWireRecorder should only start one active recording at a time"
+        );
+
+        self.active_recording =
+            Some(start_recording_with_chunk_sink(request, Some(chunk_sink))?);
+        Ok(())
+    }
+
     fn stop_recording(&mut self) -> Result<RecordingArtifact, RecordingError> {
         let active_recording = self
             .active_recording
@@ -69,12 +179,16 @@ pub struct LiveRuntimeHandle {
     runtime: Mutex<LiveSessionRuntime>,
     selected_microphone: Option<SelectedMicrophone>,
     live_status: SharedLiveStatus,
+    play_sounds: AtomicBool,
+    context_prefetch: Mutex<Option<std::sync::mpsc::Receiver<SupportingContext>>>,
+    streaming_handle: Mutex<Option<StreamingHandle>>,
 }
 
 impl LiveRuntimeHandle {
     pub fn new(
         selected_microphone: Option<SelectedMicrophone>,
         live_status: SharedLiveStatus,
+        play_sounds_enabled: bool,
     ) -> Self {
         let transcriber_status = live_status.clone();
         Self {
@@ -87,22 +201,49 @@ impl LiveRuntimeHandle {
             )),
             selected_microphone,
             live_status,
+            play_sounds: AtomicBool::new(play_sounds_enabled),
+            context_prefetch: Mutex::new(None),
+            streaming_handle: Mutex::new(None),
         }
     }
+
+    pub fn set_play_sounds(&self, enabled: bool) {
+        self.play_sounds.store(enabled, Ordering::Relaxed);
+    }
+
 
     pub fn start_recording(
         &self,
         trigger_source: TriggerSource,
     ) -> Result<(), SessionRuntimeError> {
+        // Attempt to set up a streaming transcriber so audio can be transcribed
+        // during recording.  If it fails we fall back to batch at stop time.
+        let streaming = self.try_create_streaming_handle();
+        let chunk_sink = streaming.as_ref().map(|h| h.chunk_sender.clone());
+
         let result = self
             .runtime
             .lock()
             .expect("live runtime lock poisoned")
-            .start_recording(trigger_source, self.selected_microphone.clone())
+            .start_recording_streaming(
+                trigger_source,
+                self.selected_microphone.clone(),
+                chunk_sink,
+            )
             .map(|_| ());
 
         match &result {
-            Ok(()) => self.live_status.replace(LiveStatus::recording()),
+            Ok(()) => {
+                // Store the streaming handle so stop_recording can retrieve the
+                // transcript.
+                *self
+                    .streaming_handle
+                    .lock()
+                    .expect("streaming handle lock poisoned") = streaming;
+                self.live_status.replace(LiveStatus::recording());
+                self.start_context_prefetch_if_enabled();
+                self.start_cleanup_prefill_if_enabled();
+            }
             Err(SessionRuntimeError::Session(SessionError::AlreadyRecording)) => {}
             Err(error) => self
                 .live_status
@@ -110,6 +251,117 @@ impl LiveRuntimeHandle {
         }
 
         result
+    }
+
+    /// Resolve the ASR model directory and spawn a streaming transcriber.
+    /// Returns `None` if the model is not ready or any step fails.
+    fn try_create_streaming_handle(&self) -> Option<StreamingHandle> {
+        use pepperx_models::{catalog_model, default_cache_root, model_readiness, ModelKind};
+
+        let settings = AppSettings::load_or_default();
+        let model_id = &settings.preferred_asr_model;
+        let model = catalog_model(model_id)?;
+        if model.kind != ModelKind::Asr {
+            return None;
+        }
+        let cache_root = default_cache_root();
+        let readiness = model_readiness(model, &cache_root);
+        if !readiness.is_ready {
+            return None;
+        }
+
+        // Also check for the PEPPERX_PARAKEET_MODEL_DIR env override.
+        let model_dir = crate::transcript_log::nonempty_env_path("PEPPERX_PARAKEET_MODEL_DIR")
+            .unwrap_or(readiness.install_path);
+
+        spawn_streaming_transcriber(model_dir, model_id.to_string())
+    }
+
+    fn start_context_prefetch_if_enabled(&self) {
+        let settings = AppSettings::load_or_default();
+        if !settings.cleanup_enabled || !settings.enable_window_context {
+            *self
+                .context_prefetch
+                .lock()
+                .expect("context prefetch lock poisoned") = None;
+            return;
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        *self
+            .context_prefetch
+            .lock()
+            .expect("context prefetch lock poisoned") = Some(receiver);
+
+        if let Err(error) = std::thread::Builder::new()
+            .name("pepperx-context-prefetch".into())
+            .spawn(move || {
+                let context = capture_cleanup_context();
+                let _ = sender.send(context);
+            })
+        {
+            eprintln!(
+                "[Pepper X] failed to spawn context prefetch thread: {error}"
+            );
+            *self
+                .context_prefetch
+                .lock()
+                .expect("context prefetch lock poisoned") = None;
+        }
+    }
+
+    fn start_cleanup_prefill_if_enabled(&self) {
+        let settings = AppSettings::load_or_default();
+        if !settings.cleanup_enabled {
+            return;
+        }
+
+        // Build a dummy CleanupRequest with no transcript to get the system prompt.
+        use pepperx_cleanup::{prefill_cleanup_system_prompt, CleanupRequest};
+        use pepperx_models::{catalog_model, default_cache_root, model_readiness};
+
+        let model = match catalog_model(&settings.preferred_cleanup_model) {
+            Some(m) => m,
+            None => return,
+        };
+        let cache_root = default_cache_root();
+        let readiness = model_readiness(model, &cache_root);
+        if !readiness.is_ready {
+            return;
+        }
+
+        let correction_memory_text =
+            crate::transcription::load_correction_store().prompt_memory_text();
+
+        let request = CleanupRequest {
+            transcript_text: String::new(), // not used for prefill
+            model_path: readiness.install_path,
+            supporting_context_text: None,
+            ocr_text: None,
+            correction_memory_text,
+            prompt_profile: settings.cleanup_prompt_profile.clone(),
+            custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+        };
+
+        // Fire and forget on a background thread.
+        std::thread::Builder::new()
+            .name("pepperx-cleanup-prefill".into())
+            .spawn(move || {
+                prefill_cleanup_system_prompt(&request);
+            })
+            .ok();
+    }
+
+    fn take_prefetched_context(&self) -> Option<SupportingContext> {
+        let receiver = self
+            .context_prefetch
+            .lock()
+            .expect("context prefetch lock poisoned")
+            .take()?;
+        match receiver.recv() {
+            Ok(context) => Some(context),
+            Err(_) => None,
+        }
     }
 
     pub fn record_and_transcribe<F>(
@@ -147,6 +399,20 @@ impl LiveRuntimeHandle {
                 return Err(error);
             }
         };
+
+        // Collect the streaming transcript.  Dropping the chunk_sender (inside
+        // the StreamingHandle) signals the transcriber thread that no more
+        // audio is coming, which causes it to flush and send the result.
+        let streaming_transcript = self.collect_streaming_transcript();
+
+        let request = match self.take_prefetched_context() {
+            Some(context) => request.with_prefetched_context(context),
+            None => request,
+        };
+        let request = match streaming_transcript {
+            Some(st) => request.with_streaming_transcript(st),
+            None => request,
+        };
         self.live_status.replace(LiveStatus::transcribing());
         let live_status = self.live_status.clone();
         std::thread::Builder::new()
@@ -165,15 +431,46 @@ impl LiveRuntimeHandle {
             })?;
         Ok(())
     }
+
+    /// Drop the chunk sender (so the streaming transcriber thread knows
+    /// recording is done) and wait for the final transcript.
+    fn collect_streaming_transcript(&self) -> Option<StreamingTranscript> {
+        let handle = self
+            .streaming_handle
+            .lock()
+            .expect("streaming handle lock poisoned")
+            .take()?;
+
+        // Drop the sender to signal end-of-stream.
+        drop(handle.chunk_sender);
+
+        // Wait for the transcriber thread to flush and return the result.
+        match handle.result_receiver.recv() {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("[Pepper X] streaming transcriber thread dropped result channel");
+                None
+            }
+        }
+    }
 }
 
 impl RecordingRuntime for LiveRuntimeHandle {
     fn start_recording(&self, trigger_source: TriggerSource) -> Result<(), RecordingRuntimeError> {
-        LiveRuntimeHandle::start_recording(self, trigger_source).map_err(runtime_error)
+        let result =
+            LiveRuntimeHandle::start_recording(self, trigger_source).map_err(runtime_error);
+        if result.is_ok() && self.play_sounds.load(Ordering::Relaxed) {
+            play_sound(SoundEvent::RecordingStart);
+        }
+        result
     }
 
     fn stop_recording(&self) -> Result<(), RecordingRuntimeError> {
-        self.stop_recording_in_background().map_err(runtime_error)
+        let result = self.stop_recording_in_background().map_err(runtime_error);
+        if result.is_ok() && self.play_sounds.load(Ordering::Relaxed) {
+            play_sound(SoundEvent::RecordingStop);
+        }
+        result
     }
 }
 
@@ -285,10 +582,25 @@ where
         trigger_source: TriggerSource,
         selected_microphone: Option<SelectedMicrophone>,
     ) -> Result<SessionState, SessionRuntimeError> {
+        self.start_recording_streaming(trigger_source, selected_microphone, None)
+    }
+
+    /// Start recording, optionally feeding audio chunks through `chunk_sink`
+    /// for streaming transcription.
+    pub fn start_recording_streaming(
+        &mut self,
+        trigger_source: TriggerSource,
+        selected_microphone: Option<SelectedMicrophone>,
+        chunk_sink: Option<ChunkSink>,
+    ) -> Result<SessionState, SessionRuntimeError> {
         self.session.start_recording(trigger_source)?;
 
         let request = RecordingRequest::new((self.next_output_wav_path)(), selected_microphone);
-        if let Err(error) = self.recorder.start_recording(request) {
+        let start_result = match chunk_sink {
+            Some(sink) => self.recorder.start_recording_with_chunk_sink(request, sink),
+            None => self.recorder.start_recording(request),
+        };
+        if let Err(error) = start_result {
             self.session
                 .stop_recording()
                 .expect("session should roll back");
@@ -415,7 +727,7 @@ mod session_runtime {
                 Ok(TranscriptEntry::new(
                     "/tmp/live.wav",
                     "hello",
-                    "sherpa-onnx",
+                    "parakeet-rs",
                     "model",
                     Duration::from_millis(40),
                 ))
@@ -467,8 +779,8 @@ mod session_runtime {
                 Ok(TranscriptEntry::new(
                     wav_path,
                     "hello from pepper x",
-                    "sherpa-onnx",
-                    "nemo-parakeet-tdt-0.6b-v2-int8",
+                    "parakeet-rs",
+                    "nemotron-speech-streaming-en-0.6b",
                     Duration::from_millis(37),
                 ))
             },
@@ -515,8 +827,8 @@ mod session_runtime {
                 Ok(TranscriptEntry::new(
                     request.recording_artifact().wav_path(),
                     "hello from pepper x",
-                    "sherpa-onnx",
-                    "nemo-parakeet-tdt-0.6b-v2-int8",
+                    "parakeet-rs",
+                    "nemotron-speech-streaming-en-0.6b",
                     Duration::from_millis(37),
                 ))
             },
@@ -574,8 +886,8 @@ mod session_runtime {
                 Ok(TranscriptEntry::new(
                     request.recording_artifact().wav_path(),
                     "hello from pepper x",
-                    "sherpa-onnx",
-                    "nemo-parakeet-tdt-0.6b-v2-int8",
+                    "parakeet-rs",
+                    "nemotron-speech-streaming-en-0.6b",
                     Duration::from_millis(37),
                 ))
             },
@@ -667,8 +979,8 @@ mod session_runtime {
                 Ok(TranscriptEntry::new(
                     request.recording_artifact().wav_path(),
                     "hello from pepper x",
-                    "sherpa-onnx",
-                    "nemo-parakeet-tdt-0.6b-v2-int8",
+                    "parakeet-rs",
+                    "nemotron-speech-streaming-en-0.6b",
                     Duration::from_millis(37),
                 ))
             },

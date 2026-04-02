@@ -1,14 +1,15 @@
-use crate::settings::{AppSettings, AppSetupState, RecordingTriggerMode};
+use crate::settings::{corrections_store_path, AppSettings, AppSetupState, RecordingTriggerMode};
 use crate::startup_policy::StartupLaunchPolicy;
+use pepperx_corrections::CorrectionStore;
 use pepperx_ipc::Capabilities;
 use pepperx_models::{default_bootstrap_readiness, default_cache_root, BootstrapProgress};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeReadinessSummary {
     pub modifier_capture_supported: bool,
-    pub extension_connected: bool,
+    pub extension_connected: Cell<bool>,
     pub service_version: String,
 }
 
@@ -31,13 +32,24 @@ pub struct ModelBootstrapSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsSurfaceState {
     pub cleanup_enabled: bool,
+    pub preferred_asr_model: String,
+    pub preferred_cleanup_model: String,
     pub cleanup_prompt_profile: String,
     pub cleanup_custom_prompt: String,
     pub launch_at_login: bool,
+    pub play_sounds: bool,
+    pub enable_window_context: bool,
+    pub hold_trigger_keys: String,
+    pub toggle_trigger_keys: String,
+    pub ignore_other_speakers: bool,
+    pub enable_post_paste_learning: bool,
+    pub correction_memory_text: Option<String>,
+    pub preferred_transcriptions_text: String,
+    pub replacement_rules_text: String,
     pub feedback_message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AppModel {
     setup_state: Rc<RefCell<SetupState>>,
     trigger_ready: bool,
@@ -157,6 +169,10 @@ impl AppModel {
         *self.model_bootstrap.borrow_mut() = summary;
     }
 
+    pub fn update_extension_connected(&self, connected: bool) {
+        self.readiness.extension_connected.set(connected);
+    }
+
     pub fn settings_surface_state(&self, settings: &AppSettings) -> SettingsSurfaceState {
         SettingsSurfaceState::from_settings(settings)
     }
@@ -166,7 +182,7 @@ impl RuntimeReadinessSummary {
     pub fn from_capabilities(capabilities: &Capabilities) -> Self {
         Self {
             modifier_capture_supported: capabilities.modifier_only_supported,
-            extension_connected: capabilities.extension_connected,
+            extension_connected: Cell::new(capabilities.extension_connected),
             service_version: capabilities.version.clone(),
         }
     }
@@ -268,11 +284,38 @@ impl ModelBootstrapSummary {
 
 impl SettingsSurfaceState {
     pub fn from_settings(settings: &AppSettings) -> Self {
+        let store = CorrectionStore::load(corrections_store_path()).ok();
+        let correction_memory_text = store.as_ref().and_then(|s| s.prompt_memory_text());
+        let preferred_transcriptions_text = store
+            .as_ref()
+            .map(|s| s.preferred_transcriptions().join("\n"))
+            .unwrap_or_default();
+        let replacement_rules_text = store
+            .as_ref()
+            .map(|s| {
+                s.replacement_rules()
+                    .iter()
+                    .map(|(src, repl)| format!("{src} -> {repl}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
         Self {
             cleanup_enabled: settings.cleanup_enabled,
+            preferred_asr_model: settings.preferred_asr_model.clone(),
+            preferred_cleanup_model: settings.preferred_cleanup_model.clone(),
             cleanup_prompt_profile: settings.cleanup_prompt_profile.clone(),
             cleanup_custom_prompt: settings.cleanup_custom_prompt.clone(),
             launch_at_login: settings.launch_at_login,
+            play_sounds: settings.play_sounds,
+            enable_window_context: settings.enable_window_context,
+            hold_trigger_keys: settings.hold_trigger_keys.clone(),
+            toggle_trigger_keys: settings.toggle_trigger_keys.clone(),
+            ignore_other_speakers: settings.ignore_other_speakers,
+            enable_post_paste_learning: settings.enable_post_paste_learning,
+            correction_memory_text,
+            preferred_transcriptions_text,
+            replacement_rules_text,
             feedback_message: None,
         }
     }

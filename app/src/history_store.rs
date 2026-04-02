@@ -12,7 +12,7 @@ const HISTORY_DIR_NAME: &str = "history";
 const ARCHIVE_METADATA_FILE_NAME: &str = "run.json";
 const ARCHIVED_SOURCE_WAV_FILE_NAME: &str = "source.wav";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArchiveWriteRequest {
     pub entry: TranscriptEntry,
     pub runtime_metadata: RunRuntimeMetadata,
@@ -62,7 +62,7 @@ impl ArchiveWriteRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArchivedRun {
     pub run_id: String,
     pub archived_at_ms: u64,
@@ -277,7 +277,7 @@ impl HistoryStore {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StoredArchivedRun {
     run_id: String,
     archived_at_ms: u64,
@@ -363,13 +363,13 @@ mod history_store_tests {
         let mut entry = TranscriptEntry::new(
             source_wav_path,
             "hello from pepper x",
-            "sherpa-onnx",
-            "nemo-parakeet-tdt-0.6b-v2-int8",
+            "parakeet-rs",
+            "nemotron-speech-streaming-en-0.6b",
             Duration::from_millis(42),
         );
         entry.cleanup = Some(CleanupDiagnostics::succeeded(
             "llama.cpp",
-            "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "qwen3.5-2b-q4_k_m.gguf",
             "Hello from Pepper X.",
             Duration::from_millis(17),
         ));

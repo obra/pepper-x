@@ -212,6 +212,9 @@ where
     match model.download_artifact.kind {
         DownloadArtifactKind::File => bootstrap_file(model, cache_root, &mut fetch)?,
         DownloadArtifactKind::TarBz2 => bootstrap_tar_bz2(model, cache_root, &mut fetch)?,
+        DownloadArtifactKind::MultiFile => {
+            bootstrap_multi_file(model, cache_root, &mut fetch)?
+        }
     }
 
     let readiness = model_readiness(model, cache_root);
@@ -247,6 +250,42 @@ where
         fs::remove_file(&install_path).map_err(io_error)?;
     }
     fs::rename(&temp_path, &install_path).map_err(io_error)
+}
+
+fn bootstrap_multi_file<F, E>(
+    model: &CatalogModel,
+    cache_root: &Path,
+    fetch: &mut F,
+) -> Result<(), BootstrapError>
+where
+    F: FnMut(&str, &Path) -> Result<(), E>,
+    E: fmt::Display,
+{
+    let install_path = model_install_dir(model, cache_root);
+    let partial_install_path = partial_path(&install_path);
+
+    let _ = fs::remove_dir_all(&partial_install_path);
+    fs::create_dir_all(&partial_install_path).map_err(io_error)?;
+
+    for &(file_name, url) in model.download_files {
+        let target = partial_install_path.join(file_name);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        fetch(url, &target).map_err(|error| BootstrapError::Fetch {
+            url: url.into(),
+            target_path: target.clone(),
+            message: error.to_string(),
+        })?;
+    }
+
+    if install_path.is_dir() {
+        fs::remove_dir_all(&install_path).map_err(io_error)?;
+    }
+    if let Some(parent) = install_path.parent() {
+        fs::create_dir_all(parent).map_err(io_error)?;
+    }
+    fs::rename(&partial_install_path, &install_path).map_err(io_error)
 }
 
 fn bootstrap_tar_bz2<F, E>(
@@ -470,9 +509,9 @@ mod tests {
     }
 
     #[test]
-    fn download_bootstraps_asr_model_into_cache() {
-        let root = temp_root("bootstrap");
-        let model = catalog_model("nemo-parakeet-tdt-0.6b-v2-int8")
+    fn download_bootstraps_nemotron_asr_model_into_cache() {
+        let root = temp_root("bootstrap-nemotron");
+        let model = catalog_model("nemotron-speech-streaming-en-0.6b")
             .expect("catalog should include the default ASR model");
         let fetched_targets = Rc::new(RefCell::new(Vec::new()));
         let fetched_targets_clone = fetched_targets.clone();
@@ -484,7 +523,33 @@ mod tests {
             if let Some(parent) = target_path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            write_asr_bundle(target_path);
+            std::fs::write(target_path, b"pepper-x-model").unwrap();
+            Ok::<(), std::io::Error>(())
+        })
+        .expect("bootstrap should populate the model cache");
+
+        assert!(readiness.is_ready);
+        // MultiFile downloads fetch each file individually
+        assert_eq!(fetched_targets.borrow().len(), 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn download_bootstraps_legacy_tdt_asr_model_into_cache() {
+        let root = temp_root("bootstrap-tdt");
+        let model = catalog_model("nemo-parakeet-tdt-0.6b-v3-int8")
+            .expect("catalog should include the legacy ASR model");
+        let fetched_targets = Rc::new(RefCell::new(Vec::new()));
+        let fetched_targets_clone = fetched_targets.clone();
+
+        let readiness = bootstrap_model_with_fetch(model, &root, move |_url, target_path| {
+            fetched_targets_clone
+                .borrow_mut()
+                .push(target_path.to_path_buf());
+            if let Some(parent) = target_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            write_tdt_asr_bundle(target_path);
             Ok::<(), std::io::Error>(())
         })
         .expect("bootstrap should populate the model cache");
@@ -497,7 +562,7 @@ mod tests {
     #[test]
     fn download_reports_asr_and_cleanup_readiness_separately() {
         let root = temp_root("inventory");
-        let cleanup = catalog_model("qwen2.5-3b-instruct-q4_k_m.gguf")
+        let cleanup = catalog_model("qwen3.5-2b-q4_k_m.gguf")
             .expect("catalog should include the default cleanup model");
         let cleanup_path = crate::model_install_dir(cleanup, &root);
         std::fs::create_dir_all(cleanup_path.parent().unwrap()).unwrap();
@@ -506,11 +571,11 @@ mod tests {
         let inventory = model_inventory(&root);
         let asr = inventory
             .iter()
-            .find(|entry| entry.id == "nemo-parakeet-tdt-0.6b-v2-int8")
+            .find(|entry| entry.id == "nemotron-speech-streaming-en-0.6b")
             .expect("inventory should include the ASR model");
         let cleanup = inventory
             .iter()
-            .find(|entry| entry.id == "qwen2.5-3b-instruct-q4_k_m.gguf")
+            .find(|entry| entry.id == "qwen3.5-2b-q4_k_m.gguf")
             .expect("inventory should include the cleanup model");
 
         assert!(!asr.readiness.is_ready);
@@ -521,7 +586,7 @@ mod tests {
     #[test]
     fn download_rejects_cleanup_models_without_gguf_header() {
         let root = temp_root("invalid-cleanup");
-        let cleanup = catalog_model("qwen2.5-3b-instruct-q4_k_m.gguf")
+        let cleanup = catalog_model("qwen3.5-2b-q4_k_m.gguf")
             .expect("catalog should include the default cleanup model");
         let cleanup_path = crate::model_install_dir(cleanup, &root);
         std::fs::create_dir_all(cleanup_path.parent().unwrap()).unwrap();
@@ -532,7 +597,7 @@ mod tests {
         assert!(!readiness.is_ready);
         assert_eq!(
             readiness.missing_files,
-            vec!["qwen2.5-3b-instruct-q4_k_m.gguf".to_string()]
+            vec!["qwen3.5-2b-q4_k_m.gguf".to_string()]
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -540,14 +605,14 @@ mod tests {
     #[test]
     fn download_rejects_archive_entries_with_unsafe_symlink_targets() {
         let root = temp_root("unsafe-symlink");
-        let model = catalog_model("nemo-parakeet-tdt-0.6b-v2-int8")
-            .expect("catalog should include the default ASR model");
+        let model = catalog_model("nemo-parakeet-tdt-0.6b-v3-int8")
+            .expect("catalog should include the legacy ASR model");
 
         let error = bootstrap_model_with_fetch(model, &root, |_url, target_path| {
             if let Some(parent) = target_path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            write_asr_bundle_with_unsafe_symlink(target_path);
+            write_tdt_asr_bundle_with_unsafe_symlink(target_path);
             Ok::<(), std::io::Error>(())
         })
         .unwrap_err();
@@ -559,14 +624,14 @@ mod tests {
     #[test]
     fn download_offline_readiness_uses_cached_models_after_bootstrap() {
         let root = temp_root("offline");
-        let model = catalog_model("nemo-parakeet-tdt-0.6b-v2-int8")
+        let model = catalog_model("nemotron-speech-streaming-en-0.6b")
             .expect("catalog should include the default ASR model");
 
         bootstrap_model_with_fetch(model, &root, |_url, target_path| {
             if let Some(parent) = target_path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            write_asr_bundle(target_path);
+            std::fs::write(target_path, b"pepper-x-model").unwrap();
             Ok::<(), std::io::Error>(())
         })
         .expect("bootstrap should populate the model cache");
@@ -608,7 +673,7 @@ mod tests {
             .iter()
             .any(|snapshot| snapshot.model_states.iter().any(|state| {
                 state.phase == BootstrapModelPhase::Downloading
-                    && state.model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
+                    && state.model_id == "nemotron-speech-streaming-en-0.6b"
             })));
         assert!(snapshots
             .last()
@@ -617,7 +682,7 @@ mod tests {
             .iter()
             .any(|state| {
                 state.phase == BootstrapModelPhase::Failed
-                    && state.model_id == "nemo-parakeet-tdt-0.6b-v2-int8"
+                    && state.model_id == "nemotron-speech-streaming-en-0.6b"
             }));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -640,7 +705,8 @@ mod tests {
                 if target_path.to_string_lossy().contains(".gguf") {
                     write_cleanup_model_file(target_path);
                 } else {
-                    write_asr_bundle(target_path);
+                    // MultiFile: each target is a model file, not an archive
+                    std::fs::write(target_path, b"pepper-x-model").unwrap();
                 }
                 Ok::<(), std::io::Error>(())
             }
@@ -657,7 +723,7 @@ mod tests {
                 if target_path.to_string_lossy().contains(".gguf") {
                     write_cleanup_model_file(target_path);
                 } else {
-                    write_asr_bundle(target_path);
+                    std::fs::write(target_path, b"pepper-x-model").unwrap();
                 }
                 Ok::<(), std::io::Error>(())
             },
@@ -672,7 +738,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn write_asr_bundle(target_path: &std::path::Path) {
+    fn write_tdt_asr_bundle(target_path: &std::path::Path) {
+        write_tdt_asr_bundle_with_prefix(
+            target_path,
+            "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+        );
+    }
+
+    fn write_tdt_asr_bundle_with_prefix(target_path: &std::path::Path, prefix: &str) {
         let archive = std::fs::File::create(target_path).unwrap();
         let encoder = BzEncoder::new(archive, bzip2::Compression::best());
         let mut tar = Builder::new(encoder);
@@ -687,18 +760,14 @@ mod tests {
             header.set_size(contents.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
-            tar.append_data(
-                &mut header,
-                format!("sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/{file_name}"),
-                contents,
-            )
-            .unwrap();
+            tar.append_data(&mut header, format!("{prefix}/{file_name}"), contents)
+                .unwrap();
         }
 
         tar.into_inner().unwrap().flush().unwrap();
     }
 
-    fn write_asr_bundle_with_unsafe_symlink(target_path: &std::path::Path) {
+    fn write_tdt_asr_bundle_with_unsafe_symlink(target_path: &std::path::Path) {
         let archive = std::fs::File::create(target_path).unwrap();
         let encoder = BzEncoder::new(archive, bzip2::Compression::best());
         let mut tar = Builder::new(encoder);
@@ -711,7 +780,7 @@ mod tests {
         header.set_cksum();
         tar.append_data(
             &mut header,
-            "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/unsafe-link",
+            "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/unsafe-link",
             std::io::empty(),
         )
         .unwrap();
