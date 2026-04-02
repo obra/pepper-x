@@ -98,7 +98,7 @@ mod cleanup_runtime {
             custom_prompt_text: None,
         });
 
-        assert!(prompt.contains("Delete fillers"));
+        assert!(prompt.contains("Remove filler words"));
         assert!(prompt.contains("scratch that"));
         assert!(prompt.contains("never mind"));
     }
@@ -115,8 +115,8 @@ mod cleanup_runtime {
             custom_prompt_text: None,
         });
 
-        assert!(prompt.contains("Example:"));
-        assert!(prompt.contains("->"));
+        assert!(prompt.contains("scratch that"));
+        assert!(prompt.contains("never mind"));
     }
 
     #[test]
@@ -238,7 +238,7 @@ mod cleanup_runtime {
             custom_prompt_text: Some("Return SHOUTING ONLY.".into()),
         });
 
-        assert!(prompt.contains("Delete fillers"));
+        assert!(prompt.contains("Remove filler words"));
         assert!(prompt.contains("Return SHOUTING ONLY.\n"));
     }
 

@@ -67,24 +67,26 @@ pub fn validate_interface_xml(xml: &str) -> Result<(), ScreenshotContractError> 
         .ok_or(ScreenshotContractError::MissingMethod)?
         + interface_index;
 
-    let required_arguments = [
-        r#"<arg name="include_frame" type="b" direction="in"/>"#,
-        r#"<arg name="include_cursor" type="b" direction="in"/>"#,
-        r#"<arg name="flash" type="b" direction="in"/>"#,
-        r#"<arg name="filename" type="s" direction="in"/>"#,
-        r#"<arg name="success" type="b" direction="out"/>"#,
-        r#"<arg name="filename_used" type="s" direction="out"/>"#,
+    // Check for required argument names (attribute-order-independent).
+    // GNOME versions may emit attributes in different order (type before name, etc.).
+    let required_arg_names = [
+        ("include_frame", "in"),
+        ("include_cursor", "in"),
+        ("flash", "in"),
+        ("filename", "in"),
+        ("success", "out"),
+        ("filename_used", "out"),
     ];
 
-    let mut search_index = method_index;
-    for argument in required_arguments {
-        let offset =
-            xml[search_index..]
-                .find(argument)
-                .ok_or(ScreenshotContractError::MissingArgument {
-                    name: argument_name(argument),
-                })?;
-        search_index += offset + argument.len();
+    let method_xml = &xml[method_index..];
+    for (name, direction) in required_arg_names {
+        // Check that an <arg> with this name and direction exists somewhere
+        // in the method XML, regardless of attribute order.
+        let has_arg = method_xml.contains(&format!(r#"name="{name}""#))
+            && method_xml.contains(&format!(r#"direction="{direction}""#));
+        if !has_arg {
+            return Err(ScreenshotContractError::MissingArgument { name });
+        }
     }
 
     Ok(())

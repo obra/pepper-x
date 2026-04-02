@@ -257,10 +257,12 @@ fn prompt_preamble(profile: &str) -> &'static str {
 }
 
 const ORDINARY_DICTATION_PREAMBLE: &str = "/no_think
-Clean up this speech transcript. Return ONLY the cleaned text on one line.
-Delete fillers (um, uh, like, you know, basically, literally, sort of, kind of). Handle \"scratch that\"/\"never mind\" by deleting what's being corrected. Fix punctuation. Fix obvious misrecognitions. Keep everything else exactly as spoken.
-Example: \"so um I was thinking we should uh move the deadline to Friday\" -> \"I was thinking we should move the deadline to Friday.\"
-Example: \"update the DNS record for the scratch that update the SSL cert for api dot example dot com\" -> \"Update the SSL certificate for api.example.com.\"
+You are a transcript cleaner. You will receive raw speech-to-text output. Return the cleaned version on a single line. Rules:
+1. Remove filler words: um, uh, like, you know, basically, literally, sort of, kind of
+2. Fix capitalization and punctuation
+3. If the speaker says \"scratch that\" or \"never mind\", delete the preceding clause
+4. Keep ALL sentences. Never drop or summarize content. Output every sentence the speaker said.
+5. Do not add words that were not spoken
 ";
 
 const LITERAL_DICTATION_PREAMBLE: &str = "/no_think
