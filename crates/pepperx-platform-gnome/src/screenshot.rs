@@ -93,33 +93,71 @@ pub fn validate_interface_xml(xml: &str) -> Result<(), ScreenshotContractError> 
 }
 
 pub fn screenshot_window(
-    connection: &Connection,
+    _connection: &Connection,
     filename: impl AsRef<Path>,
-    include_frame: bool,
-    include_cursor: bool,
-    flash: bool,
+    _include_frame: bool,
+    _include_cursor: bool,
+    _flash: bool,
 ) -> Result<PathBuf, ScreenshotWindowError> {
     let filename = validated_png_path(filename.as_ref())?;
-    let filename = filename
-        .to_str()
-        .ok_or(ScreenshotWindowError::InvalidFilename)?;
 
-    let reply = connection
-        .call_method(
-            Some(SCREENSHOT_BUS_NAME),
-            SCREENSHOT_OBJECT_PATH,
-            Some(SCREENSHOT_INTERFACE_NAME),
-            SCREENSHOT_METHOD_NAME,
-            &(include_frame, include_cursor, flash, filename),
-        )
-        .map_err(classify_dbus_error)?;
+    // Use the XDG Desktop Portal via gdbus — compositor-agnostic, no sound,
+    // no user dialog (when permission is already granted).
+    let output = std::process::Command::new("gdbus")
+        .args([
+            "call", "--session",
+            "--dest", "org.freedesktop.portal.Desktop",
+            "--object-path", "/org/freedesktop/portal/desktop",
+            "--method", "org.freedesktop.portal.Screenshot.Screenshot",
+            "", // parent_window
+            "{'interactive': <false>}",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|_| ScreenshotWindowError::Unavailable)?;
 
-    let (success, filename_used): (bool, String) = reply
-        .body()
-        .deserialize()
-        .map_err(|_| ScreenshotWindowError::InvalidReply)?;
+    if !output.status.success() {
+        return Err(ScreenshotWindowError::Unavailable);
+    }
 
-    interpret_screenshot_reply(success, filename_used)
+    // The portal saves the screenshot asynchronously. We need to wait for it.
+    // The response comes via a D-Bus signal, but gdbus doesn't wait for it.
+    // Instead, wait briefly and check the Pictures directory for the latest screenshot.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Find the most recently created screenshot in ~/Pictures/
+    let pictures_dir = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join("Pictures"))
+        .map_err(|_| ScreenshotWindowError::Unavailable)?;
+
+    let latest = std::fs::read_dir(&pictures_dir)
+        .map_err(|_| ScreenshotWindowError::Unavailable)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("Screenshot")
+                && e.path().extension().map(|ext| ext == "png").unwrap_or(false)
+        })
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+
+    let latest = latest.ok_or(ScreenshotWindowError::Unavailable)?;
+
+    // Check it was created in the last 2 seconds
+    if let Ok(modified) = latest.metadata().and_then(|m| m.modified()) {
+        if modified.elapsed().map(|d| d.as_secs() > 2).unwrap_or(true) {
+            return Err(ScreenshotWindowError::Unavailable);
+        }
+    }
+
+    // Move to our desired filename
+    std::fs::rename(latest.path(), &filename)
+        .or_else(|_| std::fs::copy(latest.path(), &filename).map(|_| ()))
+        .map_err(|_| ScreenshotWindowError::Unavailable)?;
+    let _ = std::fs::remove_file(latest.path());
+
+    Ok(filename)
 }
 
 pub fn introspect_interface_xml(connection: &Connection) -> Result<String, ScreenshotWindowError> {

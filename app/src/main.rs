@@ -8,6 +8,7 @@ mod history_view;
 mod onboarding;
 mod overlay;
 mod session_runtime;
+mod status_pill;
 mod settings;
 mod sound_effects;
 mod settings_view;

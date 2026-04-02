@@ -61,20 +61,10 @@ pub fn capture_supporting_context() -> Result<SupportingContext, ContextCaptureE
         return Ok(atspi_context);
     }
 
-    let connection = Connection::session()
-        .map_err(|error| ContextCaptureError::SessionBus(error.to_string()))?;
-    let screenshot_contract_xml =
-        introspect_interface_xml(&connection).map_err(ContextCaptureError::Screenshot)?;
-    let screenshot_path = temporary_screenshot_path();
-    let result = capture_supporting_context_with(
-        snapshot,
-        &screenshot_contract_xml,
-        || screenshot_window(&connection, &screenshot_path, false, false, false),
-        ocr_png_with_tesseract,
-        SUPPORTING_CONTEXT_LIMIT,
-    );
-    let _ = std::fs::remove_file(&screenshot_path);
-    result
+    // Screenshot+OCR fallback is disabled: it triggers GNOME's screenshot
+    // sound and notification. AT-SPI text access is preferred.
+    // TODO: Re-enable when we have a silent screenshot method.
+    Ok(SupportingContext::default())
 }
 
 pub(crate) fn context_capture_probe(

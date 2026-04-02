@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const SESSION_CTX: u32 = 2048;
-const BATCH_SIZE: u32 = 512;
+const BATCH_SIZE: u32 = 2048;
 const OUTPUT_LIMIT: usize = 1024;
 const INFERENCE_TIMEOUT: Duration = Duration::from_secs(15);
 

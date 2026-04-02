@@ -23,6 +23,7 @@ use crate::transcription::{
     experiment_rerun_archived_cleanup, experiment_rerun_archived_run,
     ArchivedCleanupRerunRequest, ArchivedRunRerunRequest,
 };
+use crate::status_pill::StatusPill;
 use crate::window::{diagnostics_summary_text, MainWindow};
 
 pub const APPLICATION_ID: &str = "com.obra.PepperX";
@@ -57,6 +58,16 @@ pub fn run() {
     )
     .expect("failed to start GNOME IPC service");
     let service = service_handle.service();
+
+    // Clean up stale uinput helper socket from a previous run.
+    {
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/run/user/1000"));
+        let socket = runtime_dir.join("pepper-x").join("uinput-helper.sock");
+        let _ = std::fs::remove_file(&socket);
+    }
+
     let modifier_capture = start_modifier_capture(service.clone(), &settings);
 
     // Pre-warm the cleanup helper: load the model and pre-decode the system
@@ -208,6 +219,8 @@ pub fn run() {
         window.set_shared_trigger_config(config);
     }
 
+    let status_pill = StatusPill::new();
+
     let startup_launch_policy = startup_launch_policy();
     let skipped_initial_activation = Rc::new(Cell::new(false));
     let app_model = app_model.clone();
@@ -221,6 +234,7 @@ pub fn run() {
         service.clone(),
         command_receiver,
         live_runtime_for_pump,
+        status_pill,
     );
     app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
@@ -367,6 +381,7 @@ fn install_command_pump(
     service: PepperXService,
     receiver: Receiver<AppCommand>,
     live_runtime: std::sync::Arc<LiveRuntimeHandle>,
+    status_pill: StatusPill,
 ) {
     let last_play_sounds = Cell::new(true);
     gtk::glib::timeout_add_local(Duration::from_millis(50), move || {
@@ -381,7 +396,9 @@ fn install_command_pump(
 
         let capabilities = service.current_capabilities();
         app_model.update_extension_connected(capabilities.extension_connected);
-        window.set_live_status(&live_status.snapshot());
+        let snapshot = live_status.snapshot();
+        window.set_live_status(&snapshot);
+        status_pill.set_live_status(&snapshot);
 
         // Sync play_sounds setting to runtime (settings toggle saves to disk,
         // we propagate to the live runtime here).

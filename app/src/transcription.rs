@@ -546,13 +546,11 @@ fn connect_or_spawn_uinput_helper(
 ) -> Result<UnixStream, FriendlyInsertRunError> {
     match UnixStream::connect(socket_path) {
         Ok(stream) => return Ok(stream),
-        Err(initial_error) if initial_error.kind() != std::io::ErrorKind::NotFound => {
-            return Err(FriendlyInsertRunError::Access(format!(
-                "failed to connect to Pepper X uinput helper at {}: {initial_error}",
-                socket_path.display()
-            )));
+        Err(_) => {
+            // Connection failed (not found, refused, etc.) — remove stale socket
+            // and spawn a fresh helper.
+            let _ = std::fs::remove_file(socket_path);
         }
-        Err(_) => {}
     }
 
     let helper_bin = configured_uinput_helper_bin_path();
