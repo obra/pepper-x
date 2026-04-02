@@ -98,7 +98,7 @@ if "live-recording-" not in source_wav_path.name:
 if not entry.get("transcript_text", "").strip():
     raise SystemExit(f"Transcript log entry is missing transcript_text: {entry}")
 
-if entry.get("backend_name") != "sherpa-onnx":
+if entry.get("backend_name") != "parakeet-rs":
     raise SystemExit(f"Unexpected backend_name in transcript log: {entry}")
 
 if stdout_transcript != entry["transcript_text"]:

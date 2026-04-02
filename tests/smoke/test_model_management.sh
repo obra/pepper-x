@@ -9,10 +9,10 @@ if ! command -v cargo >/dev/null 2>&1 && [[ -f "${HOME}/.cargo/env" ]]; then
     . "${HOME}/.cargo/env"
 fi
 
-asr_model_id="nemo-parakeet-tdt-0.6b-v2-int8"
+asr_model_id="nemotron-speech-streaming-en-0.6b"
 alternate_asr_model_id="nemo-parakeet-tdt-0.6b-v3-int8"
-cleanup_model_id="qwen2.5-3b-instruct-q4_k_m.gguf"
-alternate_cleanup_model_id="qwen2.5-1.5b-instruct-q4_k_m.gguf"
+cleanup_model_id="qwen3.5-2b-q4_k_m.gguf"
+alternate_cleanup_model_id="qwen3.5-0.8b-q4_k_m.gguf"
 offline_mode=0
 
 if [[ "${1:-}" == "--offline" ]]; then

@@ -66,7 +66,7 @@ if source_wav_path != fixture_path:
         f"{source_wav_path} != {fixture_path}"
     )
 
-if entry.get("backend_name") != "sherpa-onnx":
+if entry.get("backend_name") != "parakeet-rs":
     raise SystemExit(f"Unexpected backend_name in transcript log: {entry}")
 
 if not entry.get("model_name", "").strip():
