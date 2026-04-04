@@ -2,26 +2,44 @@ pub mod cleanup;
 
 pub use cleanup::{
     cleanup_prompt, cleanup_system_prompt, prefill_cleanup_system_prompt, run_cleanup,
-    CleanupError, CleanupRequest, CleanupResult, LITERAL_DICTATION_PROMPT_PROFILE,
-    ORDINARY_DICTATION_PROMPT_PROFILE,
+    CleanupError, CleanupRequest, CleanupResult, CHAT_TEMPLATE_CHATML, CHAT_TEMPLATE_GEMMA,
+    LITERAL_DICTATION_PROMPT_PROFILE, ORDINARY_DICTATION_PROMPT_PROFILE,
 };
 
 #[cfg(test)]
 mod cleanup_runtime {
     use super::{cleanup_prompt, run_cleanup, CleanupError, CleanupRequest};
-    use crate::cleanup::{strip_reasoning_tags, ORDINARY_DICTATION_PROMPT_PROFILE};
+    use crate::cleanup::{
+        strip_reasoning_tags, CHAT_TEMPLATE_CHATML, CHAT_TEMPLATE_GEMMA,
+        ORDINARY_DICTATION_PROMPT_PROFILE,
+    };
     use std::path::PathBuf;
 
-    #[test]
-    fn cleanup_runtime_rejects_missing_model_path() {
-        let error = run_cleanup(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-missing.gguf"),
+    fn chatml_request(transcript: &str) -> CleanupRequest {
+        CleanupRequest {
+            transcript_text: transcript.into(),
+            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             supporting_context_text: None,
             ocr_text: None,
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            chat_template: CHAT_TEMPLATE_CHATML.into(),
+        }
+    }
+
+    fn gemma_request(transcript: &str) -> CleanupRequest {
+        CleanupRequest {
+            chat_template: CHAT_TEMPLATE_GEMMA.into(),
+            ..chatml_request(transcript)
+        }
+    }
+
+    #[test]
+    fn cleanup_runtime_rejects_missing_model_path() {
+        let error = run_cleanup(&CleanupRequest {
+            model_path: PathBuf::from("/tmp/pepper-x-missing.gguf"),
+            ..chatml_request("hello from pepper x")
         })
         .unwrap_err();
 
@@ -33,38 +51,16 @@ mod cleanup_runtime {
 
     #[test]
     fn cleanup_runtime_prompt_is_deterministic_for_same_transcript_input() {
-        let request = CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
-        };
-
+        let request = chatml_request("hello from pepper x");
         assert_eq!(cleanup_prompt(&request), cleanup_prompt(&request));
     }
 
     #[test]
     fn cleanup_runtime_prompt_profile_changes_the_prompt_contract() {
-        let ordinary_prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
-        });
+        let ordinary_prompt = cleanup_prompt(&chatml_request("hello from pepper x"));
         let literal_prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
             prompt_profile: "literal-dictation".into(),
-            custom_prompt_text: None,
+            ..chatml_request("hello from pepper x")
         });
 
         assert_ne!(ordinary_prompt, literal_prompt);
@@ -73,31 +69,13 @@ mod cleanup_runtime {
 
     #[test]
     fn cleanup_prompt_wraps_transcript_in_user_input_tags() {
-        let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
-        });
-
+        let prompt = cleanup_prompt(&chatml_request("hello from pepper x"));
         assert!(prompt.contains("<USER-INPUT>\nhello from pepper x\n</USER-INPUT>"));
     }
 
     #[test]
     fn cleanup_prompt_includes_filler_word_rules() {
-        let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "test".into(),
-            model_path: PathBuf::from("/tmp/model.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
-        });
-
+        let prompt = cleanup_prompt(&chatml_request("test"));
         assert!(prompt.contains("Remove filler words"));
         assert!(prompt.contains("scratch that"));
         assert!(prompt.contains("never mind"));
@@ -105,32 +83,14 @@ mod cleanup_runtime {
 
     #[test]
     fn cleanup_prompt_includes_examples() {
-        let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "test".into(),
-            model_path: PathBuf::from("/tmp/model.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
-        });
-
+        let prompt = cleanup_prompt(&chatml_request("test"));
         assert!(prompt.contains("scratch that"));
         assert!(prompt.contains("never mind"));
     }
 
     #[test]
     fn cleanup_ocr_prompt_omits_context_when_absent() {
-        let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
-        });
-
+        let prompt = cleanup_prompt(&chatml_request("hello from pepper x"));
         assert!(!prompt.contains("<OCR-RULES>"));
         assert!(!prompt.contains("<WINDOW-OCR-CONTENT>"));
     }
@@ -138,13 +98,8 @@ mod cleanup_runtime {
     #[test]
     fn cleanup_ocr_prompt_uses_xml_blocks_when_present() {
         let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
             ocr_text: Some("Terminal: ~/git/pepper-x".into()),
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
+            ..chatml_request("hello from pepper x")
         });
 
         assert!(prompt.contains("<OCR-RULES>"));
@@ -156,13 +111,8 @@ mod cleanup_runtime {
     fn cleanup_ocr_prompt_bounds_context_to_4000_chars() {
         let oversized_ocr = "A".repeat(5000);
         let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
             ocr_text: Some(oversized_ocr.clone()),
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
+            ..chatml_request("hello from pepper x")
         });
 
         let bounded_ocr = "A".repeat(4000);
@@ -173,13 +123,8 @@ mod cleanup_runtime {
     #[test]
     fn cleanup_ocr_prompt_includes_supporting_context_in_ocr_block() {
         let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
             supporting_context_text: Some("line before\nline after".into()),
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
+            ..chatml_request("hello from pepper x")
         });
 
         assert!(prompt.contains("<WINDOW-OCR-CONTENT>\nline before\nline after\n</WINDOW-OCR-CONTENT>"));
@@ -189,15 +134,10 @@ mod cleanup_runtime {
     #[test]
     fn cleanup_runtime_prompt_includes_correction_hints_block() {
         let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
             correction_memory_text: Some(
                 "- pepper x -> Pepper X\n- chat gbt -> ChatGPT".into(),
             ),
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
+            ..chatml_request("hello from pepper x")
         });
 
         assert!(prompt.contains("<CORRECTION-HINTS>"));
@@ -213,13 +153,8 @@ mod cleanup_runtime {
             .expect("PEPPERX_CLEANUP_MODEL_PATH must point to a GGUF cleanup model");
 
         let result = run_cleanup(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
             model_path,
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
-            custom_prompt_text: None,
+            ..chatml_request("hello from pepper x")
         })
         .expect("real cleanup run should succeed");
 
@@ -229,13 +164,8 @@ mod cleanup_runtime {
     #[test]
     fn cleanup_runtime_custom_prompt_layers_on_top_of_selected_profile() {
         let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: Some("Return SHOUTING ONLY.".into()),
+            ..chatml_request("hello from pepper x")
         });
 
         assert!(prompt.contains("Remove filler words"));
@@ -246,17 +176,66 @@ mod cleanup_runtime {
     fn cleanup_runtime_custom_prompt_preserves_user_whitespace() {
         let custom_prompt = "\n  Keep product names verbatim.\n\nDo not normalize punctuation.\n";
         let prompt = cleanup_prompt(&CleanupRequest {
-            transcript_text: "hello from pepper x".into(),
-            model_path: PathBuf::from("/tmp/pepper-x-present.gguf"),
-            supporting_context_text: None,
-            ocr_text: None,
-            correction_memory_text: None,
-            prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: Some(custom_prompt.into()),
+            ..chatml_request("hello from pepper x")
         });
 
         assert!(prompt.contains(custom_prompt));
     }
+
+    // --- ChatML-specific tests ---
+
+    #[test]
+    fn chatml_prompt_uses_im_start_im_end_tokens() {
+        let prompt = cleanup_prompt(&chatml_request("test"));
+        assert!(prompt.contains("<|im_start|>system\n"));
+        assert!(prompt.contains("<|im_end|>"));
+        assert!(prompt.contains("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn chatml_prompt_includes_no_think_directive() {
+        let prompt = cleanup_prompt(&chatml_request("test"));
+        assert!(prompt.contains("/no_think"));
+    }
+
+    // --- Gemma template tests ---
+
+    #[test]
+    fn gemma_prompt_uses_start_of_turn_tokens() {
+        let prompt = cleanup_prompt(&gemma_request("test"));
+        assert!(prompt.contains("<start_of_turn>user\n"));
+        assert!(prompt.contains("<end_of_turn>"));
+        assert!(prompt.contains("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn gemma_prompt_does_not_contain_chatml_tokens() {
+        let prompt = cleanup_prompt(&gemma_request("test"));
+        assert!(!prompt.contains("<|im_start|>"));
+        assert!(!prompt.contains("<|im_end|>"));
+    }
+
+    #[test]
+    fn gemma_prompt_omits_no_think_directive() {
+        let prompt = cleanup_prompt(&gemma_request("test"));
+        assert!(!prompt.contains("/no_think"));
+    }
+
+    #[test]
+    fn gemma_prompt_includes_cleanup_rules() {
+        let prompt = cleanup_prompt(&gemma_request("test"));
+        assert!(prompt.contains("Remove filler words"));
+        assert!(prompt.contains("scratch that"));
+    }
+
+    #[test]
+    fn gemma_prompt_wraps_transcript_in_user_input_tags() {
+        let prompt = cleanup_prompt(&gemma_request("hello from pepper x"));
+        assert!(prompt.contains("<USER-INPUT>\nhello from pepper x\n</USER-INPUT>"));
+    }
+
+    // --- strip_reasoning_tags tests ---
 
     #[test]
     fn strip_reasoning_tags_removes_matched_think_blocks() {

@@ -17,6 +17,9 @@ const CLEANUP_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DEFAULT_CLEANUP_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-cleanup-helper";
 
+pub const CHAT_TEMPLATE_CHATML: &str = "chatml";
+pub const CHAT_TEMPLATE_GEMMA: &str = "gemma";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupRequest {
     pub transcript_text: String,
@@ -26,6 +29,8 @@ pub struct CleanupRequest {
     pub correction_memory_text: Option<String>,
     pub prompt_profile: String,
     pub custom_prompt_text: Option<String>,
+    /// Chat template family: "chatml" (Qwen) or "gemma". Defaults to "chatml".
+    pub chat_template: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,10 +167,22 @@ struct CleanupHelperResponse {
 // ---------------------------------------------------------------------------
 
 pub fn cleanup_prompt(request: &CleanupRequest) -> String {
+    let system_prompt = build_system_prompt_body(request);
+    let transcript = request.transcript_text.trim();
+    format_chat_prompt(&request.chat_template, &system_prompt, transcript)
+}
+
+/// Build just the system prompt portion (for prefilling the KV cache).
+pub fn cleanup_system_prompt(request: &CleanupRequest) -> String {
+    let system_prompt = build_system_prompt_body(request);
+    format_system_prefix(&request.chat_template, &system_prompt)
+}
+
+fn build_system_prompt_body(request: &CleanupRequest) -> String {
     let mut sections: Vec<String> = Vec::new();
 
     // Section 1: Base prompt (user custom or built-in default)
-    let mut base = prompt_preamble(&request.prompt_profile).to_string();
+    let mut base = prompt_preamble(&request.prompt_profile, &request.chat_template).to_string();
     if let Some(custom_prompt_text) = custom_prompt_text(request.custom_prompt_text.as_deref()) {
         base.push_str(&custom_prompt_text);
     }
@@ -198,65 +215,49 @@ pub fn cleanup_prompt(request: &CleanupRequest) -> String {
         ));
     }
 
-    let system_prompt = sections.join("\n\n");
-    let transcript = request.transcript_text.trim();
-    format_chat_prompt(&system_prompt, transcript)
+    sections.join("\n\n")
 }
 
-/// Build just the system prompt portion (for prefilling the KV cache).
-pub fn cleanup_system_prompt(request: &CleanupRequest) -> String {
-    let mut sections: Vec<String> = Vec::new();
-    let mut base = prompt_preamble(&request.prompt_profile).to_string();
-    if let Some(custom_prompt_text) = custom_prompt_text(request.custom_prompt_text.as_deref()) {
-        base.push_str(&custom_prompt_text);
-    }
-    sections.push(base);
-    if let Some(correction_text) =
-        bounded_correction_memory_text(request.correction_memory_text.as_deref())
-    {
-        sections.push(format!(
-            "<CORRECTION-HINTS>\n{correction_text}\n</CORRECTION-HINTS>"
-        ));
-    }
-    let ocr_text = bounded_supporting_context_text(request.supporting_context_text.as_deref())
-        .or_else(|| bounded_ocr_text(request.ocr_text.as_deref()));
-    if let Some(ocr_text) = &ocr_text {
-        sections.push(
-            "<OCR-RULES>\n\
-             The following text was captured from the user's screen. Use it ONLY as \
-             disambiguation context: prefer the user's spoken words, but correct likely \
-             misrecognitions of names, commands, files, and jargon visible on screen. \
-             Never summarize or rewrite the window content.\n\
-             </OCR-RULES>"
-                .to_string(),
-        );
-        sections.push(format!(
-            "<WINDOW-OCR-CONTENT>\n{ocr_text}\n</WINDOW-OCR-CONTENT>"
-        ));
-    }
-    let system_prompt = sections.join("\n\n");
-    // Return the system portion of the chat template (up to and including <|im_end|>
-    // and the start of the user turn). The prefill decodes this into KV cache.
-    format!("<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n")
-}
-
-fn format_chat_prompt(system_prompt: &str, transcript: &str) -> String {
-    format!(
-        "<|im_start|>system\n{system_prompt}<|im_end|>\n\
-         <|im_start|>user\n<USER-INPUT>\n{transcript}\n</USER-INPUT><|im_end|>\n\
-         <|im_start|>assistant\n"
-    )
-}
-
-fn prompt_preamble(profile: &str) -> &'static str {
-    match profile {
-        ORDINARY_DICTATION_PROMPT_PROFILE => ORDINARY_DICTATION_PREAMBLE,
-        LITERAL_DICTATION_PROMPT_PROFILE => LITERAL_DICTATION_PREAMBLE,
-        _ => ORDINARY_DICTATION_PREAMBLE,
+fn format_chat_prompt(chat_template: &str, system_prompt: &str, transcript: &str) -> String {
+    match chat_template {
+        CHAT_TEMPLATE_GEMMA => format!(
+            "<start_of_turn>user\n{system_prompt}\n\n\
+             <USER-INPUT>\n{transcript}\n</USER-INPUT><end_of_turn>\n\
+             <start_of_turn>model\n"
+        ),
+        _ => format!(
+            "<|im_start|>system\n{system_prompt}<|im_end|>\n\
+             <|im_start|>user\n<USER-INPUT>\n{transcript}\n</USER-INPUT><|im_end|>\n\
+             <|im_start|>assistant\n"
+        ),
     }
 }
 
-const ORDINARY_DICTATION_PREAMBLE: &str = "/no_think
+/// Format the system prefix for KV cache prefilling.
+fn format_system_prefix(chat_template: &str, system_prompt: &str) -> String {
+    match chat_template {
+        CHAT_TEMPLATE_GEMMA => {
+            format!("<start_of_turn>user\n{system_prompt}\n\n")
+        }
+        _ => {
+            format!("<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n")
+        }
+    }
+}
+
+fn prompt_preamble(profile: &str, chat_template: &str) -> &'static str {
+    let use_no_think = chat_template != CHAT_TEMPLATE_GEMMA;
+    match (profile, use_no_think) {
+        (ORDINARY_DICTATION_PROMPT_PROFILE, true) => ORDINARY_DICTATION_PREAMBLE_CHATML,
+        (ORDINARY_DICTATION_PROMPT_PROFILE, false) => ORDINARY_DICTATION_PREAMBLE_PLAIN,
+        (LITERAL_DICTATION_PROMPT_PROFILE, true) => LITERAL_DICTATION_PREAMBLE_CHATML,
+        (LITERAL_DICTATION_PROMPT_PROFILE, false) => LITERAL_DICTATION_PREAMBLE_PLAIN,
+        (_, true) => ORDINARY_DICTATION_PREAMBLE_CHATML,
+        (_, false) => ORDINARY_DICTATION_PREAMBLE_PLAIN,
+    }
+}
+
+const ORDINARY_DICTATION_PREAMBLE_CHATML: &str = "/no_think
 You are a transcript cleaner. You will receive raw speech-to-text output. Return the cleaned version on a single line. Rules:
 1. Remove filler words: um, uh, like, you know, basically, literally, sort of, kind of
 2. Fix capitalization and punctuation
@@ -265,7 +266,26 @@ You are a transcript cleaner. You will receive raw speech-to-text output. Return
 5. Do not add words that were not spoken
 ";
 
-const LITERAL_DICTATION_PREAMBLE: &str = "/no_think
+const ORDINARY_DICTATION_PREAMBLE_PLAIN: &str = "\
+You are a transcript cleaner. You will receive raw speech-to-text output. Return the cleaned version on a single line. Rules:
+1. Remove filler words: um, uh, like, you know, basically, literally, sort of, kind of
+2. Fix capitalization and punctuation
+3. If the speaker says \"scratch that\" or \"never mind\", delete the preceding clause
+4. Keep ALL sentences. Never drop or summarize content. Output every sentence the speaker said.
+5. Do not add words that were not spoken
+";
+
+const LITERAL_DICTATION_PREAMBLE_CHATML: &str = "/no_think
+You lightly normalize speech-recognition transcripts. Return ONLY the transcript on a single line.
+
+Rules:
+- Preserve spoken filler words, hesitations, and casing when they appear intentional.
+- Fix only obvious transcription errors that change the words themselves.
+- Properly punctuate sentences.
+
+";
+
+const LITERAL_DICTATION_PREAMBLE_PLAIN: &str = "\
 You lightly normalize speech-recognition transcripts. Return ONLY the transcript on a single line.
 
 Rules:

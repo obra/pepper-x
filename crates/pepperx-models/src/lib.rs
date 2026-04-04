@@ -7,8 +7,8 @@ pub use cache::{
     DefaultBootstrapReadiness, ModelInventoryEntry, ModelReadiness,
 };
 pub use catalog::{
-    catalog_model, default_model, supported_models, CatalogModel, DownloadArtifact,
-    DownloadArtifactKind, InstallLayout, ModelKind,
+    catalog_model, chat_template_for_model, default_model, supported_models, CatalogModel,
+    DownloadArtifact, DownloadArtifactKind, InstallLayout, ModelKind,
 };
 pub use download::{
     bootstrap_default_models_with_fetch, bootstrap_default_models_with_progress, bootstrap_model,
