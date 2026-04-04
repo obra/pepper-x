@@ -9,8 +9,8 @@ name = "pepperx-cleanup-helper"
 path = "src/main.rs"
 
 [dependencies]
-llama-cpp-4 = { version = "0.2.23", default-features = false, features = ["native"] }
-llama-cpp-sys-4 = { version = "0.2.23", default-features = false, features = ["native"] }
+llama-cpp-4 = { version = "0.2.26", default-features = false, features = ["native"] }
+llama-cpp-sys-4 = { version = "0.2.26", default-features = false, features = ["native"] }
 num_cpus = "1.16"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

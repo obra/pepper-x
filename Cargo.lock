@@ -619,7 +619,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -951,7 +951,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1470,9 +1470,9 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
 name = "llama-cpp-4"
-version = "0.2.23"
+version = "0.2.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "803f294071b0190f86d94f79a4467870455c824817f54aa23e1b427d0b0fe7f7"
+checksum = "484e485550042647fb50abae96fb96c8cdfe18fbdcd6fd2d694f31e165c34ba6"
 dependencies = [
  "enumflags2",
  "llama-cpp-sys-4",
@@ -1482,9 +1482,9 @@ dependencies = [
 
 [[package]]
 name = "llama-cpp-sys-4"
-version = "0.2.23"
+version = "0.2.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cb2934292b2f2bdbb60052fa14ee3d8cb70a587e3616e385b3294bb06ef6a50"
+checksum = "275db5f98a5553d1f80d58a4235b6bae0225a33a43d0b5c3626ad3434d625060"
 dependencies = [
  "bindgen",
  "cc",
@@ -2319,7 +2319,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2625,7 +2625,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
