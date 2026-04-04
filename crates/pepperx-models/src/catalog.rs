@@ -42,7 +42,7 @@ pub struct CatalogModel {
     pub chat_template: &'static str,
 }
 
-const SUPPORTED_MODELS: [CatalogModel; 7] = [
+const SUPPORTED_MODELS: [CatalogModel; 5] = [
     // Default ASR: Nemotron streaming int8 (parakeet-rs)
     CatalogModel {
         id: "nemotron-speech-streaming-en-0.6b",
@@ -135,38 +135,6 @@ const SUPPORTED_MODELS: [CatalogModel; 7] = [
         },
         download_files: &[],
         chat_template: "chatml",
-    },
-    // Gemma 4 E2B cleanup (benchmark)
-    CatalogModel {
-        id: "gemma-4-e2b-it-q4_k_m.gguf",
-        kind: ModelKind::Cleanup,
-        install_path: "cleanup/gemma-4-E2B-it-Q4_K_M.gguf",
-        required_files: &[],
-        install_layout: InstallLayout::File,
-        download_artifact: DownloadArtifact {
-            url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
-            file_name: "gemma-4-E2B-it-Q4_K_M.gguf",
-            kind: DownloadArtifactKind::File,
-            strip_prefix: None,
-        },
-        download_files: &[],
-        chat_template: "gemma",
-    },
-    // Gemma 4 E2B cleanup, aggressive quant (benchmark)
-    CatalogModel {
-        id: "gemma-4-e2b-it-iq2_m.gguf",
-        kind: ModelKind::Cleanup,
-        install_path: "cleanup/gemma-4-E2B-it-UD-IQ2_M.gguf",
-        required_files: &[],
-        install_layout: InstallLayout::File,
-        download_artifact: DownloadArtifact {
-            url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-UD-IQ2_M.gguf",
-            file_name: "gemma-4-E2B-it-UD-IQ2_M.gguf",
-            kind: DownloadArtifactKind::File,
-            strip_prefix: None,
-        },
-        download_files: &[],
-        chat_template: "gemma",
     },
 ];
 
