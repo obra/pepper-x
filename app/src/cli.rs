@@ -95,6 +95,10 @@ pub enum StartupMode {
     TranscribeWavAndCleanupAndInsertFriendly {
         wav_path: PathBuf,
     },
+    BenchmarkCleanup {
+        model_ids: Vec<String>,
+        limit: usize,
+    },
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<StartupMode, String>
@@ -244,6 +248,43 @@ where
                 ),
             }
         }
+        Some(flag) if flag == OsStr::new("--benchmark-cleanup") => {
+            let mut model_ids = Vec::new();
+            let mut limit = 20usize;
+
+            while let Some(flag) = args.next() {
+                match flag.as_os_str() {
+                    f if f == OsStr::new("--models") => {
+                        let Some(ids) = args.next() else {
+                            return Err("--models requires a comma-separated list of model ids".into());
+                        };
+                        model_ids = ids
+                            .to_string_lossy()
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                    f if f == OsStr::new("--limit") => {
+                        let Some(n) = args.next() else {
+                            return Err("--limit requires a number".into());
+                        };
+                        limit = n
+                            .to_string_lossy()
+                            .parse()
+                            .map_err(|_| "--limit must be a positive integer")?;
+                    }
+                    other => {
+                        return Err(format!(
+                            "unknown --benchmark-cleanup argument: {}",
+                            PathBuf::from(other).display()
+                        ));
+                    }
+                }
+            }
+
+            Ok(StartupMode::BenchmarkCleanup { model_ids, limit })
+        }
         Some(flag) => Err(format!(
             "unknown Pepper X argument: {}",
             PathBuf::from(flag).display()
@@ -300,6 +341,10 @@ pub fn run(startup_mode: StartupMode) -> Result<Option<TranscriptEntry>, CliRunE
             println!("Updated Pepper X cleanup prompt profile to {profile}");
             Ok(None)
         }
+        StartupMode::BenchmarkCleanup { model_ids, limit } => {
+            crate::transcription::benchmark_cleanup(&model_ids, limit)?;
+            Ok(None)
+        }
         other_mode => run_with(
             other_mode,
             || record_and_transcribe(settings.preferred_microphone.clone(), wait_for_stop_signal),
@@ -337,6 +382,7 @@ where
         StartupMode::SetDefaultAsrModel { .. } => Ok(None),
         StartupMode::SetDefaultCleanupModel { .. } => Ok(None),
         StartupMode::SetCleanupPromptProfile { .. } => Ok(None),
+        StartupMode::BenchmarkCleanup { .. } => Ok(None),
         StartupMode::RecordAndTranscribe => record_and_transcribe().map(Some),
         StartupMode::RerunArchivedRun {
             run_id,
@@ -1013,6 +1059,48 @@ mod cli_mode {
                 wav_path: PathBuf::from(wav_path),
             }
         );
+    }
+
+    #[test]
+    fn benchmark_cleanup_cli_mode_parses_with_defaults() {
+        let command = parse_args(["pepper-x", "--benchmark-cleanup"]).unwrap();
+        assert_eq!(
+            command,
+            StartupMode::BenchmarkCleanup {
+                model_ids: vec![],
+                limit: 20,
+            }
+        );
+    }
+
+    #[test]
+    fn benchmark_cleanup_cli_mode_parses_with_models_and_limit() {
+        let command = parse_args([
+            "pepper-x",
+            "--benchmark-cleanup",
+            "--models",
+            "qwen3.5-2b-q4_k_m.gguf,gemma-4-e2b-it-q4_k_m.gguf",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            StartupMode::BenchmarkCleanup {
+                model_ids: vec![
+                    "qwen3.5-2b-q4_k_m.gguf".into(),
+                    "gemma-4-e2b-it-q4_k_m.gguf".into(),
+                ],
+                limit: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn benchmark_cleanup_cli_mode_rejects_unknown_flags() {
+        let error = parse_args(["pepper-x", "--benchmark-cleanup", "--bogus"]).unwrap_err();
+        assert!(error.contains("unknown --benchmark-cleanup argument"));
     }
 
     fn env_lock() -> &'static Mutex<()> {

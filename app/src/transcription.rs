@@ -859,6 +859,128 @@ where
     )
 }
 
+// ---------------------------------------------------------------------------
+// Cleanup model benchmarking
+// ---------------------------------------------------------------------------
+
+pub fn benchmark_cleanup(
+    model_ids: &[String],
+    limit: usize,
+) -> Result<(), TranscriptionRunError> {
+    benchmark_cleanup_with(model_ids, limit, &state_root(), |model_id, request| {
+        let cache_root = default_cache_root();
+        let model_path = configured_cleanup_model_path_for_model_id(model_id, &cache_root)?;
+        let request = CleanupRequest {
+            model_path,
+            chat_template: chat_template_for_model(model_id).into(),
+            ..request
+        };
+        run_cleanup(&request).map_err(Into::into)
+    })
+}
+
+pub(crate) fn benchmark_cleanup_with<C>(
+    model_ids: &[String],
+    limit: usize,
+    history_root: &Path,
+    cleanup: C,
+) -> Result<(), TranscriptionRunError>
+where
+    C: Fn(&str, CleanupRequest) -> Result<CleanupResult, CleanupError>,
+{
+    use pepperx_models::supported_models;
+
+    let store = HistoryStore::open(history_root)?;
+    let runs = store.recent_runs()?;
+
+    // Determine which models to benchmark.
+    let model_ids: Vec<String> = if model_ids.is_empty() {
+        supported_models()
+            .iter()
+            .filter(|m| m.kind == ModelKind::Cleanup)
+            .map(|m| m.id.to_string())
+            .collect()
+    } else {
+        model_ids.to_vec()
+    };
+
+    // Collect runs that have a non-empty transcript.
+    let benchmark_runs: Vec<_> = runs
+        .iter()
+        .filter(|run| !run.entry.transcript_text.trim().is_empty())
+        .take(limit)
+        .collect();
+
+    if benchmark_runs.is_empty() {
+        println!("No archived runs with transcripts found.");
+        return Ok(());
+    }
+
+    println!(
+        "Cleanup benchmark: {} utterances × {} models\n",
+        benchmark_runs.len(),
+        model_ids.len()
+    );
+
+    for (index, run) in benchmark_runs.iter().enumerate() {
+        let raw = run.entry.transcript_text.trim();
+        let truncated_raw = if raw.len() > 80 {
+            format!("{}…", &raw[..77])
+        } else {
+            raw.to_string()
+        };
+        println!(
+            "--- Utterance {} ({}): \"{}\"",
+            index + 1,
+            &run.run_id,
+            truncated_raw,
+        );
+
+        if let Some(cleanup) = &run.entry.cleanup {
+            if let Some(original_cleaned) = &cleanup.cleaned_text {
+                println!(
+                    "  {:40} {:>6}ms  {}",
+                    format!("{} (original)", cleanup.model_name),
+                    cleanup.elapsed_ms,
+                    original_cleaned,
+                );
+            }
+        }
+
+        let settings = AppSettings::load_or_default();
+        for model_id in &model_ids {
+            let request = CleanupRequest {
+                transcript_text: raw.to_string(),
+                model_path: PathBuf::new(), // filled by caller
+                supporting_context_text: run.supporting_context_text.clone(),
+                ocr_text: run.ocr_text.clone(),
+                correction_memory_text: load_correction_store().prompt_memory_text(),
+                prompt_profile: run
+                    .prompt_profile
+                    .clone()
+                    .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
+                custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+                chat_template: chat_template_for_model(model_id).into(),
+            };
+
+            match cleanup(model_id, request) {
+                Ok(result) => {
+                    println!(
+                        "  {:40} {:>6}ms  {}",
+                        model_id, result.elapsed_ms, result.cleaned_text,
+                    );
+                }
+                Err(error) => {
+                    println!("  {:40} ERROR    {}", model_id, error);
+                }
+            }
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 fn rerun_archived_run_with<T, C>(
     request: ArchivedRunRerunRequest,
     transcribe: T,
@@ -4478,6 +4600,72 @@ mod app_shell {
             }
             None => std::env::remove_var("PEPPERX_STATE_ROOT"),
         }
+        let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn benchmark_cleanup_runs_each_model_on_each_utterance() {
+        let state_root = std::env::temp_dir().join(format!(
+            "pepper-x-benchmark-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        // Archive two runs with transcripts.
+        let store = HistoryStore::open(&state_root).unwrap();
+        for transcript in &["hello from pepper x", "testing the cleanup models"] {
+            let entry = TranscriptEntry::new(
+                "/tmp/test.wav",
+                *transcript,
+                "parakeet-rs",
+                "nemotron-speech-streaming-en-0.6b",
+                Duration::from_millis(50),
+            );
+            store
+                .archive_run(&ArchiveWriteRequest::new(entry))
+                .unwrap();
+        }
+
+        // Track which (model_id, transcript) pairs were called.
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let calls_clone = calls.clone();
+
+        let model_ids = vec![
+            "model-a".to_string(),
+            "model-b".to_string(),
+        ];
+
+        let result = benchmark_cleanup_with(&model_ids, 10, &state_root, |model_id, request| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push((model_id.into(), request.transcript_text.clone()));
+            Ok(CleanupResult {
+                backend_name: "llama.cpp".into(),
+                model_name: model_id.into(),
+                cleaned_text: format!("[{model_id}] {}", request.transcript_text),
+                elapsed_ms: 42,
+                used_ocr: false,
+            })
+        });
+
+        assert!(result.is_ok(), "benchmark should succeed");
+
+        let calls = calls.lock().unwrap();
+        // 2 utterances × 2 models = 4 calls
+        assert_eq!(calls.len(), 4, "expected 4 cleanup calls, got {}", calls.len());
+        // Both models should appear
+        assert!(calls.iter().any(|(m, _)| m == "model-a"));
+        assert!(calls.iter().any(|(m, _)| m == "model-b"));
+        // Both transcripts should appear
+        assert!(calls.iter().any(|(_, t)| t == "hello from pepper x"));
+        assert!(calls.iter().any(|(_, t)| t == "testing the cleanup models"));
+
         let _ = std::fs::remove_dir_all(state_root);
     }
 }
