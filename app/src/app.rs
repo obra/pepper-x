@@ -78,7 +78,9 @@ pub fn run() {
             .name("pepperx-cleanup-warmup".into())
             .spawn(move || {
                 use pepperx_cleanup::{prefill_cleanup_system_prompt, CleanupRequest};
-                use pepperx_models::{catalog_model, default_cache_root, model_readiness};
+                use pepperx_models::{
+                    catalog_model, chat_template_for_model, default_cache_root, model_readiness,
+                };
 
                 if !settings.cleanup_enabled {
                     return;
@@ -101,6 +103,10 @@ pub fn run() {
                     correction_memory_text: None,
                     prompt_profile: settings.cleanup_prompt_profile.clone(),
                     custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+                    chat_template: chat_template_for_model(
+                        &settings.preferred_cleanup_model,
+                    )
+                    .into(),
                 };
                 prefill_cleanup_system_prompt(&request);
             })

@@ -13,7 +13,9 @@ use pepperx_audio::RecordingArtifact;
 use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 use pepperx_corrections::{learn_correction, CorrectionStore};
 use pepperx_ipc::{LiveStatus, SharedLiveStatus};
-use pepperx_models::{catalog_model, default_cache_root, model_readiness, ModelKind};
+use pepperx_models::{
+    catalog_model, chat_template_for_model, default_cache_root, model_readiness, ModelKind,
+};
 use pepperx_platform_gnome::atspi::{
     insert_text_into_friendly_target, FriendlyInsertOutcome, FriendlyInsertPolicy,
     FriendlyInsertRunError, CLIPBOARD_PASTE_BACKEND_NAME, FRIENDLY_INSERT_BACKEND_NAME,
@@ -310,6 +312,7 @@ fn transcribe_recorded_wav_to_log_with_live_status(
                     correction_memory_text,
                     prompt_profile: prompt_profile.clone(),
                     custom_prompt_text: custom_prompt_text.clone(),
+                    chat_template: chat_template_for_model(&settings.preferred_cleanup_model).into(),
                 });
                 cleanup_elapsed.set(t.elapsed());
                 result
@@ -429,6 +432,7 @@ pub fn transcribe_wav_and_cleanup_to_log(
                 correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
                 custom_prompt_text: custom_prompt_text.clone(),
+                chat_template: chat_template_for_model(&settings.preferred_cleanup_model).into(),
             })
         },
     )
@@ -686,6 +690,7 @@ pub fn rerun_archived_run_to_log(
                         &cleanup_cache_root,
                     )?
                 },
+                chat_template: chat_template_for_model(cleanup_model_id).into(),
                 ..request
             };
             run_cleanup(&request)
@@ -727,6 +732,7 @@ pub fn experiment_rerun_archived_run(
                         &cleanup_cache_root,
                     )?
                 },
+                chat_template: chat_template_for_model(cleanup_model_id).into(),
                 ..request
             };
             run_cleanup(&request)
@@ -749,6 +755,7 @@ pub fn rerun_archived_cleanup_to_log(
             } else {
                 configured_cleanup_model_path_for_model_id(cleanup_model_id, &cache_root)?
             },
+            chat_template: chat_template_for_model(cleanup_model_id).into(),
             ..cleanup_request
         };
         run_cleanup(&cleanup_request)
@@ -773,6 +780,7 @@ pub fn experiment_rerun_archived_cleanup(
             } else {
                 configured_cleanup_model_path_for_model_id(cleanup_model_id, &cache_root)?
             },
+            chat_template: chat_template_for_model(cleanup_model_id).into(),
             ..cleanup_request
         };
         run_cleanup(&cleanup_request)
@@ -832,6 +840,7 @@ where
         correction_memory_text: load_correction_store().prompt_memory_text(),
         prompt_profile: prompt_profile.clone(),
         custom_prompt_text,
+        chat_template: "chatml".into(),
     };
     record_cleanup(&mut entry, &supporting_context, |_transcript_text| {
         cleanup(&cleanup_model_id, cleanup_request)
@@ -923,6 +932,7 @@ where
                 .clone()
                 .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
             custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+            chat_template: "chatml".into(),
         };
         record_cleanup(&mut entry, &supporting_context, |transcript_text| {
             let request = CleanupRequest {
@@ -1018,6 +1028,7 @@ where
             prompt_profile: prompt_profile
                 .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
             custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+            chat_template: "chatml".into(),
         };
         record_cleanup(&mut entry, &supporting_context, |transcript_text| {
             let request = CleanupRequest {
@@ -1085,6 +1096,7 @@ where
         correction_memory_text: load_correction_store().prompt_memory_text(),
         prompt_profile: prompt_profile.clone(),
         custom_prompt_text,
+        chat_template: "chatml".into(),
     };
     record_cleanup(&mut entry, &supporting_context, |_transcript_text| {
         cleanup(&cleanup_model_id, cleanup_request)
@@ -1302,6 +1314,7 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
                 correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
                 custom_prompt_text: custom_prompt_text.clone(),
+                chat_template: chat_template_for_model(&settings.preferred_cleanup_model).into(),
             })
         },
         |transcript_text| {
@@ -2224,6 +2237,7 @@ mod app_shell {
             Some("ordinary-dictation".into()),
             SupportingContext::default(),
             |transcript_text| {
+                let settings = AppSettings::load_or_default();
                 let model_path = configured_cleanup_model_path()?;
                 run_cleanup(&CleanupRequest {
                     transcript_text: transcript_text.into(),
@@ -2233,6 +2247,7 @@ mod app_shell {
                     correction_memory_text: None,
                     prompt_profile: "ordinary-dictation".into(),
                     custom_prompt_text: None,
+                    chat_template: chat_template_for_model(&settings.preferred_cleanup_model).into(),
                 })
             },
         )

@@ -318,7 +318,9 @@ impl LiveRuntimeHandle {
 
         // Build a dummy CleanupRequest with no transcript to get the system prompt.
         use pepperx_cleanup::{prefill_cleanup_system_prompt, CleanupRequest};
-        use pepperx_models::{catalog_model, default_cache_root, model_readiness};
+        use pepperx_models::{
+            catalog_model, chat_template_for_model, default_cache_root, model_readiness,
+        };
 
         let model = match catalog_model(&settings.preferred_cleanup_model) {
             Some(m) => m,
@@ -341,6 +343,7 @@ impl LiveRuntimeHandle {
             correction_memory_text,
             prompt_profile: settings.cleanup_prompt_profile.clone(),
             custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+            chat_template: chat_template_for_model(&settings.preferred_cleanup_model).into(),
         };
 
         // Fire and forget on a background thread.
