@@ -446,7 +446,7 @@ fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
         let new_child = Command::new(&helper_bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit()) // TODO: change to Stdio::null() for release
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|error| CleanupError::SubprocessError {
                 message: format!(
