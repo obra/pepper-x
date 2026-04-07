@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            libadwaita-1-dev \
+            libatspi2.0-dev \
+            libgirepository1.0-dev \
+            libglib2.0-dev \
+            libgtk-4-dev \
+            libgtk4-layer-shell-dev \
+            libvulkan-dev \
+            libxkbcommon-dev \
+            pkg-config \
+            tesseract-ocr
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint with clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test
