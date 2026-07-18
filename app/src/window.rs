@@ -509,7 +509,8 @@ mod app_shell {
     use crate::settings::AppSettings;
     use crate::settings_view::{
         settings_page_scaffold, SettingsContainerKind, SettingsControl, SettingsSelectControl,
-        SettingsShortcutRecorderControl, SettingsSwitchControl, SettingsTextAreaControl,
+        SettingsShortcutRecorderControl, SettingsSliderControl, SettingsSwitchControl,
+        SettingsTextAreaControl,
     };
     use crate::transcript_log::{InsertionDiagnostics, LearningDiagnostics, TranscriptEntry};
     use pepperx_ipc::Capabilities;
@@ -678,6 +679,8 @@ mod app_shell {
             .build();
         let settings_surface_state = Rc::new(RefCell::new(SettingsSurfaceState {
             cleanup_enabled: true,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
             preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
             preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "ordinary-dictation".into(),
@@ -728,6 +731,8 @@ mod app_shell {
 
         settings_surface_state.replace(SettingsSurfaceState {
             cleanup_enabled: false,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
             preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
             preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "literal-dictation".into(),
@@ -775,6 +780,8 @@ mod app_shell {
     fn window_settings_page_scaffold_builds_structured_rows() {
         let scaffold = settings_page_scaffold(&SettingsSurfaceState {
             cleanup_enabled: true,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
             preferred_asr_model: "nemo-parakeet-tdt-0.6b-v3-int8".into(),
             preferred_cleanup_model: "qwen3.5-2b-q4_k_m.gguf".into(),
             cleanup_prompt_profile: "ordinary-dictation".into(),
@@ -852,12 +859,29 @@ mod app_shell {
             &scaffold.sections[1].controls[1],
             SettingsControl::Switch(SettingsSwitchControl {
                 title,
+                active: false,
+                ..
+            }) if title == "Use GPU for cleanup"
+        ));
+        assert!(matches!(
+            &scaffold.sections[1].controls[2],
+            SettingsControl::Slider(SettingsSliderControl {
+                title,
+                value: 0,
+                visible: false,
+                ..
+            }) if title == "GPU layers"
+        ));
+        assert!(matches!(
+            &scaffold.sections[1].controls[3],
+            SettingsControl::Switch(SettingsSwitchControl {
+                title,
                 active: true,
                 ..
             }) if title == "Window context"
         ));
         assert!(matches!(
-            &scaffold.sections[1].controls[2],
+            &scaffold.sections[1].controls[4],
             SettingsControl::Select(SettingsSelectControl {
                 title,
                 selected,
@@ -868,7 +892,7 @@ mod app_shell {
                 && options == &vec!["ordinary-dictation".to_string(), "literal-dictation".to_string()]
         ));
         assert!(matches!(
-            &scaffold.sections[1].controls[3],
+            &scaffold.sections[1].controls[5],
             SettingsControl::TextArea(SettingsTextAreaControl {
                 title,
                 text,

@@ -36,6 +36,7 @@ pub const LIVE_STATUS_RECORDING: &str = "recording";
 pub const LIVE_STATUS_TRANSCRIBING: &str = "transcribing";
 pub const LIVE_STATUS_CLEANING_UP: &str = "cleaning-up";
 pub const LIVE_STATUS_CLIPBOARD_FALLBACK: &str = "clipboard-fallback";
+pub const LIVE_STATUS_NOTICE: &str = "notice";
 pub const LIVE_STATUS_ERROR: &str = "error";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +81,8 @@ pub enum LiveStatus {
     Transcribing,
     CleaningUp,
     ClipboardFallback(String),
+    /// Soft, non-blocking notice (e.g. cleanup fell back to raw transcript).
+    Notice(String),
     Error(String),
 }
 
@@ -104,6 +107,10 @@ impl LiveStatus {
         Self::ClipboardFallback(message.into())
     }
 
+    pub fn notice(message: impl Into<String>) -> Self {
+        Self::Notice(message.into())
+    }
+
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error(message.into())
     }
@@ -126,6 +133,7 @@ impl LiveStatus {
             Self::ClipboardFallback(message) => {
                 (LIVE_STATUS_CLIPBOARD_FALLBACK.into(), message.clone())
             }
+            Self::Notice(message) => (LIVE_STATUS_NOTICE.into(), message.clone()),
             Self::Error(message) => (LIVE_STATUS_ERROR.into(), message.clone()),
         }
     }
@@ -137,6 +145,7 @@ impl LiveStatus {
             LIVE_STATUS_TRANSCRIBING => Self::Transcribing,
             LIVE_STATUS_CLEANING_UP => Self::CleaningUp,
             LIVE_STATUS_CLIPBOARD_FALLBACK => Self::ClipboardFallback(detail),
+            LIVE_STATUS_NOTICE => Self::Notice(detail),
             LIVE_STATUS_ERROR => Self::Error(detail),
             _ => Self::Ready,
         }
@@ -240,6 +249,19 @@ mod ipc_contract {
         let round_trip = LiveStatus::from_dbus_payload(status.to_dbus_payload());
 
         assert_eq!(round_trip, status);
+    }
+
+    #[test]
+    fn ipc_contract_roundtrips_notice_live_status() {
+        let status = LiveStatus::notice("Cleanup temporarily unavailable. Raw text was used.");
+
+        let round_trip = LiveStatus::from_dbus_payload(status.to_dbus_payload());
+
+        assert_eq!(round_trip, status);
+        assert_eq!(
+            status.to_dbus_payload().0,
+            LIVE_STATUS_NOTICE
+        );
     }
 
     #[test]

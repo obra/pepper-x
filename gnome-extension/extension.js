@@ -80,6 +80,7 @@ class PepperXIndicator extends PanelMenu.Button {
             iconName = ICON_WORKING;
             break;
         case 'error':
+        case 'notice':
             iconName = ICON_ERROR;
             break;
         case 'disconnected':
@@ -337,6 +338,8 @@ export default class PepperXExtension extends Extension {
             return 'Cleaning up...';
         case 'clipboard-fallback':
             return liveStatus.detail || 'Copied to clipboard';
+        case 'notice':
+            return liveStatus.detail || 'Notice';
         case 'error':
             return liveStatus.detail || 'Error';
         case 'ready':

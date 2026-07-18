@@ -1,3 +1,4 @@
+use pepperx_platform::gpu::get_gpu_info;
 use llama_cpp_4::context::params::LlamaContextParams;
 use llama_cpp_4::context::LlamaContext;
 use llama_cpp_4::llama_backend::LlamaBackend;
@@ -23,23 +24,25 @@ const INFERENCE_TIMEOUT: Duration = Duration::from_secs(15);
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "action")]
+#[serde(tag = "action", rename_all = "snake_case")]
 enum HelperRequest {
     /// Pre-decode the system prompt into the KV cache while the user is still
     /// recording. The response is immediate (just an ack).
-    #[serde(rename = "prefill")]
     Prefill {
         system_prompt: String,
         model_path: PathBuf,
+        use_gpu: bool,
+        gpu_layers: u32,
     },
     /// Run inference. If a prefill was done with a matching system_prompt, the
     /// KV cache is reused and only the user suffix is decoded.
-    #[serde(rename = "generate")]
     Generate {
         prompt: String,
         model_path: PathBuf,
         max_tokens: usize,
         temperature: f32,
+        use_gpu: bool,
+        gpu_layers: u32,
     },
 }
 
@@ -88,36 +91,105 @@ struct ModelSlot {
     prefill: Option<PrefillState>,
     model: Box<LlamaModel>,
     path: PathBuf,
+    use_gpu: bool,
+    /// Resolved layer count used when loading the model.
+    effective_gpu_layers: u32,
+}
+
+fn canonical_model_path(model_path: &PathBuf) -> PathBuf {
+    std::fs::canonicalize(model_path).unwrap_or_else(|_| model_path.clone())
+}
+
+fn resolve_gpu_layers(use_gpu: bool, requested_layers: u32) -> u32 {
+    let gpu_info = get_gpu_info();
+    if use_gpu && gpu_info.available {
+        if requested_layers > 0 {
+            requested_layers
+        } else {
+            gpu_info.recommended_layers
+        }
+    } else {
+        0
+    }
+}
+
+fn load_model(
+    backend: &LlamaBackend,
+    model_path: &PathBuf,
+    use_gpu: bool,
+    requested_layers: u32,
+    n_threads: i32,
+) -> Option<ModelSlot> {
+    let gpu_info = get_gpu_info();
+    let layers = resolve_gpu_layers(use_gpu, requested_layers);
+
+    let model_params = LlamaModelParams::default().with_n_gpu_layers(layers);
+
+    match LlamaModel::load_from_file(backend, model_path, &model_params) {
+        Ok(model) => {
+            eprintln!(
+                "[pepperx-cleanup-helper] loaded {} ({} threads, {} GPU layers, GPU available: {})",
+                model_path.display(),
+                n_threads,
+                layers,
+                gpu_info.available,
+            );
+            Some(ModelSlot {
+                warm_ctx: None,
+                prefill: None,
+                model: Box::new(model),
+                path: canonical_model_path(model_path),
+                use_gpu,
+                effective_gpu_layers: layers,
+            })
+        }
+        Err(e) => {
+            eprintln!("[pepperx-cleanup-helper] failed to load model: {e}");
+            None
+        }
+    }
 }
 
 impl ModelSlot {
-    /// Load a new model, discarding any previous state.
-    fn load(
-        backend: &LlamaBackend,
+    fn matches_request(&self, model_path: &PathBuf, use_gpu: bool, requested_layers: u32) -> bool {
+        self.mismatch_reason(model_path, use_gpu, requested_layers).is_none()
+    }
+
+    fn mismatch_reason(
+        &self,
         model_path: &PathBuf,
-        n_threads: i32,
-    ) -> Option<Self> {
-        let model_params = LlamaModelParams::default();
-        let model_params = std::pin::pin!(model_params);
-        match LlamaModel::load_from_file(backend, model_path, &model_params) {
-            Ok(model) => {
-                eprintln!(
-                    "[pepperx-cleanup-helper] loaded {} ({} threads)",
-                    model_path.display(),
-                    n_threads,
-                );
-                Some(ModelSlot {
-                    warm_ctx: None,
-                    prefill: None,
-                    model: Box::new(model),
-                    path: model_path.clone(),
-                })
-            }
-            Err(e) => {
-                eprintln!("[pepperx-cleanup-helper] failed to load model: {e}");
-                None
-            }
+        use_gpu: bool,
+        requested_layers: u32,
+    ) -> Option<String> {
+        let effective = resolve_gpu_layers(use_gpu, requested_layers);
+        let incoming_path = canonical_model_path(model_path);
+        if incoming_path != self.path {
+            return Some(format!(
+                "path changed (cached={}, requested={})",
+                self.path.display(),
+                incoming_path.display()
+            ));
         }
+        if self.use_gpu != use_gpu {
+            return Some(format!(
+                "use_gpu changed (cached={}, requested={use_gpu})",
+                self.use_gpu
+            ));
+        }
+        if self.effective_gpu_layers != effective {
+            return Some(format!(
+                "gpu_layers changed (cached={}, requested={effective}, raw={requested_layers})",
+                self.effective_gpu_layers
+            ));
+        }
+        None
+    }
+
+    fn log_reuse(&self) {
+        eprintln!(
+            "[pepperx-cleanup-helper] reusing loaded model (GPU: {} layers)",
+            self.effective_gpu_layers,
+        );
     }
 
     /// Get a reference to the model with a lifetime tied to `self`.  We then
@@ -133,9 +205,49 @@ impl ModelSlot {
     }
 }
 
+/// Keep the loaded model when path and resolved GPU config are unchanged.
+fn ensure_model_slot(
+    slot: &mut Option<ModelSlot>,
+    backend: &LlamaBackend,
+    model_path: &PathBuf,
+    use_gpu: bool,
+    gpu_layers: u32,
+    n_threads: i32,
+) -> bool {
+    if let Some(existing) = slot.as_ref() {
+        if existing.matches_request(model_path, use_gpu, gpu_layers) {
+            existing.log_reuse();
+            return true;
+        }
+
+        let effective = resolve_gpu_layers(use_gpu, gpu_layers);
+        let reason = existing
+            .mismatch_reason(model_path, use_gpu, gpu_layers)
+            .unwrap_or_else(|| "unknown".into());
+        eprintln!(
+            "[pepperx-cleanup-helper] reloading model ({reason}; path={}, use_gpu={}, requested_gpu_layers={}, effective_gpu_layers={})",
+            canonical_model_path(model_path).display(),
+            use_gpu,
+            gpu_layers,
+            effective,
+        );
+    } else {
+        eprintln!("[pepperx-cleanup-helper] no cached model, loading for the first time");
+    }
+
+    drop(slot.take());
+    *slot = load_model(backend, model_path, use_gpu, gpu_layers, n_threads);
+    slot.is_some()
+}
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
+
+/// Process-wide state: the model slot must outlive every stdin request.
+struct DaemonState {
+    model_slot: Option<ModelSlot>,
+}
 
 fn main() {
     // Suppress llama.cpp's own logging.
@@ -162,7 +274,14 @@ fn main() {
     // P-cores only on Intel hybrid; clamp to [2, 4].
     let n_threads = (num_cpus::get_physical() as i32).min(4).max(2);
 
-    let mut slot: Option<ModelSlot> = None;
+    eprintln!(
+        "[pepperx-cleanup-helper] daemon started (pid={})",
+        std::process::id()
+    );
+
+    let mut daemon = DaemonState {
+        model_slot: None,
+    };
 
     let stdin = io::stdin().lock();
     for line in stdin.lines() {
@@ -185,43 +304,54 @@ fn main() {
             }
         };
 
-        // Extract model_path before we move `request` into the handler.
-        let request_model_path = match &request {
-            HelperRequest::Prefill { model_path, .. } => model_path.clone(),
-            HelperRequest::Generate { model_path, .. } => model_path.clone(),
+        let (request_model_path, use_gpu, gpu_layers) = match &request {
+            HelperRequest::Prefill {
+                model_path,
+                use_gpu,
+                gpu_layers,
+                ..
+            }
+            | HelperRequest::Generate {
+                model_path,
+                use_gpu,
+                gpu_layers,
+                ..
+            } => (model_path.clone(), *use_gpu, *gpu_layers),
         };
 
-        // Ensure the right model is loaded.  If the model path changed, drop
-        // the entire slot (context + prefill + model) and reload.
-        let needs_load = match slot.as_ref() {
-            Some(s) => s.path != request_model_path,
-            None => true,
-        };
-        if needs_load {
-            // Drop old slot first (drops warm_ctx before model).
-            drop(slot.take());
-            slot = ModelSlot::load(&backend, &request_model_path, n_threads);
+        if !ensure_model_slot(
+            &mut daemon.model_slot,
+            &backend,
+            &request_model_path,
+            use_gpu,
+            gpu_layers,
+            n_threads,
+        ) {
+            write_response(&HelperResponse::err("model not loaded".into()));
+            continue;
         }
 
-        let s = match slot.as_mut() {
-            Some(s) => s,
+        let slot = match daemon.model_slot.as_mut() {
+            Some(slot) => slot,
             None => {
                 write_response(&HelperResponse::err("model not loaded".into()));
                 continue;
             }
         };
 
-        let model = s.model_ref_static();
+        let model = slot.model_ref_static();
         let response = handle_request(
             request,
             model,
             &backend,
             n_threads,
-            &mut s.prefill,
-            &mut s.warm_ctx,
+            &mut slot.prefill,
+            &mut slot.warm_ctx,
         );
         write_response(&response);
     }
+
+    eprintln!("[pepperx-cleanup-helper] daemon exiting (stdin closed)");
 }
 
 // ---------------------------------------------------------------------------
@@ -243,17 +373,32 @@ fn handle_request(
         HelperRequest::Prefill {
             system_prompt,
             model_path: _,
-        } => handle_prefill(model, backend, n_threads, &system_prompt, prefill_state, warm_ctx),
+            use_gpu,
+            gpu_layers,
+        } => handle_prefill(
+            model,
+            backend,
+            n_threads,
+            use_gpu,
+            gpu_layers,
+            &system_prompt,
+            prefill_state,
+            warm_ctx,
+        ),
 
         HelperRequest::Generate {
             prompt,
             model_path: _,
             max_tokens,
             temperature,
+            use_gpu,
+            gpu_layers,
         } => handle_generate(
             model,
             backend,
             n_threads,
+            use_gpu,
+            gpu_layers,
             &prompt,
             max_tokens,
             temperature,
@@ -267,12 +412,21 @@ fn handle_request(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn make_ctx_params(n_threads: i32) -> LlamaContextParams {
-    LlamaContextParams::default()
+fn make_ctx_params(n_threads: i32, use_gpu: bool, gpu_layers: u32) -> LlamaContextParams {
+    let layers = resolve_gpu_layers(use_gpu, gpu_layers);
+    let params = LlamaContextParams::default()
         .with_n_ctx(NonZeroU32::new(SESSION_CTX))
         .with_n_batch(BATCH_SIZE)
         .with_n_threads(n_threads)
-        .with_n_threads_batch(n_threads)
+        .with_n_threads_batch(n_threads);
+
+    if layers > 0 {
+        eprintln!("[pepperx-cleanup-helper] context using {layers} GPU layers");
+    } else {
+        eprintln!("[pepperx-cleanup-helper] context using CPU only");
+    }
+
+    params
 }
 
 /// Create a fresh `LlamaContext`, returning a `HelperResponse` error on failure.
@@ -280,8 +434,10 @@ fn new_context(
     model: &'static LlamaModel,
     backend: &LlamaBackend,
     n_threads: i32,
+    use_gpu: bool,
+    gpu_layers: u32,
 ) -> Result<LlamaContext<'static>, HelperResponse> {
-    let ctx_params = make_ctx_params(n_threads);
+    let ctx_params = make_ctx_params(n_threads, use_gpu, gpu_layers);
     model
         .new_context(backend, ctx_params)
         .map_err(|e| HelperResponse::err(format!("failed to create context: {e}")))
@@ -295,6 +451,8 @@ fn handle_prefill(
     model: &'static LlamaModel,
     backend: &LlamaBackend,
     n_threads: i32,
+    use_gpu: bool,
+    gpu_layers: u32,
     system_prompt: &str,
     prefill_state: &mut Option<PrefillState>,
     warm_ctx: &mut Option<LlamaContext<'static>>,
@@ -308,7 +466,7 @@ fn handle_prefill(
             existing.clear_kv_cache();
             existing
         }
-        None => match new_context(model, backend, n_threads) {
+        None => match new_context(model, backend, n_threads, use_gpu, gpu_layers) {
             Ok(c) => c,
             Err(resp) => return resp,
         },
@@ -353,6 +511,8 @@ fn handle_generate(
     model: &'static LlamaModel,
     backend: &LlamaBackend,
     n_threads: i32,
+    use_gpu: bool,
+    gpu_layers: u32,
     prompt: &str,
     max_tokens: usize,
     temperature: f32,
@@ -376,7 +536,7 @@ fn handle_generate(
             } else {
                 // Prefix mismatch -- drop warm context, create fresh.
                 drop(wc);
-                match new_context(model, backend, n_threads) {
+                match new_context(model, backend, n_threads, use_gpu, gpu_layers) {
                     Ok(c) => (c, 0),
                     Err(resp) => return resp,
                 }
@@ -389,7 +549,7 @@ fn handle_generate(
         }
         // No context at all — create fresh (expensive, first call only).
         (_, None) => {
-            match new_context(model, backend, n_threads) {
+            match new_context(model, backend, n_threads, use_gpu, gpu_layers) {
                 Ok(c) => (c, 0),
                 Err(resp) => return resp,
             }

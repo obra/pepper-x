@@ -10,7 +10,9 @@ use pepperx_asr::{
     TranscriptionResult,
 };
 use pepperx_audio::RecordingArtifact;
-use pepperx_cleanup::{run_cleanup, CleanupError, CleanupRequest, CleanupResult};
+use pepperx_cleanup::{
+    run_cleanup, safe_run_cleanup, CleanupError, CleanupRequest, CleanupResult,
+};
 use pepperx_corrections::{learn_correction, CorrectionStore};
 use pepperx_ipc::{LiveStatus, SharedLiveStatus};
 use pepperx_models::{catalog_model, default_cache_root, model_readiness, ModelKind};
@@ -24,6 +26,10 @@ use pepperx_session::TriggerSource;
 
 use crate::history_store::{ArchiveWriteRequest, HistoryStore, RunRuntimeMetadata};
 use crate::settings::{corrections_store_path, AppSettings};
+
+pub(crate) fn cleanup_gpu_from_settings(settings: &AppSettings) -> (bool, u32) {
+    (settings.cleanup_use_gpu, settings.cleanup_gpu_layers)
+}
 use crate::transcript_log::{
     nonempty_env_path, state_root, CleanupDiagnostics, DiarizationSummary, InsertionDiagnostics,
     LearningDiagnostics, TranscriptEntry,
@@ -36,10 +42,16 @@ const UINPUT_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
 const UINPUT_HELPER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const DISABLE_CONTEXT_CAPTURE_ENV: &str = "PEPPERX_DISABLE_CONTEXT_CAPTURE";
 const CLIPBOARD_FALLBACK_MESSAGE: &str = "Copied to clipboard. Press Ctrl+V to paste.";
+const CLEANUP_FALLBACK_NOTICE: &str =
+    "Cleanup temporarily unavailable. Raw transcript was inserted.";
 #[cfg(not(test))]
 const CLIPBOARD_FALLBACK_VISIBILITY: Duration = Duration::from_secs(3);
 #[cfg(test)]
 const CLIPBOARD_FALLBACK_VISIBILITY: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
+const CLEANUP_FALLBACK_NOTICE_VISIBILITY: Duration = Duration::from_secs(4);
+#[cfg(test)]
+const CLEANUP_FALLBACK_NOTICE_VISIBILITY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct UinputInsertRequest {
@@ -227,6 +239,7 @@ fn transcribe_recorded_wav_to_log_with_live_status(
     let insert_elapsed = std::cell::Cell::new(Duration::ZERO);
 
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
 
     // Speaker filtering: when enabled, run energy-based filtering before
     // transcription so that only the target speaker's audio reaches the ASR.
@@ -302,7 +315,7 @@ fn transcribe_recorded_wav_to_log_with_live_status(
                 let t = Instant::now();
                 let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
                 let correction_memory_text = load_correction_store().prompt_memory_text();
-                let result = run_cleanup(&CleanupRequest {
+                let result = safe_run_cleanup(&CleanupRequest {
                     transcript_text: transcript_text.into(),
                     model_path,
                     supporting_context_text: supporting_context.supporting_context_text.clone(),
@@ -310,6 +323,8 @@ fn transcribe_recorded_wav_to_log_with_live_status(
                     correction_memory_text,
                     prompt_profile: prompt_profile.clone(),
                     custom_prompt_text: custom_prompt_text.clone(),
+                    cleanup_use_gpu,
+                    cleanup_gpu_layers,
                 });
                 cleanup_elapsed.set(t.elapsed());
                 result
@@ -409,6 +424,7 @@ pub fn transcribe_wav_and_cleanup_to_log(
         return transcribe_wav_to_log(wav_path);
     }
 
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
     let prompt_profile = settings.cleanup_prompt_profile.clone();
     let custom_prompt_text = settings.effective_cleanup_custom_prompt();
     let cache_root = default_cache_root();
@@ -421,7 +437,7 @@ pub fn transcribe_wav_and_cleanup_to_log(
         move |transcript_text| {
             let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
             let correction_memory_text = load_correction_store().prompt_memory_text();
-            run_cleanup(&CleanupRequest {
+            safe_run_cleanup(&CleanupRequest {
                 transcript_text: transcript_text.into(),
                 model_path,
                 supporting_context_text: supporting_context.supporting_context_text.clone(),
@@ -429,6 +445,8 @@ pub fn transcribe_wav_and_cleanup_to_log(
                 correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
                 custom_prompt_text: custom_prompt_text.clone(),
+                cleanup_use_gpu,
+                cleanup_gpu_layers,
             })
         },
     )
@@ -688,7 +706,7 @@ pub fn rerun_archived_run_to_log(
                 },
                 ..request
             };
-            run_cleanup(&request)
+            safe_run_cleanup(&request)
         },
     )
 }
@@ -729,7 +747,7 @@ pub fn experiment_rerun_archived_run(
                 },
                 ..request
             };
-            run_cleanup(&request)
+            safe_run_cleanup(&request)
         },
     )
 }
@@ -751,7 +769,7 @@ pub fn rerun_archived_cleanup_to_log(
             },
             ..cleanup_request
         };
-        run_cleanup(&cleanup_request)
+        safe_run_cleanup(&cleanup_request)
     })
 }
 
@@ -775,7 +793,7 @@ pub fn experiment_rerun_archived_cleanup(
             },
             ..cleanup_request
         };
-        run_cleanup(&cleanup_request)
+        safe_run_cleanup(&cleanup_request)
     })
 }
 
@@ -791,6 +809,7 @@ where
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
 
     let transcript_text = original_run.entry.transcript_text.clone();
     let cleanup_model_id = request
@@ -832,6 +851,8 @@ where
         correction_memory_text: load_correction_store().prompt_memory_text(),
         prompt_profile: prompt_profile.clone(),
         custom_prompt_text,
+        cleanup_use_gpu,
+        cleanup_gpu_layers,
     };
     record_cleanup(&mut entry, &supporting_context, |_transcript_text| {
         cleanup(&cleanup_model_id, cleanup_request)
@@ -864,6 +885,7 @@ where
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
     let archived_source_wav_path =
         original_run
             .archived_source_wav_path
@@ -923,6 +945,8 @@ where
                 .clone()
                 .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
             custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+            cleanup_use_gpu,
+            cleanup_gpu_layers,
         };
         record_cleanup(&mut entry, &supporting_context, |transcript_text| {
             let request = CleanupRequest {
@@ -960,6 +984,7 @@ where
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
     let archived_source_wav_path =
         original_run
             .archived_source_wav_path
@@ -1018,6 +1043,8 @@ where
             prompt_profile: prompt_profile
                 .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
             custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+            cleanup_use_gpu,
+            cleanup_gpu_layers,
         };
         record_cleanup(&mut entry, &supporting_context, |transcript_text| {
             let request = CleanupRequest {
@@ -1044,6 +1071,7 @@ where
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
 
     let transcript_text = original_run.entry.transcript_text.clone();
     let cleanup_model_id = request
@@ -1085,6 +1113,8 @@ where
         correction_memory_text: load_correction_store().prompt_memory_text(),
         prompt_profile: prompt_profile.clone(),
         custom_prompt_text,
+        cleanup_use_gpu,
+        cleanup_gpu_layers,
     };
     record_cleanup(&mut entry, &supporting_context, |_transcript_text| {
         cleanup(&cleanup_model_id, cleanup_request)
@@ -1198,7 +1228,9 @@ where
 {
     let mut entry = transcript_entry_from_result(result);
     record_cleanup(&mut entry, &supporting_context, cleanup);
-    let insert_text = entry.display_text().to_string();
+    // Strip NULs / C0 controls before insertion so AT-SPI CString never fails
+    // on model output, while preserving French accents and punctuation.
+    let insert_text = sanitize_insert_text(entry.display_text());
     let insert_error = record_friendly_insert(&mut entry, &insert_text, insert).err();
     let entry = archive_transcript_entry_with_request(
         entry,
@@ -1212,6 +1244,17 @@ where
         Some(error) => Err(TranscriptionRunError::FriendlyInsert(error)),
         None => Ok(entry),
     }
+}
+
+/// Keep Unicode (accents) but drop NULs/controls that break CString insertion.
+fn sanitize_insert_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| match ch {
+            '\t' | '\n' | '\r' => true,
+            c if c.is_control() => false,
+            _ => true,
+        })
+        .collect()
 }
 
 fn transcript_entry_from_result(result: TranscriptionResult) -> TranscriptEntry {
@@ -1282,6 +1325,7 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
         );
     }
 
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
     let prompt_profile = settings.cleanup_prompt_profile.clone();
     let custom_prompt_text = settings.effective_cleanup_custom_prompt();
     let cache_root = default_cache_root();
@@ -1294,7 +1338,7 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
         move |transcript_text| {
             let model_path = configured_cleanup_model_path_with(&settings, &cache_root)?;
             let correction_memory_text = load_correction_store().prompt_memory_text();
-            run_cleanup(&CleanupRequest {
+            safe_run_cleanup(&CleanupRequest {
                 transcript_text: transcript_text.into(),
                 model_path,
                 supporting_context_text: supporting_context.supporting_context_text.clone(),
@@ -1302,6 +1346,8 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
                 correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
                 custom_prompt_text: custom_prompt_text.clone(),
+                cleanup_use_gpu,
+                cleanup_gpu_layers,
             })
         },
         |transcript_text| {
@@ -1407,20 +1453,47 @@ fn update_live_status_after_success(live_status: &SharedLiveStatus, entry: &Tran
         })
         .unwrap_or(false);
 
-    if !used_clipboard_fallback {
-        live_status.replace(LiveStatus::ready());
+    if used_clipboard_fallback {
+        let clipboard_fallback = LiveStatus::clipboard_fallback(CLIPBOARD_FALLBACK_MESSAGE);
+        live_status.replace(clipboard_fallback.clone());
+        let live_status = live_status.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(CLIPBOARD_FALLBACK_VISIBILITY);
+            if live_status.snapshot() == clipboard_fallback {
+                live_status.replace(LiveStatus::ready());
+            }
+        });
         return;
     }
 
-    let clipboard_fallback = LiveStatus::clipboard_fallback(CLIPBOARD_FALLBACK_MESSAGE);
-    live_status.replace(clipboard_fallback.clone());
-    let live_status = live_status.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(CLIPBOARD_FALLBACK_VISIBILITY);
-        if live_status.snapshot() == clipboard_fallback {
-            live_status.replace(LiveStatus::ready());
-        }
-    });
+    // Cleanup failed but insertion still succeeded with raw transcript — soft toast.
+    let cleanup_failed = entry
+        .cleanup
+        .as_ref()
+        .map(|cleanup| !cleanup.succeeded)
+        .unwrap_or(false);
+    if cleanup_failed {
+        eprintln!(
+            "[Pepper X] cleanup fallback notice: {}",
+            entry
+                .cleanup
+                .as_ref()
+                .and_then(|c| c.failure_reason.as_deref())
+                .unwrap_or("unknown cleanup failure")
+        );
+        let notice = LiveStatus::notice(CLEANUP_FALLBACK_NOTICE);
+        live_status.replace(notice.clone());
+        let live_status = live_status.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(CLEANUP_FALLBACK_NOTICE_VISIBILITY);
+            if live_status.snapshot() == notice {
+                live_status.replace(LiveStatus::ready());
+            }
+        });
+        return;
+    }
+
+    live_status.replace(LiveStatus::ready());
 }
 
 fn describe_asr_error(error: &TranscriptionError) -> String {
@@ -1803,7 +1876,7 @@ mod app_shell {
         assert!(matches!(
             error,
             TranscriptionRunError::UnreadyAsrModel { model_id, .. }
-                if model_id == "nemotron-speech-streaming-en-0.6b"
+                if model_id == "nemotron-3.5-asr-streaming-0.6b-int8"
         ));
         set_or_remove_env_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir);
     }
@@ -2233,6 +2306,8 @@ mod app_shell {
                     correction_memory_text: None,
                     prompt_profile: "ordinary-dictation".into(),
                     custom_prompt_text: None,
+                    cleanup_use_gpu: false,
+                    cleanup_gpu_layers: 0,
                 })
             },
         )

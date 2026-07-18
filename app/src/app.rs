@@ -73,13 +73,13 @@ pub fn run() {
     // Pre-warm the cleanup helper: load the model and pre-decode the system
     // prompt in the background so the first recording doesn't pay the ~4s cost.
     {
-        let settings = settings.clone();
         std::thread::Builder::new()
             .name("pepperx-cleanup-warmup".into())
             .spawn(move || {
                 use pepperx_cleanup::{prefill_cleanup_system_prompt, CleanupRequest};
                 use pepperx_models::{catalog_model, default_cache_root, model_readiness};
 
+                let settings = AppSettings::load_or_default();
                 if !settings.cleanup_enabled {
                     return;
                 }
@@ -93,6 +93,8 @@ pub fn run() {
                     return;
                 }
 
+                let (cleanup_use_gpu, cleanup_gpu_layers) =
+                    crate::transcription::cleanup_gpu_from_settings(&settings);
                 let request = CleanupRequest {
                     transcript_text: String::new(),
                     model_path: readiness.install_path,
@@ -101,6 +103,8 @@ pub fn run() {
                     correction_memory_text: None,
                     prompt_profile: settings.cleanup_prompt_profile.clone(),
                     custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+                    cleanup_use_gpu,
+                    cleanup_gpu_layers,
                 };
                 prefill_cleanup_system_prompt(&request);
             })

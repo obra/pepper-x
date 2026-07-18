@@ -26,6 +26,10 @@ fn default_enable_post_paste_learning() -> bool {
     true
 }
 
+fn default_cleanup_gpu_layers() -> u32 {
+    0
+}
+
 fn default_hold_trigger_keys() -> String {
     "56,100,125,126".into()
 }
@@ -64,6 +68,10 @@ pub struct AppSettings {
     pub ignore_other_speakers: bool,
     #[serde(default = "default_enable_post_paste_learning")]
     pub enable_post_paste_learning: bool,
+    #[serde(default)]
+    pub cleanup_use_gpu: bool,
+    #[serde(default = "default_cleanup_gpu_layers")]
+    pub cleanup_gpu_layers: u32,
     /// Legacy field — migrated to `hold_trigger_keys` on load.
     #[serde(default, skip_serializing)]
     pub(crate) preferred_trigger_keys: Option<String>,
@@ -107,6 +115,8 @@ impl Default for AppSettings {
             toggle_trigger_keys: default_toggle_trigger_keys(),
             ignore_other_speakers: false,
             enable_post_paste_learning: true,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
             preferred_trigger_keys: None,
         }
     }
@@ -467,7 +477,9 @@ mod tests {
                 "hold_trigger_keys": "56,100,125,126",
                 "toggle_trigger_keys": "56,57,100,125,126",
                 "ignore_other_speakers": false,
-                "enable_post_paste_learning": true
+                "enable_post_paste_learning": true,
+                "cleanup_use_gpu": false,
+                "cleanup_gpu_layers": 0
             })
         );
         assert_eq!(restored.preferred_asr_model, settings.preferred_asr_model);
@@ -509,7 +521,7 @@ mod tests {
                     "display_name": "Blue Yeti"
                 },
                 "cleanup_enabled": true,
-                "preferred_asr_model": "nemotron-speech-streaming-en-0.6b",
+                "preferred_asr_model": "nemotron-3.5-asr-streaming-0.6b-int8",
                 "preferred_cleanup_model": "qwen3.5-2b-q4_k_m.gguf",
                 "cleanup_prompt_profile": "ordinary-dictation",
                 "cleanup_custom_prompt": "",
@@ -518,7 +530,9 @@ mod tests {
                 "hold_trigger_keys": "56,100,125,126",
                 "toggle_trigger_keys": "56,57,100,125,126",
                 "ignore_other_speakers": false,
-                "enable_post_paste_learning": true
+                "enable_post_paste_learning": true,
+                "cleanup_use_gpu": false,
+                "cleanup_gpu_layers": 0
             })
         );
     }
@@ -544,7 +558,7 @@ mod tests {
                 "preferred_recording_trigger_mode": "modifier-only",
                 "preferred_microphone": null,
                 "cleanup_enabled": false,
-                "preferred_asr_model": "nemotron-speech-streaming-en-0.6b",
+                "preferred_asr_model": "nemotron-3.5-asr-streaming-0.6b-int8",
                 "preferred_cleanup_model": "qwen3.5-2b-q4_k_m.gguf",
                 "cleanup_prompt_profile": "literal-dictation",
                 "cleanup_custom_prompt": "Keep product names verbatim.",
@@ -553,7 +567,9 @@ mod tests {
                 "hold_trigger_keys": "56,100,125,126",
                 "toggle_trigger_keys": "56,57,100,125,126",
                 "ignore_other_speakers": false,
-                "enable_post_paste_learning": true
+                "enable_post_paste_learning": true,
+                "cleanup_use_gpu": false,
+                "cleanup_gpu_layers": 0
             })
         );
         assert!(restored.launch_at_login);
@@ -930,6 +946,15 @@ mod tests {
         set_or_remove_env_var("PEPPERX_STATE_ROOT", previous_state_root);
         set_or_remove_env_var("XDG_CONFIG_HOME", previous_xdg_config_home);
         let _ = std::fs::remove_dir_all(state_root);
+    }
+
+    #[test]
+    fn test_settings_serde_with_gpu() {
+        let settings = AppSettings::default();
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(settings.cleanup_use_gpu, loaded.cleanup_use_gpu);
+        assert_eq!(settings.cleanup_gpu_layers, loaded.cleanup_gpu_layers);
     }
 
     #[test]

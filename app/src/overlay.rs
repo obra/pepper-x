@@ -54,6 +54,14 @@ impl OverlayPresentation {
                 busy: false,
                 css_class: "status-success",
             },
+            LiveStatus::Notice(message) => Self {
+                headline: "Cleanup unavailable".into(),
+                detail: Some(message.clone()),
+                indicator_label: "Notice".into(),
+                visible: true,
+                busy: false,
+                css_class: "status-error",
+            },
             LiveStatus::Error(message) => Self {
                 headline: "Pepper X needs attention".into(),
                 detail: Some(message.clone()),
@@ -152,7 +160,7 @@ impl OverlayView {
         let dot_color = match status {
             LiveStatus::Recording => Some("#e01b24"),       // red
             LiveStatus::ClipboardFallback(_) => Some("#2ec27e"), // green
-            LiveStatus::Error(_) => Some("#e5a50a"),         // yellow
+            LiveStatus::Error(_) | LiveStatus::Notice(_) => Some("#e5a50a"), // yellow
             _ => None,
         };
         if let Some(color) = dot_color {
@@ -213,6 +221,18 @@ mod overlay_state {
 
     #[test]
     fn overlay_clipboard_fallback_surfaces_message_without_diagnostics_page() {
+        let notice = OverlayPresentation::from_live_status(&LiveStatus::notice(
+            "Cleanup temporarily unavailable. Raw transcript was inserted.",
+        ));
+        assert_eq!(notice.headline, "Cleanup unavailable");
+        assert_eq!(
+            notice.detail.as_deref(),
+            Some("Cleanup temporarily unavailable. Raw transcript was inserted.")
+        );
+        assert_eq!(notice.indicator_label, "Notice");
+        assert!(notice.visible);
+        assert!(!notice.busy);
+
         let fallback = OverlayPresentation::from_live_status(&LiveStatus::clipboard_fallback(
             "Copied to clipboard. Press Ctrl+V to paste.",
         ));
