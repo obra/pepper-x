@@ -51,6 +51,16 @@ pub struct SettingsTextAreaControl {
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsSliderControl {
+    pub title: String,
+    pub subtitle: String,
+    pub value: u32,
+    pub enabled: bool,
+    pub visible: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsShortcutRecorderControl {
     pub title: String,
     pub subtitle: String,
@@ -61,6 +71,7 @@ pub struct SettingsShortcutRecorderControl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsControl {
     Switch(SettingsSwitchControl),
+    Slider(SettingsSliderControl),
     Select(SettingsSelectControl),
     TextArea(SettingsTextAreaControl),
     ShortcutRecorder(SettingsShortcutRecorderControl),
@@ -92,6 +103,9 @@ pub struct SettingsView {
     asr_model_dropdown: gtk::DropDown,
     asr_model_ids: Vec<String>,
     cleanup_switch: gtk::Switch,
+    cleanup_use_gpu_switch: gtk::Switch,
+    cleanup_gpu_layers_row: adw::ActionRow,
+    cleanup_gpu_layers_spin: gtk::SpinButton,
     cleanup_model_dropdown: gtk::DropDown,
     cleanup_model_ids: Vec<String>,
     prompt_profile_dropdown: gtk::DropDown,
@@ -265,6 +279,31 @@ impl SettingsView {
             .build();
         cleanup_switch_row.add_suffix(&cleanup_switch);
         cleanup_list.append(&list_box_row(&cleanup_switch_row));
+
+        let cleanup_use_gpu_switch = gtk::Switch::builder().valign(Align::Center).build();
+        let cleanup_use_gpu_row = adw::ActionRow::builder()
+            .title("Use GPU for cleanup")
+            .subtitle("Offload cleanup model layers to the GPU when available")
+            .activatable_widget(&cleanup_use_gpu_switch)
+            .build();
+        cleanup_use_gpu_row.add_suffix(&cleanup_use_gpu_switch);
+        cleanup_list.append(&list_box_row(&cleanup_use_gpu_row));
+
+        let cleanup_gpu_layers_adjustment =
+            gtk::Adjustment::new(0.0, 0.0, 999.0, 1.0, 10.0, 0.0);
+        let cleanup_gpu_layers_spin = gtk::SpinButton::builder()
+            .adjustment(&cleanup_gpu_layers_adjustment)
+            .valign(Align::Center)
+            .numeric(true)
+            .build();
+        let cleanup_gpu_layers_row = adw::ActionRow::builder()
+            .title("GPU layers")
+            .subtitle("0 uses automatic detection; higher values offload more layers")
+            .activatable_widget(&cleanup_gpu_layers_spin)
+            .visible(false)
+            .build();
+        cleanup_gpu_layers_row.add_suffix(&cleanup_gpu_layers_spin);
+        cleanup_list.append(&list_box_row(&cleanup_gpu_layers_row));
 
         let window_context_switch = gtk::Switch::builder().valign(Align::Center).build();
         let window_context_row = adw::ActionRow::builder()
@@ -671,6 +710,9 @@ impl SettingsView {
             asr_model_dropdown,
             asr_model_ids: asr_model_ids.iter().map(|s| s.to_string()).collect(),
             cleanup_switch,
+            cleanup_use_gpu_switch,
+            cleanup_gpu_layers_row,
+            cleanup_gpu_layers_spin,
             cleanup_model_dropdown,
             cleanup_model_ids: cleanup_model_ids.iter().map(|s| s.to_string()).collect(),
             prompt_profile_dropdown,
@@ -720,6 +762,17 @@ impl SettingsView {
         self.updating_settings.set(true);
         self.cleanup_switch
             .set_active(surface_state.cleanup_enabled);
+        self.cleanup_use_gpu_switch
+            .set_active(surface_state.cleanup_use_gpu);
+        self.cleanup_gpu_layers_spin
+            .set_value(surface_state.cleanup_gpu_layers as f64);
+        update_cleanup_gpu_controls(
+            surface_state.cleanup_enabled,
+            surface_state.cleanup_use_gpu,
+            &self.cleanup_use_gpu_switch,
+            &self.cleanup_gpu_layers_row,
+            &self.cleanup_gpu_layers_spin,
+        );
         self.launch_at_login_switch
             .set_active(surface_state.launch_at_login);
         self.play_sounds_switch
@@ -773,6 +826,9 @@ impl SettingsView {
         let asr_model_dropdown = self.asr_model_dropdown.clone();
         let asr_model_ids = self.asr_model_ids.clone();
         let cleanup_switch = self.cleanup_switch.clone();
+        let cleanup_use_gpu_switch = self.cleanup_use_gpu_switch.clone();
+        let cleanup_gpu_layers_row = self.cleanup_gpu_layers_row.clone();
+        let cleanup_gpu_layers_spin = self.cleanup_gpu_layers_spin.clone();
         let cleanup_model_dropdown = self.cleanup_model_dropdown.clone();
         let cleanup_model_ids = self.cleanup_model_ids.clone();
         let prompt_profile_dropdown = self.prompt_profile_dropdown.clone();
@@ -809,6 +865,9 @@ impl SettingsView {
         self.cleanup_switch.connect_active_notify({
             let updating_settings = self.updating_settings.clone();
             let cleanup_switch = cleanup_switch.clone();
+            let cleanup_use_gpu_switch = cleanup_use_gpu_switch.clone();
+            let cleanup_gpu_layers_row = cleanup_gpu_layers_row.clone();
+            let cleanup_gpu_layers_spin = cleanup_gpu_layers_spin.clone();
             let prompt_profile_dropdown = prompt_profile_dropdown.clone();
             let custom_prompt_buffer = custom_prompt_buffer.clone();
             let custom_prompt_view = custom_prompt_view.clone();
@@ -825,6 +884,14 @@ impl SettingsView {
                 custom_prompt_view.set_sensitive(cleanup_enabled);
                 custom_prompt_view.set_editable(cleanup_enabled);
                 window_context_switch.set_sensitive(cleanup_enabled);
+                cleanup_use_gpu_switch.set_sensitive(cleanup_enabled);
+                update_cleanup_gpu_controls(
+                    cleanup_enabled,
+                    cleanup_use_gpu_switch.is_active(),
+                    &cleanup_use_gpu_switch,
+                    &cleanup_gpu_layers_row,
+                    &cleanup_gpu_layers_spin,
+                );
                 if let Err(error) = save_settings_change(move |settings| {
                     settings.cleanup_enabled = cleanup_enabled;
                 }) {
@@ -837,6 +904,59 @@ impl SettingsView {
                         &feedback_label,
                         &updating_settings,
                     );
+                    feedback_label.set_label(&format!("Failed to save settings: {error}"));
+                    feedback_label.set_visible(true);
+                } else {
+                    feedback_label.set_label("Saved settings");
+                    feedback_label.set_visible(true);
+                }
+            }
+        });
+
+        self.cleanup_use_gpu_switch.connect_active_notify({
+            let updating_settings = self.updating_settings.clone();
+            let cleanup_switch = cleanup_switch.clone();
+            let cleanup_use_gpu_switch = cleanup_use_gpu_switch.clone();
+            let cleanup_gpu_layers_row = cleanup_gpu_layers_row.clone();
+            let cleanup_gpu_layers_spin = cleanup_gpu_layers_spin.clone();
+            let feedback_label = self.feedback_label.clone();
+            move |switch| {
+                if updating_settings.get() {
+                    return;
+                }
+
+                let cleanup_use_gpu = switch.is_active();
+                update_cleanup_gpu_controls(
+                    cleanup_switch.is_active(),
+                    cleanup_use_gpu,
+                    &cleanup_use_gpu_switch,
+                    &cleanup_gpu_layers_row,
+                    &cleanup_gpu_layers_spin,
+                );
+                if let Err(error) = save_settings_change(move |settings| {
+                    settings.cleanup_use_gpu = cleanup_use_gpu;
+                }) {
+                    feedback_label.set_label(&format!("Failed to save settings: {error}"));
+                    feedback_label.set_visible(true);
+                } else {
+                    feedback_label.set_label("Saved settings");
+                    feedback_label.set_visible(true);
+                }
+            }
+        });
+
+        self.cleanup_gpu_layers_spin.connect_value_changed({
+            let updating_settings = self.updating_settings.clone();
+            let feedback_label = self.feedback_label.clone();
+            move |spin| {
+                if updating_settings.get() {
+                    return;
+                }
+
+                let cleanup_gpu_layers = spin.value().max(0.0) as u32;
+                if let Err(error) = save_settings_change(move |settings| {
+                    settings.cleanup_gpu_layers = cleanup_gpu_layers;
+                }) {
                     feedback_label.set_label(&format!("Failed to save settings: {error}"));
                     feedback_label.set_visible(true);
                 } else {
@@ -1354,6 +1474,19 @@ pub fn settings_form_sections(surface_state: &SettingsSurfaceState) -> Vec<Setti
                     active: surface_state.cleanup_enabled,
                 }),
                 SettingsControl::Switch(SettingsSwitchControl {
+                    title: "Use GPU for cleanup".into(),
+                    subtitle: "Offload cleanup model layers to the GPU when available".into(),
+                    active: surface_state.cleanup_use_gpu,
+                }),
+                SettingsControl::Slider(SettingsSliderControl {
+                    title: "GPU layers".into(),
+                    subtitle:
+                        "0 uses automatic detection; higher values offload more layers".into(),
+                    value: surface_state.cleanup_gpu_layers,
+                    enabled: surface_state.cleanup_enabled && surface_state.cleanup_use_gpu,
+                    visible: surface_state.cleanup_use_gpu,
+                }),
+                SettingsControl::Switch(SettingsSwitchControl {
                     title: "Window context".into(),
                     subtitle: "Capture screen text to help the cleanup model disambiguate names and terms"
                         .into(),
@@ -1676,6 +1809,19 @@ fn install_shortcut_recorder(
     });
 
     button.add_controller(key_controller);
+}
+
+fn update_cleanup_gpu_controls(
+    cleanup_enabled: bool,
+    cleanup_use_gpu: bool,
+    cleanup_use_gpu_switch: &gtk::Switch,
+    cleanup_gpu_layers_row: &adw::ActionRow,
+    cleanup_gpu_layers_spin: &gtk::SpinButton,
+) {
+    cleanup_use_gpu_switch.set_sensitive(cleanup_enabled);
+    let show_layers = cleanup_enabled && cleanup_use_gpu;
+    cleanup_gpu_layers_row.set_visible(show_layers);
+    cleanup_gpu_layers_spin.set_sensitive(show_layers);
 }
 
 fn save_settings_change(change: impl FnOnce(&mut AppSettings)) -> std::io::Result<()> {

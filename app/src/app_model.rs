@@ -32,6 +32,8 @@ pub struct ModelBootstrapSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsSurfaceState {
     pub cleanup_enabled: bool,
+    pub cleanup_use_gpu: bool,
+    pub cleanup_gpu_layers: u32,
     pub preferred_asr_model: String,
     pub preferred_cleanup_model: String,
     pub cleanup_prompt_profile: String,
@@ -302,6 +304,8 @@ impl SettingsSurfaceState {
             .unwrap_or_default();
         Self {
             cleanup_enabled: settings.cleanup_enabled,
+            cleanup_use_gpu: settings.cleanup_use_gpu,
+            cleanup_gpu_layers: settings.cleanup_gpu_layers,
             preferred_asr_model: settings.preferred_asr_model.clone(),
             preferred_cleanup_model: settings.preferred_cleanup_model.clone(),
             cleanup_prompt_profile: settings.cleanup_prompt_profile.clone(),

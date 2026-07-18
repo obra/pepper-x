@@ -24,6 +24,10 @@ use pepperx_session::TriggerSource;
 
 use crate::history_store::{ArchiveWriteRequest, HistoryStore, RunRuntimeMetadata};
 use crate::settings::{corrections_store_path, AppSettings};
+
+pub(crate) fn cleanup_gpu_from_settings(settings: &AppSettings) -> (bool, u32) {
+    (settings.cleanup_use_gpu, settings.cleanup_gpu_layers)
+}
 use crate::transcript_log::{
     nonempty_env_path, state_root, CleanupDiagnostics, DiarizationSummary, InsertionDiagnostics,
     LearningDiagnostics, TranscriptEntry,
@@ -227,6 +231,7 @@ fn transcribe_recorded_wav_to_log_with_live_status(
     let insert_elapsed = std::cell::Cell::new(Duration::ZERO);
 
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
 
     // Speaker filtering: when enabled, run energy-based filtering before
     // transcription so that only the target speaker's audio reaches the ASR.
@@ -310,6 +315,8 @@ fn transcribe_recorded_wav_to_log_with_live_status(
                     correction_memory_text,
                     prompt_profile: prompt_profile.clone(),
                     custom_prompt_text: custom_prompt_text.clone(),
+                    cleanup_use_gpu,
+                    cleanup_gpu_layers,
                 });
                 cleanup_elapsed.set(t.elapsed());
                 result
@@ -409,6 +416,7 @@ pub fn transcribe_wav_and_cleanup_to_log(
         return transcribe_wav_to_log(wav_path);
     }
 
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
     let prompt_profile = settings.cleanup_prompt_profile.clone();
     let custom_prompt_text = settings.effective_cleanup_custom_prompt();
     let cache_root = default_cache_root();
@@ -429,6 +437,8 @@ pub fn transcribe_wav_and_cleanup_to_log(
                 correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
                 custom_prompt_text: custom_prompt_text.clone(),
+                cleanup_use_gpu,
+                cleanup_gpu_layers,
             })
         },
     )
@@ -791,6 +801,7 @@ where
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
 
     let transcript_text = original_run.entry.transcript_text.clone();
     let cleanup_model_id = request
@@ -832,6 +843,8 @@ where
         correction_memory_text: load_correction_store().prompt_memory_text(),
         prompt_profile: prompt_profile.clone(),
         custom_prompt_text,
+        cleanup_use_gpu,
+        cleanup_gpu_layers,
     };
     record_cleanup(&mut entry, &supporting_context, |_transcript_text| {
         cleanup(&cleanup_model_id, cleanup_request)
@@ -864,6 +877,7 @@ where
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
     let archived_source_wav_path =
         original_run
             .archived_source_wav_path
@@ -923,6 +937,8 @@ where
                 .clone()
                 .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
             custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+            cleanup_use_gpu,
+            cleanup_gpu_layers,
         };
         record_cleanup(&mut entry, &supporting_context, |transcript_text| {
             let request = CleanupRequest {
@@ -960,6 +976,7 @@ where
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
     let archived_source_wav_path =
         original_run
             .archived_source_wav_path
@@ -1018,6 +1035,8 @@ where
             prompt_profile: prompt_profile
                 .unwrap_or_else(|| settings.cleanup_prompt_profile.clone()),
             custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+            cleanup_use_gpu,
+            cleanup_gpu_layers,
         };
         record_cleanup(&mut entry, &supporting_context, |transcript_text| {
             let request = CleanupRequest {
@@ -1044,6 +1063,7 @@ where
         .load_run(&request.run_id)?
         .ok_or_else(|| TranscriptionRunError::ArchivedRunNotFound(request.run_id.clone()))?;
     let settings = AppSettings::load_or_default();
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
 
     let transcript_text = original_run.entry.transcript_text.clone();
     let cleanup_model_id = request
@@ -1085,6 +1105,8 @@ where
         correction_memory_text: load_correction_store().prompt_memory_text(),
         prompt_profile: prompt_profile.clone(),
         custom_prompt_text,
+        cleanup_use_gpu,
+        cleanup_gpu_layers,
     };
     record_cleanup(&mut entry, &supporting_context, |_transcript_text| {
         cleanup(&cleanup_model_id, cleanup_request)
@@ -1282,6 +1304,7 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
         );
     }
 
+    let (cleanup_use_gpu, cleanup_gpu_layers) = cleanup_gpu_from_settings(&settings);
     let prompt_profile = settings.cleanup_prompt_profile.clone();
     let custom_prompt_text = settings.effective_cleanup_custom_prompt();
     let cache_root = default_cache_root();
@@ -1302,6 +1325,8 @@ fn archive_transcription_result_with_default_cleanup_and_friendly_insert(
                 correction_memory_text,
                 prompt_profile: prompt_profile.clone(),
                 custom_prompt_text: custom_prompt_text.clone(),
+                cleanup_use_gpu,
+                cleanup_gpu_layers,
             })
         },
         |transcript_text| {
@@ -1803,7 +1828,7 @@ mod app_shell {
         assert!(matches!(
             error,
             TranscriptionRunError::UnreadyAsrModel { model_id, .. }
-                if model_id == "nemotron-speech-streaming-en-0.6b"
+                if model_id == "nemotron-3.5-asr-streaming-0.6b-int8"
         ));
         set_or_remove_env_var("PEPPERX_PARAKEET_MODEL_DIR", previous_model_dir);
     }
@@ -2233,6 +2258,8 @@ mod app_shell {
                     correction_memory_text: None,
                     prompt_profile: "ordinary-dictation".into(),
                     custom_prompt_text: None,
+                    cleanup_use_gpu: false,
+                    cleanup_gpu_layers: 0,
                 })
             },
         )

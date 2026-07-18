@@ -26,6 +26,8 @@ pub struct CleanupRequest {
     pub correction_memory_text: Option<String>,
     pub prompt_profile: String,
     pub custom_prompt_text: Option<String>,
+    pub cleanup_use_gpu: bool,
+    pub cleanup_gpu_layers: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +141,8 @@ struct PrefillRequest {
     action: &'static str,
     system_prompt: String,
     model_path: PathBuf,
+    use_gpu: bool,
+    gpu_layers: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,6 +152,8 @@ struct GenerateRequest {
     model_path: PathBuf,
     max_tokens: usize,
     temperature: f32,
+    use_gpu: bool,
+    gpu_layers: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,13 +297,20 @@ pub fn prefill_cleanup_system_prompt(request: &CleanupRequest) {
         action: "prefill",
         system_prompt,
         model_path: request.model_path.clone(),
+        use_gpu: request.cleanup_use_gpu,
+        gpu_layers: request.cleanup_gpu_layers,
     };
 
     let Ok(json) = serde_json::to_string(&prefill) else {
         return;
     };
 
-    eprintln!("[Pepper X] sending cleanup prefill ({} chars)", json.len());
+    eprintln!(
+        "[Pepper X] cleanup prefill: use_gpu={} gpu_layers={} ({} chars json)",
+        request.cleanup_use_gpu,
+        request.cleanup_gpu_layers,
+        json.len(),
+    );
     let _ = send_to_helper(&json);
 }
 
@@ -326,6 +339,8 @@ pub fn run_cleanup(request: &CleanupRequest) -> Result<CleanupResult, CleanupErr
         model_path: request.model_path.clone(),
         max_tokens: CLEANUP_MAX_TOKENS,
         temperature: CLEANUP_TEMPERATURE,
+        use_gpu: request.cleanup_use_gpu,
+        gpu_layers: request.cleanup_gpu_layers,
     };
 
     let request_json = serde_json::to_string(&helper_request).map_err(|error| {
@@ -333,6 +348,12 @@ pub fn run_cleanup(request: &CleanupRequest) -> Result<CleanupResult, CleanupErr
             message: format!("failed to serialize helper request: {error}"),
         }
     })?;
+
+    eprintln!(
+        "[Pepper X] cleanup generate: use_gpu={} gpu_layers={}",
+        request.cleanup_use_gpu,
+        request.cleanup_gpu_layers,
+    );
 
     let generated = spawn_cleanup_helper(&request_json, &model_name)?;
 
@@ -419,34 +440,20 @@ fn spawn_cleanup_helper(
         })
 }
 
-fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
-    use std::sync::Mutex;
+/// Long-lived helper subprocess with persistent stdin/stdout handles.
+/// Reusing the stdout `BufReader` avoids losing buffered bytes between requests.
+struct HelperSession {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: io::BufReader<std::process::ChildStdout>,
+}
 
-    static HELPER: Mutex<Option<std::process::Child>> = Mutex::new(None);
-
-    let helper_bin = configured_cleanup_helper_bin_path();
-    let mut guard = HELPER.lock().unwrap();
-
-    let child = match guard.as_mut() {
-        Some(child) => match child.try_wait() {
-            Ok(Some(_)) => {
-                *guard = None;
-                None
-            }
-            Ok(None) => Some(child),
-            Err(_) => {
-                *guard = None;
-                None
-            }
-        },
-        None => None,
-    };
-
-    if child.is_none() {
-        let new_child = Command::new(&helper_bin)
+impl HelperSession {
+    fn spawn(helper_bin: &Path) -> Result<Self, CleanupError> {
+        let mut child = Command::new(helper_bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(|error| CleanupError::SubprocessError {
                 message: format!(
@@ -454,40 +461,63 @@ fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
                     helper_bin.display()
                 ),
             })?;
-        *guard = Some(new_child);
-    }
-
-    let child = guard.as_mut().unwrap();
-
-    let stdin = child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| CleanupError::SubprocessError {
+        let stdin = child.stdin.take().ok_or_else(|| CleanupError::SubprocessError {
             message: "cleanup helper stdin is not available".into(),
         })?;
-    stdin
+        let stdout = child.stdout.take().ok_or_else(|| CleanupError::SubprocessError {
+            message: "cleanup helper stdout is not available".into(),
+        })?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout: io::BufReader::new(stdout),
+        })
+    }
+
+    fn is_alive(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) | Err(_) => false,
+        }
+    }
+}
+
+fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
+    use std::sync::Mutex;
+
+    static HELPER: Mutex<Option<HelperSession>> = Mutex::new(None);
+
+    let helper_bin = configured_cleanup_helper_bin_path();
+    let mut guard = HELPER.lock().unwrap();
+
+    let needs_spawn = match guard.as_mut() {
+        Some(session) => !session.is_alive(),
+        None => true,
+    };
+    if needs_spawn {
+        *guard = Some(HelperSession::spawn(&helper_bin)?);
+    }
+
+    let session = guard.as_mut().unwrap();
+
+    session
+        .stdin
         .write_all(request_json.as_bytes())
         .map_err(|error| CleanupError::SubprocessError {
             message: format!("failed to write to cleanup helper: {error}"),
         })?;
-    stdin.write_all(b"\n").map_err(|error| {
+    session.stdin.write_all(b"\n").map_err(|error| {
         CleanupError::SubprocessError {
             message: format!("failed to write newline to cleanup helper: {error}"),
         }
     })?;
-    stdin.flush().map_err(|error| CleanupError::SubprocessError {
+    session.stdin.flush().map_err(|error| CleanupError::SubprocessError {
         message: format!("failed to flush cleanup helper stdin: {error}"),
     })?;
 
-    let stdout = child
-        .stdout
-        .as_mut()
-        .ok_or_else(|| CleanupError::SubprocessError {
-            message: "cleanup helper stdout is not available".into(),
-        })?;
-    let mut reader = io::BufReader::new(stdout);
     let mut response_line = String::new();
-    reader
+    session
+        .stdout
         .read_line(&mut response_line)
         .map_err(|error| CleanupError::SubprocessError {
             message: format!("failed to read from cleanup helper: {error}"),

@@ -22,6 +22,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         })
         .unwrap_err();
 
@@ -41,6 +43,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         };
 
         assert_eq!(cleanup_prompt(&request), cleanup_prompt(&request));
@@ -56,6 +60,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
         let literal_prompt = cleanup_prompt(&CleanupRequest {
             transcript_text: "hello from pepper x".into(),
@@ -65,6 +71,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: "literal-dictation".into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert_ne!(ordinary_prompt, literal_prompt);
@@ -81,6 +89,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(prompt.contains("<USER-INPUT>\nhello from pepper x\n</USER-INPUT>"));
@@ -96,6 +106,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(prompt.contains("Remove filler words"));
@@ -113,6 +125,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(prompt.contains("scratch that"));
@@ -129,6 +143,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(!prompt.contains("<OCR-RULES>"));
@@ -145,6 +161,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(prompt.contains("<OCR-RULES>"));
@@ -163,6 +181,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         let bounded_ocr = "A".repeat(4000);
@@ -180,6 +200,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(prompt.contains("<WINDOW-OCR-CONTENT>\nline before\nline after\n</WINDOW-OCR-CONTENT>"));
@@ -198,6 +220,8 @@ mod cleanup_runtime {
             ),
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(prompt.contains("<CORRECTION-HINTS>"));
@@ -220,6 +244,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: None,
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         })
         .expect("real cleanup run should succeed");
 
@@ -236,6 +262,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: Some("Return SHOUTING ONLY.".into()),
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(prompt.contains("Remove filler words"));
@@ -253,6 +281,8 @@ mod cleanup_runtime {
             correction_memory_text: None,
             prompt_profile: ORDINARY_DICTATION_PROMPT_PROFILE.into(),
             custom_prompt_text: Some(custom_prompt.into()),
+            cleanup_use_gpu: false,
+            cleanup_gpu_layers: 0,
         });
 
         assert!(prompt.contains(custom_prompt));

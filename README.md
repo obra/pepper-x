@@ -13,13 +13,15 @@ GNOME-first local dictation for Linux. Hold a key combo, speak, release — your
 
 ## Performance
 
-On an Intel Core Ultra 7 155U (no GPU):
+On an Intel Core Ultra 7 155U (CPU only):
 
 ```
 record=3.2s  transcribe=0.0s  cleanup=0.5s  insert=0.2s  total=0.7s
 ```
 
 Transcription happens during recording (streaming). Cleanup uses a pre-warmed KV cache.
+
+With an NVIDIA GPU and CUDA enabled, cleanup is typically ~0.1s instead of several seconds on some CPUs.
 
 ## Install
 
@@ -43,6 +45,36 @@ sudo dnf install \
   gtk4-devel libadwaita-devel libxkbcommon-devel vulkan-loader-devel \
   pkgconf-pkg-config tesseract
 ```
+
+#### GPU acceleration for cleanup (optional, NVIDIA)
+
+`pepperx-cleanup-helper` is built with optional GPU acceleration. CUDA support by default. This offloads the Qwen cleanup model to an NVIDIA GPU and makes cleanup much faster.
+
+**System dependencies:**
+
+1. **NVIDIA driver** — usually already installed if `nvidia-smi` works.
+2. **CUDA toolkit** — required at build time (provides `nvcc` and `libcudart`).
+
+```sh
+# Verify the driver
+nvidia-smi
+
+# Verify the toolkit (after install)
+nvcc --version
+ls /usr/local/cuda/lib64/libcudart.so
+```
+
+Install the CUDA toolkit from [NVIDIA's CUDA downloads](https://developer.nvidia.com/cuda-downloads) (Linux → your distro → run the installer or repo packages). The default install path is `/usr/local/cuda`. If you use a different path, set `CUDA_HOME` when building:
+
+```sh
+CUDA_HOME=/opt/cuda cargo build --release
+```
+
+**CPU-only build:** if you do not have CUDA installed, remove `"cuda"` from the `features` list in `crates/pepperx-cleanup-helper/Cargo.toml` (both `llama-cpp-4` and `llama-cpp-sys-4`).
+
+**Vulkan (AMD/Intel):** not enabled by default — the build needs `glslc` (shaderc / Vulkan SDK). See the comment in `crates/pepperx-cleanup-helper/Cargo.toml` to re-enable it.
+
+**Runtime:** in the app, open **Cleanup** → enable **Use GPU for cleanup**. Adjust **GPU layers** if needed (default offloads all layers).
 
 Your user must be in the `input` group for hotkey capture and text injection:
 
@@ -95,7 +127,7 @@ That's it. The app:
 The app window is organized into sections:
 
 - **Recording** — Shortcut recorders (hold-to-record + toggle-to-record), mic picker, sound effects, speaker filtering, test dictation
-- **Cleanup** — Enable/disable, window context toggle, prompt profile, custom prompt editor
+- **Cleanup** — Enable/disable, GPU offload toggle, window context toggle, prompt profile, custom prompt editor
 - **Corrections** — Editable preferred transcriptions and commonly misheard replacements
 - **Models** — ASR and cleanup model selection with download progress
 - **History** — Transcription lab with per-stage model pickers, inline prompt editor, word-level diff, audio playback, diarization timeline

@@ -332,6 +332,8 @@ impl LiveRuntimeHandle {
 
         let correction_memory_text =
             crate::transcription::load_correction_store().prompt_memory_text();
+        let (cleanup_use_gpu, cleanup_gpu_layers) =
+            crate::transcription::cleanup_gpu_from_settings(&settings);
 
         let request = CleanupRequest {
             transcript_text: String::new(), // not used for prefill
@@ -341,6 +343,8 @@ impl LiveRuntimeHandle {
             correction_memory_text,
             prompt_profile: settings.cleanup_prompt_profile.clone(),
             custom_prompt_text: settings.effective_cleanup_custom_prompt(),
+            cleanup_use_gpu,
+            cleanup_gpu_layers,
         };
 
         // Fire and forget on a background thread.

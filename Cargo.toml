@@ -7,6 +7,7 @@ members = [
     "crates/pepperx-models",
     "crates/pepperx-ipc",
     "crates/pepperx-session",
+    "crates/pepperx-platform",
     "crates/pepperx-platform-gnome",
     "crates/pepperx-cleanup",
     "crates/pepperx-cleanup-helper",

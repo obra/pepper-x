@@ -23,3 +23,7 @@ gnome-extension/*.shell-extension.zip
 gnome-extension/.compiled
 gnome-extension/*.zip
 gnome-extension/.build/
+.continue/
+.vscode/
+*.bak*
+AGENTS.md
