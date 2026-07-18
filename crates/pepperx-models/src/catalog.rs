@@ -34,13 +34,42 @@ pub struct CatalogModel {
     pub required_files: &'static [&'static str],
     pub install_layout: InstallLayout,
     pub download_artifact: DownloadArtifact,
-    /// For MultiFile downloads: the individual file URLs to fetch.  Each entry
-    /// is `(relative_file_name, url)`.  Empty for non-MultiFile artifacts.
+    /// For MultiFile downloads: the individual file URLs to fetch.
+    /// Each entry is `(relative_file_name, url)`.
     pub download_files: &'static [(&'static str, &'static str)],
 }
 
-const SUPPORTED_MODELS: [CatalogModel; 5] = [
-    // Default ASR: Nemotron streaming int8 (parakeet-rs)
+const SUPPORTED_MODELS: [CatalogModel; 7] = [
+    // === DEFAULT ASR MODEL ===
+    // Nemotron 3.5 0.6B Multilingual INT8 (smcleod) - Recommended default
+    CatalogModel {
+        id: "nemotron-3.5-asr-streaming-0.6b-int8",
+        kind: ModelKind::Asr,
+        install_path: "asr/nemotron-3.5-asr-streaming-0.6b-int8",
+        required_files: &[
+            "encoder.onnx",
+            "encoder.onnx.data",
+            "decoder_joint.onnx",
+            "tokenizer.model",
+            "config.json",
+        ],
+        install_layout: InstallLayout::Directory,
+        download_artifact: DownloadArtifact {
+            url: "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/main/",
+            file_name: "",
+            kind: DownloadArtifactKind::MultiFile,
+            strip_prefix: None,
+        },
+        download_files: &[
+            ("encoder.onnx", "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/main/encoder.onnx"),
+            ("encoder.onnx.data", "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/main/encoder.onnx.data"),
+            ("decoder_joint.onnx", "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/main/decoder_joint.onnx"),
+            ("tokenizer.model", "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/main/tokenizer.model"),
+            ("config.json", "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/main/config.json"),
+        ],
+    },
+
+    // Legacy ASR: English-only model (kept for backwards compatibility)
     CatalogModel {
         id: "nemotron-speech-streaming-en-0.6b",
         kind: ModelKind::Asr,
@@ -63,7 +92,52 @@ const SUPPORTED_MODELS: [CatalogModel; 5] = [
             ("tokenizer.model", "https://huggingface.co/smcleod/nemotron-speech-streaming-en-0.6b-int8/resolve/main/tokenizer.model"),
         ],
     },
-    // Legacy ASR: Parakeet TDT v3 (sherpa-onnx, kept for backwards compat)
+
+    // Alternative: Nemotron 3.5 Multilingual INT4 (onnx-community)
+    CatalogModel {
+        id: "nemotron-3.5-asr-streaming-0.6b-int4",
+        kind: ModelKind::Asr,
+        install_path: "asr/nemotron-3.5-asr-streaming-0.6b-int4",
+        required_files: &[
+            "audio_processor_config.json",
+            "decoder.onnx",
+            "decoder.onnx.data",
+            "encoder.onnx",
+            "encoder.onnx.data",
+            "genai_config.json",
+            "joint.onnx",
+            "joint.onnx.data",
+            "model_config.json",
+            "silero_vad.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "vocab.txt",
+        ],
+        install_layout: InstallLayout::Directory,
+        download_artifact: DownloadArtifact {
+            url: "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/",
+            file_name: "",
+            kind: DownloadArtifactKind::MultiFile,
+            strip_prefix: None,
+        },
+        download_files: &[
+            ("audio_processor_config.json", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/audio_processor_config.json"),
+            ("decoder.onnx", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/decoder.onnx"),
+            ("decoder.onnx.data", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/decoder.onnx.data"),
+            ("encoder.onnx", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/encoder.onnx"),
+            ("encoder.onnx.data", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/encoder.onnx.data"),
+            ("genai_config.json", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/genai_config.json"),
+            ("joint.onnx", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/joint.onnx"),
+            ("joint.onnx.data", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/joint.onnx.data"),
+            ("model_config.json", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/model_config.json"),
+            ("silero_vad.onnx", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/silero_vad.onnx"),
+            ("tokenizer.json", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/tokenizer.json"),
+            ("tokenizer_config.json", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/tokenizer_config.json"),
+            ("vocab.txt", "https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4/resolve/main/vocab.txt"),
+        ],
+    },
+
+    // Legacy ASR: Parakeet TDT v3 (sherpa-onnx) - kept for backwards compatibility
     CatalogModel {
         id: "nemo-parakeet-tdt-0.6b-v3-int8",
         kind: ModelKind::Asr,
@@ -83,7 +157,10 @@ const SUPPORTED_MODELS: [CatalogModel; 5] = [
         },
         download_files: &[],
     },
-    // Default cleanup: Qwen 3.5 2B (requires llama-cpp-4)
+
+    // === Cleanup models ===
+
+    // Default cleanup: Qwen 3.5 2B (recommended)
     CatalogModel {
         id: "qwen3.5-2b-q4_k_m.gguf",
         kind: ModelKind::Cleanup,
@@ -98,7 +175,8 @@ const SUPPORTED_MODELS: [CatalogModel; 5] = [
         },
         download_files: &[],
     },
-    // Fast cleanup: Qwen 3.5 0.8B (requires llama-cpp-4)
+
+    // Fast cleanup: Qwen 3.5 0.8B
     CatalogModel {
         id: "qwen3.5-0.8b-q4_k_m.gguf",
         kind: ModelKind::Cleanup,
@@ -113,6 +191,7 @@ const SUPPORTED_MODELS: [CatalogModel; 5] = [
         },
         download_files: &[],
     },
+
     // Legacy cleanup: Qwen 2.5 3B
     CatalogModel {
         id: "qwen2.5-3b-instruct-q4_k_m.gguf",
@@ -139,6 +218,13 @@ pub fn catalog_model(id: &str) -> Option<&'static CatalogModel> {
 }
 
 pub fn default_model(kind: ModelKind) -> &'static CatalogModel {
+    // New default: multilingual model
+    if kind == ModelKind::Asr {
+        return catalog_model("nemotron-3.5-asr-streaming-0.6b-int8")
+            .expect("Default ASR model must exist in catalog");
+    }
+
+    // Fallback for Cleanup models
     supported_models()
         .iter()
         .find(|model| model.kind == kind)

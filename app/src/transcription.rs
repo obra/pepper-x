@@ -651,8 +651,22 @@ fn transcribe_wav_result_with_model_id(
     model_id: &str,
 ) -> Result<TranscriptionResult, TranscriptionRunError> {
     let model_dir = configured_model_dir_for_model_id(model_id)?;
-    let request = TranscriptionRequest::new(wav_path, &model_dir, model_id);
+    let request = transcription_request_for_settings(wav_path, &model_dir, model_id);
     Ok(transcribe_wav(&request)?)
+}
+
+fn transcription_request_for_settings(
+    wav_path: &Path,
+    model_dir: &Path,
+    model_id: &str,
+) -> TranscriptionRequest {
+    let settings = AppSettings::load_or_default();
+    if crate::settings::asr_model_is_multilingual(model_id) {
+        let lang = crate::settings::resolve_asr_language(&settings.preferred_asr_language);
+        TranscriptionRequest::new_with_lang(wav_path, model_dir, model_id, lang)
+    } else {
+        TranscriptionRequest::new(wav_path, model_dir, model_id)
+    }
 }
 
 pub fn rerun_archived_run_to_log(
@@ -670,7 +684,7 @@ pub fn rerun_archived_run_to_log(
             } else {
                 configured_model_dir_for_model_id(model_id)?
             };
-            let request = TranscriptionRequest::new(wav_path, &model_dir, model_id);
+            let request = transcription_request_for_settings(wav_path, &model_dir, model_id);
             Ok(transcribe_wav(&request)?)
         },
         move |cleanup_model_id, request| {
@@ -711,7 +725,7 @@ pub fn experiment_rerun_archived_run(
             } else {
                 configured_model_dir_for_model_id(model_id)?
             };
-            let request = TranscriptionRequest::new(wav_path, &model_dir, model_id);
+            let request = transcription_request_for_settings(wav_path, &model_dir, model_id);
             Ok(transcribe_wav(&request)?)
         },
         move |cleanup_model_id, request| {
@@ -1446,9 +1460,12 @@ fn describe_asr_error(error: &TranscriptionError) -> String {
         TranscriptionError::DecodeFailed(path) => {
             format!("failed to decode {}", path.display())
         }
+        // New error variant for multilingual support
+        TranscriptionError::LanguageConfigFailed(msg) => {
+            format!("language configuration failed: {}", msg)
+        }
     }
 }
-
 fn configured_model_dir() -> Result<PathBuf, TranscriptionRunError> {
     match std::env::var_os("PEPPERX_PARAKEET_MODEL_DIR") {
         Some(value) if !value.is_empty() => return Ok(PathBuf::from(value)),

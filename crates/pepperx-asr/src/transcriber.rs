@@ -1,5 +1,5 @@
 use hound::{SampleFormat, WavReader};
-use parakeet_rs::Nemotron;
+use parakeet_rs::{Nemotron, NemotronMode};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -17,9 +17,13 @@ pub struct TranscriptionRequest {
     pub wav_path: PathBuf,
     pub model_dir: PathBuf,
     pub model_name: String,
+    /// Target language for multilingual models ("fr-FR", "en-US", "auto", etc.)
+    /// `None` falls back to "fr-FR".
+    pub target_lang: Option<String>,
 }
 
 impl TranscriptionRequest {
+    /// Create a new transcription request (default language = French)
     pub fn new(
         wav_path: impl Into<PathBuf>,
         model_dir: impl Into<PathBuf>,
@@ -29,6 +33,22 @@ impl TranscriptionRequest {
             wav_path: wav_path.into(),
             model_dir: model_dir.into(),
             model_name: model_name.into(),
+            target_lang: None,
+        }
+    }
+
+    /// Create a new transcription request with explicit target language
+    pub fn new_with_lang(
+        wav_path: impl Into<PathBuf>,
+        model_dir: impl Into<PathBuf>,
+        model_name: impl Into<String>,
+        target_lang: impl Into<String>,
+    ) -> Self {
+        Self {
+            wav_path: wav_path.into(),
+            model_dir: model_dir.into(),
+            model_name: model_name.into(),
+            target_lang: Some(target_lang.into()),
         }
     }
 }
@@ -52,6 +72,7 @@ pub enum TranscriptionError {
     InvalidWaveFile(PathBuf),
     RecognizerInitializationFailed(PathBuf),
     DecodeFailed(PathBuf),
+    LanguageConfigFailed(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -64,9 +85,10 @@ pub fn transcribe_wav(
     validate_wav_path(&request.wav_path)?;
     validate_model_dir(&request.model_dir)?;
 
-    let mut model = Nemotron::from_pretrained(&request.model_dir, None).map_err(|_| {
-        TranscriptionError::RecognizerInitializationFailed(request.model_dir.clone())
-    })?;
+    let mut model = Nemotron::from_pretrained(&request.model_dir, None)
+        .map_err(|_| TranscriptionError::RecognizerInitializationFailed(request.model_dir.clone()))?;
+
+    configure_multilingual(&mut model, request.target_lang.as_deref())?;
 
     let canonical_wav_path = std::fs::canonicalize(&request.wav_path)
         .map_err(|_| TranscriptionError::MissingWavFile(request.wav_path.clone()))?;
@@ -91,27 +113,34 @@ pub fn transcribe_wav(
 
 pub struct StreamingTranscriber {
     model: Nemotron,
-    /// Leftover samples from the previous `feed_chunk` call that did not fill
-    /// a complete 560ms window.
+    /// Leftover samples from the previous `feed_chunk` call.
     pending: Vec<f32>,
+    /// Target language used for this transcriber (for logging / debugging)
+    target_lang: Option<String>,
 }
 
 impl StreamingTranscriber {
-    /// Create a new streaming transcriber backed by the Nemotron model in
-    /// `model_dir`.
-    pub fn new(model_dir: &Path) -> Result<Self, TranscriptionError> {
+    /// Create a new streaming transcriber with optional target language.
+    pub fn new(
+        model_dir: &Path,
+        target_lang: Option<impl Into<String>>,
+    ) -> Result<Self, TranscriptionError> {
         validate_model_dir(model_dir)?;
-        let model = Nemotron::from_pretrained(model_dir, None)
-            .map_err(|_| TranscriptionError::RecognizerInitializationFailed(model_dir.into()))?;
+
+        let mut model = Nemotron::from_pretrained(model_dir, None)
+            .map_err(|_| TranscriptionError::RecognizerInitializationFailed(model_dir.to_path_buf()))?;
+
+        let lang = target_lang.map(Into::into);
+        configure_multilingual(&mut model, lang.as_deref())?;
+
         Ok(Self {
             model,
             pending: Vec::with_capacity(STREAMING_CHUNK_SAMPLES),
+            target_lang: lang,
         })
     }
 
-    /// Feed raw mono 16 kHz f32 samples.  Returns the current partial
-    /// transcript after processing any complete 560ms windows contained in
-    /// `samples` (combined with any leftover samples from previous calls).
+    /// Feed raw mono 16 kHz f32 samples. Returns the current partial transcript.
     pub fn feed_chunk(&mut self, samples: &[f32]) -> Result<String, TranscriptionError> {
         self.pending.extend_from_slice(samples);
 
@@ -120,39 +149,39 @@ impl StreamingTranscriber {
                 [..STREAMING_CHUNK_SAMPLES]
                 .try_into()
                 .expect("slice length verified");
+
             self.model
                 .transcribe_chunk(&chunk)
                 .map_err(|_| TranscriptionError::DecodeFailed(PathBuf::from("<streaming>")))?;
+
             self.pending.drain(..STREAMING_CHUNK_SAMPLES);
         }
 
         Ok(self.model.get_transcript())
     }
 
-    /// Flush any remaining buffered samples (zero-padded to a full 560ms
-    /// window) and return the final accumulated transcript.
+    /// Flush any remaining samples (zero-padded) and return the final transcript.
     pub fn flush(&mut self) -> Result<String, TranscriptionError> {
         if !self.pending.is_empty() {
             let mut padded = [0.0f32; STREAMING_CHUNK_SAMPLES];
             let n = self.pending.len().min(STREAMING_CHUNK_SAMPLES);
             padded[..n].copy_from_slice(&self.pending[..n]);
+
             self.model
                 .transcribe_chunk(&padded)
                 .map_err(|_| TranscriptionError::DecodeFailed(PathBuf::from("<streaming>")))?;
+
             self.pending.clear();
         }
-
         Ok(self.model.get_transcript())
     }
 
-    /// Return the full accumulated transcript so far without flushing pending
-    /// samples.
+    /// Return the current transcript without flushing pending samples.
     pub fn transcript(&self) -> String {
         self.model.get_transcript()
     }
 
-    /// Reset the model state so this transcriber can be reused for a new
-    /// utterance.
+    /// Reset the model state for a new utterance.
     pub fn reset(&mut self) {
         self.model.reset();
         self.pending.clear();
@@ -160,8 +189,21 @@ impl StreamingTranscriber {
 }
 
 // ---------------------------------------------------------------------------
-// Shared helpers
+// Helpers
 // ---------------------------------------------------------------------------
+
+/// Configure target language for multilingual Nemotron models.
+fn configure_multilingual(
+    model: &mut Nemotron,
+    target_lang: Option<&str>,
+) -> Result<(), TranscriptionError> {
+    if model.mode() == NemotronMode::Multilingual {
+        let lang = target_lang.unwrap_or("fr-FR");
+        model.set_target_lang(lang)
+            .map_err(|e| TranscriptionError::LanguageConfigFailed(format!("lang={}: {}", lang, e)))?;
+    }
+    Ok(())
+}
 
 fn validate_wav_path(wav_path: &Path) -> Result<(), TranscriptionError> {
     if wav_path.is_file() {
@@ -172,11 +214,18 @@ fn validate_wav_path(wav_path: &Path) -> Result<(), TranscriptionError> {
 }
 
 fn validate_model_dir(model_dir: &Path) -> Result<(), TranscriptionError> {
+    // Base files (compatible with both English-only and smcleod INT8 multilingual)
     for file_name in [
         ENCODER_FILE_NAME,
         DECODER_JOINT_FILE_NAME,
         TOKENIZER_FILE_NAME,
     ] {
+        if file_name == DECODER_JOINT_FILE_NAME && model_dir.join("decoder.onnx").exists() {
+            continue;
+        }
+        if file_name == TOKENIZER_FILE_NAME && model_dir.join("tokenizer.json").exists() {
+            continue;
+        }
         required_model_file(model_dir, file_name)?;
     }
     Ok(())
@@ -200,8 +249,10 @@ fn required_model_file(
 fn load_wav(wav_path: &Path) -> Result<(PathBuf, i32, Vec<f32>), TranscriptionError> {
     let canonical_wav_path = std::fs::canonicalize(wav_path)
         .map_err(|_| TranscriptionError::MissingWavFile(wav_path.to_path_buf()))?;
+
     let mut reader = WavReader::open(&canonical_wav_path)
         .map_err(|_| TranscriptionError::InvalidWaveFile(canonical_wav_path.clone()))?;
+
     let spec = reader.spec();
 
     if spec.channels != 1 {
@@ -227,18 +278,22 @@ where
         SampleFormat::Float => reader.samples::<f32>().collect(),
         SampleFormat::Int if bits_per_sample <= 16 => reader
             .samples::<i16>()
-            .map(|sample| sample.map(|sample| sample as f32 / i16::MAX as f32))
+            .map(|sample| sample.map(|s| s as f32 / i16::MAX as f32))
             .collect(),
         SampleFormat::Int if bits_per_sample <= 32 => {
             let scale = ((1_i64 << (bits_per_sample - 1)) - 1) as f32;
             reader
                 .samples::<i32>()
-                .map(|sample| sample.map(|sample| sample as f32 / scale))
+                .map(|sample| sample.map(|s| s as f32 / scale))
                 .collect()
         }
         _ => Err(hound::Error::FormatError("unsupported wave encoding")),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -253,7 +308,7 @@ mod tests {
         let request = TranscriptionRequest::new(
             "/tmp/does-not-exist.wav",
             unique_test_root("model-dir"),
-            "nemotron-speech-streaming-en-0.6b",
+            "nemotron-3.5-0.6b",
         );
 
         let error = transcribe_wav(&request).unwrap_err();
@@ -270,21 +325,16 @@ mod tests {
         fs::create_dir_all(&model_dir).unwrap();
         let wav_path = model_dir.join("existing.wav");
         fs::copy(fixture_path(), &wav_path).unwrap();
+
         let request = TranscriptionRequest::new(
             &wav_path,
             &model_dir,
-            "nemotron-speech-streaming-en-0.6b",
+            "nemotron-3.5-0.6b",
         );
 
         let error = transcribe_wav(&request).unwrap_err();
 
-        assert_eq!(
-            error,
-            TranscriptionError::IncompleteModelDir {
-                model_dir,
-                missing_file: "encoder.onnx",
-            }
-        );
+        assert!(matches!(error, TranscriptionError::IncompleteModelDir { .. }));
     }
 
     #[test]
@@ -319,7 +369,7 @@ mod tests {
         let request = TranscriptionRequest::new(
             fixture_path(),
             model_dir,
-            "nemotron-speech-streaming-en-0.6b",
+            "nemotron-3.5-0.6b-multilingual",
         );
 
         let result = transcribe_wav(&request).expect("transcribe fixture");

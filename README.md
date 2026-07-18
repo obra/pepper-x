@@ -97,7 +97,7 @@ The app window is organized into sections:
 - **Recording** — Shortcut recorders (hold-to-record + toggle-to-record), mic picker, sound effects, speaker filtering, test dictation
 - **Cleanup** — Enable/disable, window context toggle, prompt profile, custom prompt editor
 - **Corrections** — Editable preferred transcriptions and commonly misheard replacements
-- **Models** — ASR and cleanup model selection with download progress
+- **Models** — ASR and cleanup model selection with download progress; **Transcription language** dropdown when a multilingual Nemotron 3.5 model is selected (`fr-FR` default, or `auto` / other locales)
 - **History** — Transcription lab with per-stage model pickers, inline prompt editor, word-level diff, audio playback, diarization timeline
 - **General** — Launch at login
 - **Diagnostics** — Runtime status

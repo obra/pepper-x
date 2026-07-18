@@ -6,4 +6,4 @@ publish = false
 
 [dependencies]
 hound = "3.5.1"
-parakeet-rs = { version = "0.3.4", default-features = false, features = ["cpu", "ort-defaults"] }
+parakeet-rs = { version = "0.3", default-features = false, features = ["cpu", "ort-defaults"] }

@@ -21,3 +21,4 @@ pepperx-platform-gnome = { path = "../crates/pepperx-platform-gnome" }
 pepperx-session = { path = "../crates/pepperx-session" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+zbus = { version = "5.13", default-features = false, features = ["async-io"] }
