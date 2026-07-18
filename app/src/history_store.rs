@@ -9,8 +9,43 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::transcript_log::{TranscriptEntry, TranscriptLog};
 
 const HISTORY_DIR_NAME: &str = "history";
+const RECORDINGS_DIR_NAME: &str = "recordings";
 const ARCHIVE_METADATA_FILE_NAME: &str = "run.json";
 const ARCHIVED_SOURCE_WAV_FILE_NAME: &str = "source.wav";
+
+/// Result of a privacy purge of history / recording artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HistoryPurgeStats {
+    pub deleted_files: usize,
+    pub deleted_dirs: usize,
+    pub freed_bytes: u64,
+    pub errors: usize,
+}
+
+impl HistoryPurgeStats {
+    pub fn summary_text(&self) -> String {
+        if self.deleted_files == 0 && self.deleted_dirs == 0 && self.errors == 0 {
+            return "No history or recordings to purge.".into();
+        }
+        let mb = self.freed_bytes as f64 / (1024.0 * 1024.0);
+        if self.errors == 0 {
+            format!(
+                "Purged history ({} file(s), {} folder(s)), freed {:.1} MB.",
+                self.deleted_files, self.deleted_dirs, mb
+            )
+        } else {
+            format!(
+                "Purged history ({} file(s), {} folder(s)), freed {:.1} MB ({} error(s)).",
+                self.deleted_files, self.deleted_dirs, mb, self.errors
+            )
+        }
+    }
+}
+
+/// Kept for older call sites / tests that still use the previous name.
+pub type RecordingPurgeStats = HistoryPurgeStats;
+
+const TRANSCRIPT_LOG_FILE_NAME: &str = "transcript-log.jsonl";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchiveWriteRequest {
@@ -249,6 +284,118 @@ impl HistoryStore {
             .collect())
     }
 
+    /// Privacy purge: remove past dictation history and recording artifacts that
+    /// are not required for Pepper X to keep working.
+    ///
+    /// Deletes:
+    /// - `history/run-*` directories (WAV + `run.json` transcripts/OCR/context)
+    /// - `transcript-log.jsonl`
+    /// - Pepper X captures in `recordings/` (`live-recording-*.wav`, `test-dictation-*.wav`)
+    ///
+    /// Keeps settings, setup/onboarding, correction memory, models, and any
+    /// non-Pepper files under a user-managed recordings directory.
+    pub fn purge_history_for_privacy(&self) -> io::Result<HistoryPurgeStats> {
+        let mut stats = HistoryPurgeStats::default();
+
+        self.purge_pepperx_recording_files(&mut stats);
+        self.purge_history_run_dirs(&mut stats);
+        self.purge_transcript_log(&mut stats);
+
+        // Keep an empty history root so subsequent archive_run/open stay valid.
+        if let Err(error) = fs::create_dir_all(&self.history_root) {
+            let _ = error;
+            stats.errors += 1;
+        }
+
+        Ok(stats)
+    }
+
+    /// Alias kept for older call sites.
+    pub fn purge_recording_audio(&self) -> io::Result<HistoryPurgeStats> {
+        self.purge_history_for_privacy()
+    }
+
+    fn purge_pepperx_recording_files(&self, stats: &mut HistoryPurgeStats) {
+        let recordings_dir = self.root.join(RECORDINGS_DIR_NAME);
+        if !recordings_dir.is_dir() {
+            return;
+        }
+        let entries = match fs::read_dir(&recordings_dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                stats.errors += 1;
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !is_pepperx_recording_filename(name) {
+                continue;
+            }
+            match remove_file_with_size(&path) {
+                Ok(bytes) => {
+                    stats.deleted_files += 1;
+                    stats.freed_bytes += bytes;
+                }
+                Err(_) => stats.errors += 1,
+            }
+        }
+    }
+
+    fn purge_history_run_dirs(&self, stats: &mut HistoryPurgeStats) {
+        if !self.history_root.is_dir() {
+            return;
+        }
+        let entries = match fs::read_dir(&self.history_root) {
+            Ok(entries) => entries,
+            Err(_) => {
+                stats.errors += 1;
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                match remove_dir_all_with_size(&path) {
+                    Ok((files, bytes)) => {
+                        stats.deleted_dirs += 1;
+                        stats.deleted_files += files;
+                        stats.freed_bytes += bytes;
+                    }
+                    Err(_) => stats.errors += 1,
+                }
+            } else if path.is_file() {
+                match remove_file_with_size(&path) {
+                    Ok(bytes) => {
+                        stats.deleted_files += 1;
+                        stats.freed_bytes += bytes;
+                    }
+                    Err(_) => stats.errors += 1,
+                }
+            }
+        }
+    }
+
+    fn purge_transcript_log(&self, stats: &mut HistoryPurgeStats) {
+        let log_path = self.root.join(TRANSCRIPT_LOG_FILE_NAME);
+        if !log_path.is_file() {
+            return;
+        }
+        match remove_file_with_size(&log_path) {
+            Ok(bytes) => {
+                stats.deleted_files += 1;
+                stats.freed_bytes += bytes;
+            }
+            Err(_) => stats.errors += 1,
+        }
+    }
+
     fn legacy_runs(&self) -> io::Result<Vec<ArchivedRun>> {
         Ok(self
             .legacy_log
@@ -324,6 +471,48 @@ fn archive_source_wav(source_wav_path: &Path, run_dir: &Path) -> Option<io::Resu
             .map(|_| archived_source_wav_path)
             .map_err(io::Error::from),
     )
+}
+
+fn is_pepperx_recording_filename(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".wav")
+        && (lower.starts_with("live-recording-") || lower.starts_with("test-dictation-"))
+}
+
+fn remove_file_with_size(path: &Path) -> io::Result<u64> {
+    let size = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    fs::remove_file(path)?;
+    Ok(size)
+}
+
+fn remove_dir_all_with_size(path: &Path) -> io::Result<(usize, u64)> {
+    let (files, bytes) = dir_tree_stats(path)?;
+    fs::remove_dir_all(path)?;
+    Ok((files, bytes))
+}
+
+fn dir_tree_stats(path: &Path) -> io::Result<(usize, u64)> {
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    if path.is_file() {
+        return Ok((1, fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)));
+    }
+    if !path.is_dir() {
+        return Ok((0, 0));
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if child.is_dir() {
+            let (child_files, child_bytes) = dir_tree_stats(&child)?;
+            files += child_files;
+            bytes += child_bytes;
+        } else if child.is_file() {
+            files += 1;
+            bytes += fs::metadata(&child).map(|meta| meta.len()).unwrap_or(0);
+        }
+    }
+    Ok((files, bytes))
 }
 
 fn next_run_id() -> String {
@@ -507,5 +696,71 @@ mod history_store_tests {
         assert_eq!(reloaded_child.run_id, child.run_id);
         assert_eq!(reloaded_child.parent_run_id, Some(parent.run_id));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn purge_history_for_privacy_wipes_runs_log_and_wavs_keeps_settings_surface() {
+        let root = temp_root("purge-privacy");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_wav_path = root.join("source.wav");
+        std::fs::write(&source_wav_path, b"pepper-x-audio-payload").unwrap();
+        let settings_path = root.join("settings.json");
+        let setup_path = root.join("setup.json");
+        let corrections_dir = root.join("corrections");
+        std::fs::write(&settings_path, b"{\"keep\":true}").unwrap();
+        std::fs::write(&setup_path, b"{\"keep\":true}").unwrap();
+        std::fs::create_dir_all(&corrections_dir).unwrap();
+        std::fs::write(corrections_dir.join("corrections.jsonl"), b"keep").unwrap();
+
+        let store = HistoryStore::open(&root).expect("history store should open");
+        let archived = store
+            .archive_run(&ArchiveWriteRequest::new(transcript_entry(&source_wav_path)))
+            .expect("archive write should succeed");
+        assert!(archived.metadata_path.is_file());
+        assert!(root.join("transcript-log.jsonl").is_file());
+
+        let recordings_dir = root.join("recordings");
+        std::fs::create_dir_all(&recordings_dir).unwrap();
+        let live = recordings_dir.join("live-recording-1-2.wav");
+        let test_dictation = recordings_dir.join("test-dictation-99.wav");
+        let keep_user_file = recordings_dir.join("Sean-notes.flac");
+        let keep_other_wav = recordings_dir.join("meeting-notes.wav");
+        std::fs::write(&live, b"live-wav").unwrap();
+        std::fs::write(&test_dictation, b"test-wav").unwrap();
+        std::fs::write(&keep_user_file, b"user-flac").unwrap();
+        std::fs::write(&keep_other_wav, b"other-wav").unwrap();
+
+        let stats = store
+            .purge_history_for_privacy()
+            .expect("purge should succeed");
+
+        assert!(stats.deleted_files >= 4);
+        assert_eq!(stats.deleted_dirs, 1);
+        assert!(stats.freed_bytes > 0);
+        assert_eq!(stats.errors, 0);
+        assert!(!live.exists());
+        assert!(!test_dictation.exists());
+        assert!(keep_user_file.is_file());
+        assert!(keep_other_wav.is_file());
+        assert!(!archived.run_dir.exists());
+        assert!(!root.join("transcript-log.jsonl").exists());
+        assert!(root.join("history").is_dir());
+        assert!(store.recent_runs().expect("reload history").is_empty());
+        assert!(settings_path.is_file());
+        assert!(setup_path.is_file());
+        assert!(corrections_dir.join("corrections.jsonl").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn is_pepperx_recording_filename_matches_live_and_test_only() {
+        assert!(is_pepperx_recording_filename(
+            "live-recording-103408-1784193243847383261.wav"
+        ));
+        assert!(is_pepperx_recording_filename("test-dictation-1.wav"));
+        assert!(is_pepperx_recording_filename("LIVE-RECORDING-x.WAV"));
+        assert!(!is_pepperx_recording_filename("meeting-notes.wav"));
+        assert!(!is_pepperx_recording_filename("live-recording-x.flac"));
+        assert!(!is_pepperx_recording_filename("source.wav"));
     }
 }

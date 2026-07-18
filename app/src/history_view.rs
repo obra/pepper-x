@@ -6,9 +6,9 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::history_store::ArchivedRun;
+use crate::history_store::{ArchivedRun, HistoryStore};
 use crate::settings::AppSettings;
-use crate::transcript_log::{DiarizationSummary, TranscriptEntry};
+use crate::transcript_log::{state_root, DiarizationSummary, TranscriptEntry};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HistoryBrowserModel {
@@ -51,6 +51,11 @@ impl HistoryBrowserModel {
         };
         self.selected_index = index;
         true
+    }
+
+    pub(crate) fn clear_runs(&mut self) {
+        self.runs.clear();
+        self.selected_index = 0;
     }
 
     pub(crate) fn rerunnable_run_id(&self) -> Option<&str> {
@@ -146,9 +151,30 @@ pub(crate) fn build_history_browser(
     rerun_archived_run: Option<Rc<dyn Fn(String, String) -> Option<TranscriptEntry>>>,
     rerun_cleanup: Option<Rc<dyn Fn(String, String, Option<String>) -> Option<TranscriptEntry>>>,
     play_audio: Option<Rc<dyn Fn(PathBuf)>>,
-) -> gtk::Paned {
+) -> gtk::Box {
     let model = Rc::new(RefCell::new(HistoryBrowserModel::new(runs.to_vec())));
     let settings = AppSettings::load_or_default();
+
+    // --- Toolbar: privacy purge (status left, button right) ---
+    let toolbar = gtk::Box::new(Orientation::Horizontal, 12);
+    toolbar.set_margin_top(12);
+    toolbar.set_margin_bottom(6);
+    toolbar.set_margin_start(12);
+    toolbar.set_margin_end(12);
+    let purge_status = gtk::Label::builder()
+        .label("")
+        .xalign(0.0)
+        .hexpand(true)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    let purge_button = gtk::Button::builder()
+        .label("Purge history")
+        .css_classes(["destructive-action"])
+        .halign(Align::End)
+        .build();
+    toolbar.append(&purge_status);
+    toolbar.append(&purge_button);
 
     // --- Left side: run list ---
     let list_box = gtk::ListBox::builder()
@@ -577,11 +603,112 @@ pub(crate) fn build_history_browser(
     }
 
     // =====================================================================
+    // Privacy purge: history + associated recording artifacts
+    // =====================================================================
+    {
+        let model = model.clone();
+        let list_box = list_box.clone();
+        let play_button = play_button.clone();
+        let rerun_button = rerun_button.clone();
+        let rerun_cleanup_button = rerun_cleanup_button.clone();
+        let purge_status = purge_status.clone();
+        let metadata_line = metadata_line.clone();
+        let transcription_subtitle = transcription_subtitle.clone();
+        let original_raw_label = original_raw_card.1.clone();
+        let cleanup_subtitle = cleanup_subtitle.clone();
+        let original_cleaned_label = original_cleaned_card.1.clone();
+        let diarization_container = diarization_container.clone();
+        let use_ocr_check = use_ocr_check.clone();
+        let rerun_raw_card_frame = rerun_raw_card.0.clone();
+        let rerun_cleaned_card_frame = rerun_cleaned_card.0.clone();
+        let cleanup_timing_label = cleanup_timing_label.clone();
+        purge_button.connect_clicked(move |button| {
+            let parent = button
+                .root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok());
+            let dialog = adw::AlertDialog::new(
+                Some("Purge history?"),
+                Some(
+                    "Permanently deletes past dictation history for privacy:\n\
+                     • archived runs (transcripts, OCR, context, WAV)\n\
+                     • transcript log\n\
+                     • Pepper X live/test recordings (live-recording-*, test-dictation-*)\n\n\
+                     Keeps settings, models, and correction memory.\n\
+                     Other files in a user-managed recordings folder are left alone.\n\
+                     This cannot be undone.",
+                ),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("purge", "Purge");
+            dialog.set_response_appearance("purge", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+
+            let model = model.clone();
+            let list_box = list_box.clone();
+            let play_button = play_button.clone();
+            let rerun_button = rerun_button.clone();
+            let rerun_cleanup_button = rerun_cleanup_button.clone();
+            let purge_status = purge_status.clone();
+            let metadata_line = metadata_line.clone();
+            let transcription_subtitle = transcription_subtitle.clone();
+            let original_raw_label = original_raw_label.clone();
+            let cleanup_subtitle = cleanup_subtitle.clone();
+            let original_cleaned_label = original_cleaned_label.clone();
+            let diarization_container = diarization_container.clone();
+            let use_ocr_check = use_ocr_check.clone();
+            let rerun_raw_card_frame = rerun_raw_card_frame.clone();
+            let rerun_cleaned_card_frame = rerun_cleaned_card_frame.clone();
+            let cleanup_timing_label = cleanup_timing_label.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response != "purge" {
+                    return;
+                }
+                match HistoryStore::open(state_root())
+                    .and_then(|store| store.purge_history_for_privacy())
+                {
+                    Ok(stats) => {
+                        purge_status.set_label(&stats.summary_text());
+                        model.borrow_mut().clear_runs();
+                        while let Some(child) = list_box.first_child() {
+                            list_box.remove(&child);
+                        }
+                        metadata_line.set_label("");
+                        transcription_subtitle.set_label("");
+                        original_raw_label.set_label("No archived runs yet.");
+                        cleanup_subtitle.set_label("");
+                        original_cleaned_label.set_label("No cleanup transcript for this run.");
+                        clear_diarization_container(&diarization_container);
+                        use_ocr_check.set_visible(false);
+                        rerun_raw_card_frame.set_visible(false);
+                        rerun_cleaned_card_frame.set_visible(false);
+                        cleanup_timing_label.set_visible(false);
+                        play_button.set_sensitive(false);
+                        rerun_button.set_sensitive(false);
+                        rerun_cleanup_button.set_sensitive(false);
+                    }
+                    Err(error) => {
+                        purge_status.set_label(&format!("Purge failed: {error}"));
+                    }
+                }
+            });
+
+            if let Some(parent) = parent.as_ref() {
+                dialog.present(Some(parent));
+            } else {
+                dialog.present(None::<&gtk::Window>);
+            }
+        });
+    }
+
+    // =====================================================================
     // Paned: list on left, scrollable detail on right
     // =====================================================================
     let details_scroll = gtk::ScrolledWindow::new();
     details_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     details_scroll.set_child(Some(&details_box));
+    details_scroll.set_hexpand(true);
+    details_scroll.set_vexpand(true);
 
     let list_scroll = gtk::ScrolledWindow::new();
     list_scroll.set_min_content_width(280);
@@ -591,9 +718,17 @@ pub(crate) fn build_history_browser(
     let browser = gtk::Paned::new(Orientation::Horizontal);
     browser.set_wide_handle(true);
     browser.set_position(300);
+    browser.set_hexpand(true);
+    browser.set_vexpand(true);
     browser.set_start_child(Some(&list_scroll));
     browser.set_end_child(Some(&details_scroll));
-    browser
+
+    let root = gtk::Box::new(Orientation::Vertical, 0);
+    root.set_hexpand(true);
+    root.set_vexpand(true);
+    root.append(&toolbar);
+    root.append(&browser);
+    root
 }
 
 // ---------------------------------------------------------------------------
