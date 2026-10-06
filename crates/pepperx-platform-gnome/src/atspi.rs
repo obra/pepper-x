@@ -133,9 +133,19 @@ pub(crate) struct FocusedTargetSnapshot {
 impl FocusedTargetSnapshot {
     pub(crate) fn supporting_context_text(&self, max_chars: usize) -> Option<String> {
         let before_text = self.before_text.as_deref()?;
-        let caret_offset = self.caret_offset?;
+        if before_text.trim().is_empty() {
+            return None;
+        }
 
-        supporting_context_excerpt(before_text, caret_offset, max_chars)
+        if let Some(caret_offset) = self.caret_offset {
+            let excerpt = supporting_context_excerpt(before_text, caret_offset, max_chars)?;
+            if excerpt.trim().is_empty() {
+                return None;
+            }
+            return Some(excerpt);
+        }
+
+        supporting_context_tail(before_text, SUPPORTING_CONTEXT_NO_CARET_LIMIT)
     }
 }
 
@@ -363,6 +373,24 @@ fn supporting_context_excerpt(
     let end_byte = byte_index_for_char_offset(before_text, end).unwrap_or(before_text.len());
 
     Some(before_text[start_byte..end_byte].to_string())
+}
+
+/// End of the AT-SPI buffer when the focused widget has text but no caret.
+/// In a VTE terminal the scrollback is at the start and the visible screen at the end.
+/// Stays under pepperx-cleanup `CLEANUP_OCR_CONTEXT_LIMIT` (4000).
+pub(crate) const SUPPORTING_CONTEXT_NO_CARET_LIMIT: usize = 1500;
+
+fn supporting_context_tail(text: &str, max_chars: usize) -> Option<String> {
+    let max_chars = max_chars.max(1);
+    let total_chars = text.chars().count();
+    let start = total_chars.saturating_sub(max_chars);
+    let start_byte = byte_index_for_char_offset(text, start)?;
+    let tail = text[start_byte..].to_string();
+    if tail.trim().is_empty() {
+        None
+    } else {
+        Some(tail)
+    }
 }
 
 #[derive(Debug)]
@@ -1934,6 +1962,43 @@ mod focused_target_snapshot {
         };
 
         assert_eq!(snapshot.supporting_context_text(4), None);
+    }
+
+    #[test]
+    fn focused_target_snapshot_uses_buffer_tail_without_caret() {
+        let body = format!("scrollback-{}", "é".repeat(1600));
+        let snapshot = FocusedTargetSnapshot {
+            application_id: "org.gnome.Ptyxis".into(),
+            application_name: "Ptyxis".into(),
+            target_class: "terminal",
+            is_editable: false,
+            supports_text: true,
+            supports_editable_text: false,
+            supports_caret: false,
+            before_text: Some(body.clone()),
+            caret_offset: None,
+        };
+
+        let tail = snapshot
+            .supporting_context_text(4)
+            .expect("text without a caret still yields context");
+        assert_eq!(tail.chars().count(), SUPPORTING_CONTEXT_NO_CARET_LIMIT);
+        assert!(body.ends_with(&tail));
+        assert_ne!(tail.chars().count(), 4);
+
+        let empty = FocusedTargetSnapshot {
+            before_text: Some(String::new()),
+            caret_offset: None,
+            ..snapshot.clone()
+        };
+        assert_eq!(empty.supporting_context_text(4), None);
+
+        let blank = FocusedTargetSnapshot {
+            before_text: Some(" \n\t ".into()),
+            caret_offset: None,
+            ..snapshot
+        };
+        assert_eq!(blank.supporting_context_text(4), None);
     }
 }
 

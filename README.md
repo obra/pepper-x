@@ -8,7 +8,7 @@ GNOME-first local dictation for Linux. Hold a key combo, speak, release — your
 - **Streaming transcription** via Nemotron 0.6B — text is ready the instant you stop talking
 - **LLM cleanup** via Qwen 3.5 — fixes filler words, punctuation, capitalization, self-corrections
 - **Text insertion** — AT-SPI first when possible; XKB-aware uinput fallback for hostile apps (Wine, some terminals, custom UIs)
-- **Window OCR context** — captures screen text to help the cleanup model disambiguate names and terms
+- **Focused widget context** — cleanup receives the accessible text of the focused widget, around the caret, or the end of the buffer when there is no caret. Not a screenshot.
 - **Speaker diarization** — filters out other voices (experimental)
 
 ## Performance
@@ -212,7 +212,7 @@ pepper-x --rerun-archived-run <run-id>
 | `pepperx-audio` | PipeWire recording with streaming chunk delivery |
 | `pepperx-corrections` | Preferred transcriptions and misheard replacements store |
 | `pepperx-models` | Model catalog, download, readiness checking |
-| `pepperx-platform-gnome` | evdev modifier capture, AT-SPI text insertion, OCR context |
+| `pepperx-platform-gnome` | evdev modifier capture, AT-SPI text insertion, AT-SPI cleanup context |
 | `pepperx-ipc` | D-Bus service for extension communication |
 | `pepperx-uinput-helper` | Active-layout XKB chords + clipboard Unicode fallback |
 
