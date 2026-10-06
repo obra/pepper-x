@@ -215,7 +215,11 @@ fn is_audio_file_lineage(run: &ArchivedRun, all_runs: &[ArchivedRun]) -> bool {
         "archived-rerun" => run
             .parent_run_id
             .as_deref()
-            .and_then(|parent_id| all_runs.iter().find(|candidate| candidate.run_id == parent_id))
+            .and_then(|parent_id| {
+                all_runs
+                    .iter()
+                    .find(|candidate| candidate.run_id == parent_id)
+            })
             .map(|parent| is_audio_file_lineage(parent, all_runs))
             .unwrap_or(false),
         _ => false,
@@ -828,9 +832,9 @@ pub(crate) fn build_history_browser(
                 all_audio.add_mime_type(mime);
             }
             for pattern in [
-                "*.wav", "*.WAV", "*.wave", "*.mp3", "*.MP3", "*.flac", "*.FLAC", "*.ogg",
-                "*.OGG", "*.oga", "*.opus", "*.aac", "*.AAC", "*.m4a", "*.M4A", "*.mp4",
-                "*.caf", "*.aiff", "*.aif",
+                "*.wav", "*.WAV", "*.wave", "*.mp3", "*.MP3", "*.flac", "*.FLAC", "*.ogg", "*.OGG",
+                "*.oga", "*.opus", "*.aac", "*.AAC", "*.m4a", "*.M4A", "*.mp4", "*.caf", "*.aiff",
+                "*.aif",
             ] {
                 all_audio.add_pattern(pattern);
             }
@@ -872,122 +876,115 @@ pub(crate) fn build_history_browser(
             let audio_files_toggle = audio_files_toggle.clone();
             let load_audio_button = button.clone();
 
-            dialog.open(
-                parent.as_ref(),
-                None::<&gio::Cancellable>,
-                move |result| {
-                    let Ok(file) = result else {
-                        return;
-                    };
-                    let Some(path) = file.path() else {
-                        load_status.set_label("Could not read selected path.");
-                        return;
-                    };
-                    if !is_supported_audio_path(&path) {
-                        load_status.set_label(
-                            "Unsupported audio type. Use WAV, MP3, FLAC, OGG, AAC/M4A…",
-                        );
-                        return;
-                    }
+            dialog.open(parent.as_ref(), None::<&gio::Cancellable>, move |result| {
+                let Ok(file) = result else {
+                    return;
+                };
+                let Some(path) = file.path() else {
+                    load_status.set_label("Could not read selected path.");
+                    return;
+                };
+                if !is_supported_audio_path(&path) {
+                    load_status
+                        .set_label("Unsupported audio type. Use WAV, MP3, FLAC, OGG, AAC/M4A…");
+                    return;
+                }
 
-                    load_status.set_label(&format!("Transcribing {}…", display_file_name(&path)));
-                    load_audio_button.set_sensitive(false);
+                load_status.set_label(&format!("Transcribing {}…", display_file_name(&path)));
+                load_audio_button.set_sensitive(false);
 
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let path_for_thread = path.clone();
-                    std::thread::Builder::new()
-                        .name("pepperx-audio-import".into())
-                        .spawn(move || {
-                            let result =
-                                crate::transcription::import_external_audio_file(&path_for_thread);
-                            let _ = tx.send(result);
-                        })
-                        .expect("failed to spawn audio import thread");
+                let (tx, rx) = std::sync::mpsc::channel();
+                let path_for_thread = path.clone();
+                std::thread::Builder::new()
+                    .name("pepperx-audio-import".into())
+                    .spawn(move || {
+                        let result =
+                            crate::transcription::import_external_audio_file(&path_for_thread);
+                        let _ = tx.send(result);
+                    })
+                    .expect("failed to spawn audio import thread");
 
-                    let model = model.clone();
-                    let list_box = list_box.clone();
-                    let metadata_line = metadata_line.clone();
-                    let transcription_subtitle = transcription_subtitle.clone();
-                    let original_raw_label = original_raw_label.clone();
-                    let cleanup_subtitle = cleanup_subtitle.clone();
-                    let original_cleaned_label = original_cleaned_label.clone();
-                    let diarization_container = diarization_container.clone();
-                    let use_ocr_check = use_ocr_check.clone();
-                    let play_button = play_button.clone();
-                    let rerun_button = rerun_button.clone();
-                    let rerun_cleanup_button = rerun_cleanup_button.clone();
-                    let rerun_raw_card_frame = rerun_raw_card_frame.clone();
-                    let rerun_cleaned_card_frame = rerun_cleaned_card_frame.clone();
-                    let cleanup_timing_label = cleanup_timing_label.clone();
-                    let load_status = load_status.clone();
-                    let audio_files_toggle = audio_files_toggle.clone();
-                    let load_audio_button = load_audio_button.clone();
-                    let source_path = path;
+                let model = model.clone();
+                let list_box = list_box.clone();
+                let metadata_line = metadata_line.clone();
+                let transcription_subtitle = transcription_subtitle.clone();
+                let original_raw_label = original_raw_label.clone();
+                let cleanup_subtitle = cleanup_subtitle.clone();
+                let original_cleaned_label = original_cleaned_label.clone();
+                let diarization_container = diarization_container.clone();
+                let use_ocr_check = use_ocr_check.clone();
+                let play_button = play_button.clone();
+                let rerun_button = rerun_button.clone();
+                let rerun_cleanup_button = rerun_cleanup_button.clone();
+                let rerun_raw_card_frame = rerun_raw_card_frame.clone();
+                let rerun_cleaned_card_frame = rerun_cleaned_card_frame.clone();
+                let cleanup_timing_label = cleanup_timing_label.clone();
+                let load_status = load_status.clone();
+                let audio_files_toggle = audio_files_toggle.clone();
+                let load_audio_button = load_audio_button.clone();
+                let source_path = path;
 
-                    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                        match rx.try_recv() {
-                            Ok(Ok(import)) => {
-                                load_audio_button.set_sensitive(true);
-                                let md_name = import
-                                    .markdown_path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("transcript.md");
-                                load_status.set_label(&format!(
-                                    "Saved {md_name} next to {}.",
-                                    display_file_name(&source_path)
-                                ));
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    match rx.try_recv() {
+                        Ok(Ok(import)) => {
+                            load_audio_button.set_sensitive(true);
+                            let md_name = import
+                                .markdown_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("transcript.md");
+                            load_status.set_label(&format!(
+                                "Saved {md_name} next to {}.",
+                                display_file_name(&source_path)
+                            ));
 
-                                // Prefer Audio files mode after a successful import.
-                                if !audio_files_toggle.is_active() {
-                                    // Grouped toggle: activating Audio files deactivates Recordings.
-                                    audio_files_toggle.set_active(true);
-                                }
-
-                                let refreshed = HistoryStore::open(state_root())
-                                    .and_then(|store| store.recent_runs())
-                                    .unwrap_or_default();
-                                {
-                                    let mut model = model.borrow_mut();
-                                    model.replace_all_runs(refreshed);
-                                    model.set_mode(HistoryListMode::AudioFiles);
-                                }
-                                rebuild_history_list_ui(
-                                    &model,
-                                    &list_box,
-                                    &metadata_line,
-                                    &transcription_subtitle,
-                                    &original_raw_label,
-                                    &cleanup_subtitle,
-                                    &original_cleaned_label,
-                                    &diarization_container,
-                                    &use_ocr_check,
-                                    &play_button,
-                                    &rerun_button,
-                                    &rerun_cleanup_button,
-                                    &rerun_raw_card_frame,
-                                    &rerun_cleaned_card_frame,
-                                    &cleanup_timing_label,
-                                );
-                                glib::ControlFlow::Break
+                            // Prefer Audio files mode after a successful import.
+                            if !audio_files_toggle.is_active() {
+                                // Grouped toggle: activating Audio files deactivates Recordings.
+                                audio_files_toggle.set_active(true);
                             }
-                            Ok(Err(error)) => {
-                                load_audio_button.set_sensitive(true);
-                                load_status.set_label(&format!("Import failed: {error}"));
-                                glib::ControlFlow::Break
+
+                            let refreshed = HistoryStore::open(state_root())
+                                .and_then(|store| store.recent_runs())
+                                .unwrap_or_default();
+                            {
+                                let mut model = model.borrow_mut();
+                                model.replace_all_runs(refreshed);
+                                model.set_mode(HistoryListMode::AudioFiles);
                             }
-                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                glib::ControlFlow::Continue
-                            }
-                            Err(_) => {
-                                load_audio_button.set_sensitive(true);
-                                load_status.set_label("Import failed: worker channel closed.");
-                                glib::ControlFlow::Break
-                            }
+                            rebuild_history_list_ui(
+                                &model,
+                                &list_box,
+                                &metadata_line,
+                                &transcription_subtitle,
+                                &original_raw_label,
+                                &cleanup_subtitle,
+                                &original_cleaned_label,
+                                &diarization_container,
+                                &use_ocr_check,
+                                &play_button,
+                                &rerun_button,
+                                &rerun_cleanup_button,
+                                &rerun_raw_card_frame,
+                                &rerun_cleaned_card_frame,
+                                &cleanup_timing_label,
+                            );
+                            glib::ControlFlow::Break
                         }
-                    });
-                },
-            );
+                        Ok(Err(error)) => {
+                            load_audio_button.set_sensitive(true);
+                            load_status.set_label(&format!("Import failed: {error}"));
+                            glib::ControlFlow::Break
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                        Err(_) => {
+                            load_audio_button.set_sensitive(true);
+                            load_status.set_label("Import failed: worker channel closed.");
+                            glib::ControlFlow::Break
+                        }
+                    }
+                });
+            });
         });
     }
 

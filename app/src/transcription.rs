@@ -7,13 +7,10 @@ use std::time::Duration;
 
 use pepperx_asr::{
     convert_to_temp_mono_16k_wav, filter_other_speakers, transcribe_wav, TranscriptionError,
-    TranscriptionRequest,
-    TranscriptionResult,
+    TranscriptionRequest, TranscriptionResult,
 };
 use pepperx_audio::RecordingArtifact;
-use pepperx_cleanup::{
-    run_cleanup, safe_run_cleanup, CleanupError, CleanupRequest, CleanupResult,
-};
+use pepperx_cleanup::{run_cleanup, safe_run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 use pepperx_corrections::{learn_correction, CorrectionStore};
 use pepperx_ipc::{LiveStatus, SharedLiveStatus};
 use pepperx_models::{catalog_model, default_cache_root, model_readiness, ModelKind};
@@ -242,9 +239,8 @@ pub struct ExternalAudioImportResult {
 pub fn import_external_audio_file(
     audio_path: &Path,
 ) -> Result<ExternalAudioImportResult, TranscriptionRunError> {
-    let temp_wav = convert_to_temp_mono_16k_wav(audio_path).map_err(|error| {
-        TranscriptionRunError::Asr(map_import_decode_error(error))
-    })?;
+    let temp_wav = convert_to_temp_mono_16k_wav(audio_path)
+        .map_err(|error| TranscriptionRunError::Asr(map_import_decode_error(error)))?;
 
     let settings = AppSettings::load_or_default();
     let mut entry = if settings.cleanup_enabled {
@@ -342,11 +338,7 @@ fn format_transcript_markdown(audio_path: &Path, entry: &TranscriptEntry) -> Str
                 .as_ref()
                 .map(|c| c.model_name.as_str())
                 .unwrap_or("cleanup"),
-            entry
-                .cleanup
-                .as_ref()
-                .map(|c| c.elapsed_ms)
-                .unwrap_or(0)
+            entry.cleanup.as_ref().map(|c| c.elapsed_ms).unwrap_or(0)
         ));
     }
     body
@@ -1645,7 +1637,10 @@ fn describe_asr_error(error: &TranscriptionError) -> String {
             format!("invalid or unsupported audio file: {}", path.display())
         }
         TranscriptionError::AudioDecodeFailed { path, detail } => {
-            format!("audio convert/decode failed for {}: {detail}", path.display())
+            format!(
+                "audio convert/decode failed for {}: {detail}",
+                path.display()
+            )
         }
         TranscriptionError::RecognizerInitializationFailed(model_dir) => format!(
             "failed to initialize recognizer from {}",

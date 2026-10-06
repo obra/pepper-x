@@ -479,11 +479,10 @@ fn generate_cleanup_chunk(
     };
 
     // JSON serialization preserves full Unicode (é, è, ç, œ, …) as UTF-8.
-    let request_json = serde_json::to_string(&helper_request).map_err(|error| {
-        CleanupError::SubprocessError {
+    let request_json =
+        serde_json::to_string(&helper_request).map_err(|error| CleanupError::SubprocessError {
             message: format!("failed to serialize helper request: {error}"),
-        }
-    })?;
+        })?;
 
     eprintln!(
         "[Pepper X] cleanup generate: use_gpu={} gpu_layers={} raw_chars={} prompt_chars={} json_bytes={} chunk={}/{}",
@@ -594,7 +593,6 @@ pub(crate) fn chunk_transcript(text: &str, max_chars: usize) -> Vec<String> {
     }
 }
 
-
 fn configured_cleanup_helper_bin_path() -> PathBuf {
     if let Some(path) = std::env::var_os("PEPPERX_CLEANUP_HELPER_BIN") {
         let path = PathBuf::from(path);
@@ -672,12 +670,18 @@ impl HelperSession {
                     helper_bin.display()
                 ),
             })?;
-        let stdin = child.stdin.take().ok_or_else(|| CleanupError::SubprocessError {
-            message: "cleanup helper stdin is not available".into(),
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| CleanupError::SubprocessError {
-            message: "cleanup helper stdout is not available".into(),
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| CleanupError::SubprocessError {
+                message: "cleanup helper stdin is not available".into(),
+            })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CleanupError::SubprocessError {
+                message: "cleanup helper stdout is not available".into(),
+            })?;
         Ok(Self {
             child,
             stdin,
@@ -713,9 +717,11 @@ fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
     }
 
     let result = (|| {
-        let session = guard.as_mut().ok_or_else(|| CleanupError::SubprocessError {
-            message: "cleanup helper session missing after spawn".into(),
-        })?;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| CleanupError::SubprocessError {
+                message: "cleanup helper session missing after spawn".into(),
+            })?;
 
         session
             .stdin
@@ -723,14 +729,18 @@ fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
             .map_err(|error| CleanupError::SubprocessError {
                 message: format!("failed to write to cleanup helper: {error}"),
             })?;
-        session.stdin.write_all(b"\n").map_err(|error| {
-            CleanupError::SubprocessError {
+        session
+            .stdin
+            .write_all(b"\n")
+            .map_err(|error| CleanupError::SubprocessError {
                 message: format!("failed to write newline to cleanup helper: {error}"),
-            }
-        })?;
-        session.stdin.flush().map_err(|error| CleanupError::SubprocessError {
-            message: format!("failed to flush cleanup helper stdin: {error}"),
-        })?;
+            })?;
+        session
+            .stdin
+            .flush()
+            .map_err(|error| CleanupError::SubprocessError {
+                message: format!("failed to flush cleanup helper stdin: {error}"),
+            })?;
 
         let mut response_line = String::new();
         session
