@@ -33,14 +33,12 @@ DEBIAN_RUNTIME_DEPENDENCIES = [
     "libatspi2.0-0",
     "libgtk-4-1",
     "pipewire",
-    "tesseract-ocr",
 ]
 RPM_RUNTIME_DEPENDENCIES = [
     "at-spi2-core",
     "gtk4",
     "libadwaita",
     "pipewire",
-    "tesseract",
 ]
 
 

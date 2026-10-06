@@ -37,19 +37,19 @@ the toolchain with [rustup](https://rustup.rs) if `rustc --version` reports < 1.
 # Ubuntu
 sudo apt install \
   build-essential cmake clang libclang-dev \
-  libadwaita-1-dev libatspi2.0-dev libgirepository1.0-dev \
-  libglib2.0-dev libgtk-4-dev libgtk4-layer-shell-dev \
-  libpipewire-0.3-dev libvulkan-dev libxkbcommon-dev \
-  pkg-config tesseract-ocr \
+  libadwaita-1-dev libatspi2.0-dev \
+  libglib2.0-dev libgtk-4-dev \
+  libpipewire-0.3-dev libxkbcommon-dev \
+  pkg-config \
   wl-clipboard xclip
 
 
 # Fedora
 sudo dnf install \
   cmake gcc gcc-c++ clang clang-devel \
-  at-spi2-core-devel glib2-devel gobject-introspection-devel \
-  gtk4-devel libadwaita-devel libxkbcommon-devel pipewire-devel vulkan-loader-devel \
-  pkgconf-pkg-config tesseract \
+  at-spi2-core-devel glib2-devel \
+  gtk4-devel libadwaita-devel libxkbcommon-devel pipewire-devel \
+  pkgconf-pkg-config \
   wl-clipboard xclip
 
 # Rust toolchain (if your distro's rustc is older than 1.92)

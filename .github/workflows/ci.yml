@@ -22,15 +22,11 @@ jobs:
             libclang-dev \
             libadwaita-1-dev \
             libatspi2.0-dev \
-            libgirepository1.0-dev \
             libglib2.0-dev \
             libgtk-4-dev \
-            libgtk4-layer-shell-dev \
             libpipewire-0.3-dev \
-            libvulkan-dev \
             libxkbcommon-dev \
-            pkg-config \
-            tesseract-ocr
+            pkg-config
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
