@@ -42,9 +42,6 @@ impl HistoryPurgeStats {
     }
 }
 
-/// Kept for older call sites / tests that still use the previous name.
-pub type RecordingPurgeStats = HistoryPurgeStats;
-
 const TRANSCRIPT_LOG_FILE_NAME: &str = "transcript-log.jsonl";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,13 +81,11 @@ impl ArchiveWriteRequest {
         self
     }
 
-    #[allow(dead_code)]
     pub fn with_supporting_context(mut self, supporting_context_text: impl Into<String>) -> Self {
         self.supporting_context_text = Some(supporting_context_text.into());
         self
     }
 
-    #[allow(dead_code)]
     pub fn with_ocr_text(mut self, ocr_text: impl Into<String>) -> Self {
         self.ocr_text = Some(ocr_text.into());
         self
@@ -309,11 +304,6 @@ impl HistoryStore {
         }
 
         Ok(stats)
-    }
-
-    /// Alias kept for older call sites.
-    pub fn purge_recording_audio(&self) -> io::Result<HistoryPurgeStats> {
-        self.purge_history_for_privacy()
     }
 
     fn purge_pepperx_recording_files(&self, stats: &mut HistoryPurgeStats) {

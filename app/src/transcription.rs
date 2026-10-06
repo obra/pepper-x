@@ -11,7 +11,7 @@ use pepperx_asr::{
     TranscriptionRequest, TranscriptionResult,
 };
 use pepperx_audio::RecordingArtifact;
-use pepperx_cleanup::{run_cleanup, safe_run_cleanup, CleanupError, CleanupRequest, CleanupResult};
+use pepperx_cleanup::{safe_run_cleanup, CleanupError, CleanupRequest, CleanupResult};
 use pepperx_corrections::{learn_correction, CorrectionStore};
 use pepperx_ipc::{LiveStatus, SharedLiveStatus};
 use pepperx_models::{catalog_model, default_cache_root, model_readiness, ModelKind};
@@ -2461,7 +2461,7 @@ mod app_shell {
             SupportingContext::default(),
             |transcript_text| {
                 let model_path = configured_cleanup_model_path()?;
-                run_cleanup(&CleanupRequest {
+                pepperx_cleanup::run_cleanup(&CleanupRequest {
                     transcript_text: transcript_text.into(),
                     model_path,
                     supporting_context_text: None,

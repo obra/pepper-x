@@ -868,7 +868,6 @@ impl SettingsView {
         let cleanup_use_gpu_switch = self.cleanup_use_gpu_switch.clone();
         let cleanup_gpu_layers_row = self.cleanup_gpu_layers_row.clone();
         let cleanup_gpu_layers_spin = self.cleanup_gpu_layers_spin.clone();
-        let cleanup_model_dropdown = self.cleanup_model_dropdown.clone();
         let cleanup_model_ids = self.cleanup_model_ids.clone();
         let prompt_profile_dropdown = self.prompt_profile_dropdown.clone();
         let custom_prompt_buffer = self.custom_prompt_buffer.clone();
