@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Informational (non-error) logging is opt-in: set `PEPPERX_VERBOSE=1` to
 /// print progress/timing messages. Errors are always printed.
@@ -28,6 +30,8 @@ const CLEANUP_TEMPERATURE: f32 = 0.0;
 /// Soft char budget per cleanup helper call. Leaves room for the system prompt
 /// + chat template under the helper's n_ctx/n_batch of 2048 tokens.
 const CLEANUP_TRANSCRIPT_CHUNK_CHARS: usize = 2400;
+/// One helper chunk. A silent llama must not hold the process-global session lock longer than this.
+pub(crate) const CLEANUP_HELPER_CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DEFAULT_CLEANUP_HELPER_BIN: &str = "/usr/libexec/pepper-x/pepperx-cleanup-helper";
 
@@ -77,6 +81,8 @@ pub enum CleanupError {
     SubprocessError {
         message: String,
     },
+    /// The helper produced no chunk before [`CLEANUP_HELPER_CHUNK_TIMEOUT`].
+    HelperChunkTimeout,
 }
 
 impl CleanupError {
@@ -90,7 +96,8 @@ impl CleanupError {
             | Self::UnsupportedModel(_)
             | Self::MissingModelPath(_)
             | Self::EmptyTranscript
-            | Self::SubprocessError { .. } => None,
+            | Self::SubprocessError { .. }
+            | Self::HelperChunkTimeout => None,
             Self::LoadModel { model_path, .. } => model_name_from_path(model_path),
             Self::CreateSession { model_name, .. }
             | Self::AdvanceContext { model_name, .. }
@@ -142,6 +149,7 @@ impl fmt::Display for CleanupError {
             Self::SubprocessError { message } => {
                 write!(f, "cleanup helper subprocess failed: {message}")
             }
+            Self::HelperChunkTimeout => f.write_str("cleanup helper timed out waiting for a chunk"),
         }
     }
 }
@@ -650,12 +658,15 @@ fn spawn_cleanup_helper(request_json: &str, model_name: &str) -> Result<String, 
 }
 
 /// Long-lived helper subprocess with persistent stdin/stdout handles.
-/// Reusing the stdout `BufReader` avoids losing buffered bytes between requests.
+/// `pending` keeps stdout bytes past the current line so the next request does not lose them.
 struct HelperSession {
-    child: std::process::Child,
-    stdin: std::process::ChildStdin,
-    stdout: io::BufReader<std::process::ChildStdout>,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    pending: Vec<u8>,
 }
+
+static HELPER_SESSION: Mutex<Option<HelperSession>> = Mutex::new(None);
 
 impl HelperSession {
     fn spawn(helper_bin: &Path) -> Result<Self, CleanupError> {
@@ -682,11 +693,55 @@ impl HelperSession {
             .ok_or_else(|| CleanupError::SubprocessError {
                 message: "cleanup helper stdout is not available".into(),
             })?;
+        set_fd_nonblocking(stdout.as_raw_fd()).map_err(|error| CleanupError::SubprocessError {
+            message: format!("failed to set cleanup helper stdout nonblocking: {error}"),
+        })?;
         Ok(Self {
             child,
             stdin,
-            stdout: io::BufReader::new(stdout),
+            stdout,
+            pending: Vec::new(),
         })
+    }
+
+    fn read_chunk_line(&mut self, timeout: Duration) -> Result<String, CleanupError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(line) = take_pending_line(&mut self.pending) {
+                return line;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(CleanupError::HelperChunkTimeout);
+            }
+            match wait_readable(self.stdout.as_raw_fd(), remaining).map_err(|error| {
+                CleanupError::SubprocessError {
+                    message: format!("failed to wait for cleanup helper: {error}"),
+                }
+            })? {
+                ReadWait::Timeout => return Err(CleanupError::HelperChunkTimeout),
+                ReadWait::Readable => {
+                    let mut buf = [0u8; 4096];
+                    let n = match read_retrying_eintr(&mut self.stdout, &mut buf) {
+                        Ok(n) => n,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                        Err(error) => {
+                            return Err(CleanupError::SubprocessError {
+                                message: format!("failed to read from cleanup helper: {error}"),
+                            });
+                        }
+                    };
+                    if n == 0 {
+                        if self.pending.is_empty() {
+                            return Ok(String::new());
+                        }
+                        let leftover = std::mem::take(&mut self.pending);
+                        return bytes_to_string(leftover);
+                    }
+                    self.pending.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
     }
 
     fn is_alive(&mut self) -> bool {
@@ -697,14 +752,107 @@ impl HelperSession {
     }
 }
 
+enum ReadWait {
+    Readable,
+    Timeout,
+}
+
+fn take_pending_line(pending: &mut Vec<u8>) -> Option<Result<String, CleanupError>> {
+    let pos = pending.iter().position(|byte| *byte == b'\n')?;
+    let line: Vec<u8> = pending.drain(..=pos).collect();
+    Some(bytes_to_string(line))
+}
+
+fn bytes_to_string(bytes: Vec<u8>) -> Result<String, CleanupError> {
+    String::from_utf8(bytes).map_err(|error| CleanupError::SubprocessError {
+        message: format!("cleanup helper returned non-utf8: {error}"),
+    })
+}
+
+fn set_fd_nonblocking(fd: std::os::raw::c_int) -> io::Result<()> {
+    // Linux fcntl / open flags. pepper-x runs on GNOME.
+    const F_GETFL: std::os::raw::c_int = 3;
+    const F_SETFL: std::os::raw::c_int = 4;
+    const O_NONBLOCK: std::os::raw::c_int = 0o4000;
+    unsafe {
+        let flags = fcntl(fd, F_GETFL, 0);
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+fn wait_readable(fd: std::os::raw::c_int, timeout: Duration) -> io::Result<ReadWait> {
+    const POLLIN: std::os::raw::c_short = 0x1;
+    let millis = c_int_from_timeout(timeout);
+    let mut poll_fd = PollFd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    let rc = unsafe { poll(&mut poll_fd, 1, millis) };
+    if rc < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(ReadWait::Readable);
+        }
+        return Err(error);
+    }
+    if rc == 0 {
+        return Ok(ReadWait::Timeout);
+    }
+    Ok(ReadWait::Readable)
+}
+
+fn c_int_from_timeout(timeout: Duration) -> std::os::raw::c_int {
+    let millis = timeout.as_millis();
+    if millis == 0 {
+        return 0;
+    }
+    millis.min(std::os::raw::c_int::MAX as u128) as std::os::raw::c_int
+}
+
+fn read_retrying_eintr(stdout: &mut ChildStdout, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match stdout.read(buf) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
+}
+
+#[repr(C)]
+struct PollFd {
+    fd: std::os::raw::c_int,
+    events: std::os::raw::c_short,
+    revents: std::os::raw::c_short,
+}
+
+extern "C" {
+    fn poll(
+        fds: *mut PollFd,
+        nfds: std::os::raw::c_ulong,
+        timeout: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+    // Variadic in C.
+    fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
+}
+
 fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
-    use std::sync::Mutex;
+    send_to_helper_raw_within(request_json, CLEANUP_HELPER_CHUNK_TIMEOUT)
+}
 
-    static HELPER: Mutex<Option<HelperSession>> = Mutex::new(None);
-
+fn send_to_helper_raw_within(
+    request_json: &str,
+    timeout: Duration,
+) -> Result<String, CleanupError> {
     let helper_bin = configured_cleanup_helper_bin_path();
     // Poisoned lock must not crash insertion: recover and rebuild the session.
-    let mut guard = HELPER
+    let mut guard = HELPER_SESSION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
@@ -742,13 +890,7 @@ fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
                 message: format!("failed to flush cleanup helper stdin: {error}"),
             })?;
 
-        let mut response_line = String::new();
-        session
-            .stdout
-            .read_line(&mut response_line)
-            .map_err(|error| CleanupError::SubprocessError {
-                message: format!("failed to read from cleanup helper: {error}"),
-            })?;
+        let response_line = session.read_chunk_line(timeout)?;
 
         if response_line.is_empty() {
             return Err(CleanupError::SubprocessError {
@@ -761,7 +903,13 @@ fn send_to_helper_raw(request_json: &str) -> Result<String, CleanupError> {
 
     if result.is_err() {
         // Drop a broken session so the next request respawns cleanly.
-        *guard = None;
+        // A timeout has to kill the helper first: dropping `Child` does not.
+        if let Some(mut session) = guard.take() {
+            if matches!(result, Err(CleanupError::HelperChunkTimeout)) {
+                let _ = session.child.kill();
+                let _ = session.child.wait();
+            }
+        }
     }
 
     result
@@ -908,4 +1056,97 @@ fn model_name_from_path(model_path: &Path) -> Option<String> {
     model_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod helper_chunk_timeout {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    fn reset_cleanup_helper_session() {
+        let mut guard = HELPER_SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(mut session) = guard.take() {
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+        }
+    }
+
+    struct RestoreHelperBin(Option<std::ffi::OsString>);
+
+    impl Drop for RestoreHelperBin {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("PEPPERX_CLEANUP_HELPER_BIN", value),
+                None => std::env::remove_var("PEPPERX_CLEANUP_HELPER_BIN"),
+            }
+            reset_cleanup_helper_session();
+        }
+    }
+
+    #[test]
+    fn cleanup_helper_chunk_timeout_kills_silent_helper_and_allows_retry() {
+        assert_eq!(CLEANUP_HELPER_CHUNK_TIMEOUT, Duration::from_secs(30));
+        let _restore = RestoreHelperBin(std::env::var_os("PEPPERX_CLEANUP_HELPER_BIN"));
+        reset_cleanup_helper_session();
+
+        let dir = std::env::temp_dir().join(format!(
+            "pepper-x-cleanup-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("silent.pid");
+        let silent = write_script(
+            &dir,
+            "silent.sh",
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nread line\nexec sleep 5\n",
+                pidfile.display()
+            ),
+        );
+        let reply = write_script(
+            &dir,
+            "reply.sh",
+            "#!/bin/sh\nread line\nprintf '%s\\n' '{\"ok\":true,\"text\":\"pong\"}'\n",
+        );
+
+        std::env::set_var("PEPPERX_CLEANUP_HELPER_BIN", &silent);
+        let started = Instant::now();
+        let error = send_to_helper_raw_within("{\"ping\":1}", Duration::from_millis(800))
+            .expect_err("silent helper must time out");
+        let elapsed = started.elapsed();
+        assert_eq!(error, CleanupError::HelperChunkTimeout);
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "timeout returned in {elapsed:?}"
+        );
+        let pid = std::fs::read_to_string(&pidfile)
+            .expect("silent helper pid")
+            .trim()
+            .to_string();
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "timed-out helper {pid} is still alive"
+        );
+
+        std::env::set_var("PEPPERX_CLEANUP_HELPER_BIN", &reply);
+        let line = send_to_helper_raw_within("{\"ping\":2}", Duration::from_secs(2))
+            .expect("next chunk can spawn a new helper");
+        assert!(line.contains("pong"), "{line}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
