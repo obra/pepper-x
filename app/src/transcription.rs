@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use pepperx_asr::{
@@ -685,25 +686,53 @@ fn request_uinput_text_insertion(
     }
 }
 
+/// Child of the uinput helper this process spawned.
+/// Kept for the process lifetime so a dead helper can be reaped. Dropped only
+/// when this process exits, which does not kill the helper.
+static UINPUT_HELPER_CHILD: Mutex<Option<Child>> = Mutex::new(None);
+
+/// `true` when the caller should spawn. A live child stays in `slot`.
+fn uinput_helper_should_spawn(slot: &mut Option<Child>) -> std::io::Result<bool> {
+    let Some(child) = slot.as_mut() else {
+        return Ok(true);
+    };
+    match child.try_wait()? {
+        None => Ok(false),
+        Some(_) => {
+            *slot = None;
+            Ok(true)
+        }
+    }
+}
+
 fn connect_or_spawn_uinput_helper(
     socket_path: &Path,
 ) -> Result<UnixStream, FriendlyInsertRunError> {
-    match UnixStream::connect(socket_path) {
-        Ok(stream) => return Ok(stream),
-        Err(_) => {
-            // Connection failed (not found, refused, etc.) — remove stale socket
-            // and spawn a fresh helper.
-            let _ = std::fs::remove_file(socket_path);
-        }
+    if let Ok(stream) = UnixStream::connect(socket_path) {
+        return Ok(stream);
     }
 
-    let helper_bin = configured_uinput_helper_bin_path();
-    Command::new(&helper_bin).spawn().map_err(|error| {
-        FriendlyInsertRunError::Access(format!(
-            "failed to launch Pepper X uinput helper {}: {error}",
-            helper_bin.display()
-        ))
-    })?;
+    {
+        let mut slot = UINPUT_HELPER_CHILD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let should_spawn = uinput_helper_should_spawn(&mut slot).map_err(|error| {
+            FriendlyInsertRunError::Access(format!(
+                "failed to check Pepper X uinput helper status: {error}"
+            ))
+        })?;
+        if should_spawn {
+            let _ = std::fs::remove_file(socket_path);
+            let helper_bin = configured_uinput_helper_bin_path();
+            let child = Command::new(&helper_bin).spawn().map_err(|error| {
+                FriendlyInsertRunError::Access(format!(
+                    "failed to launch Pepper X uinput helper {}: {error}",
+                    helper_bin.display()
+                ))
+            })?;
+            *slot = Some(child);
+        }
+    }
 
     let deadline = std::time::Instant::now() + UINPUT_HELPER_STARTUP_TIMEOUT;
     loop {
@@ -3007,6 +3036,75 @@ mod app_shell {
         );
 
         set_or_remove_env_var("PEPPERX_UINPUT_HELPER_BIN", previous_helper_bin);
+    }
+
+    #[test]
+    fn uinput_helper_connects_open_socket_without_spawn() {
+        let _guard = lock_env();
+        let previous_helper_bin = std::env::var_os("PEPPERX_UINPUT_HELPER_BIN");
+        std::env::set_var(
+            "PEPPERX_UINPUT_HELPER_BIN",
+            "/no/such/pepperx-uinput-helper",
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "pepper-x-uinput-sock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("helper.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let accepted = std::thread::spawn(move || listener.accept());
+
+        let connected = connect_or_spawn_uinput_helper(&socket_path);
+        set_or_remove_env_var("PEPPERX_UINPUT_HELPER_BIN", previous_helper_bin);
+        let stream = connected.expect("open socket connects without spawning a helper");
+        drop(stream);
+        accepted
+            .join()
+            .expect("accept thread")
+            .expect("accept connection");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uinput_helper_reaps_dead_child_and_keeps_a_live_one() {
+        let mut live = Some(Command::new("sleep").arg("30").spawn().expect("sleep"));
+        let live_id = live.as_ref().expect("child").id();
+        assert!(!uinput_helper_should_spawn(&mut live).expect("try_wait"));
+        assert_eq!(live.as_ref().expect("still held").id(), live_id);
+
+        live.as_mut().expect("child").kill().expect("kill sleep");
+        let mut reaped = false;
+        for _ in 0..50 {
+            if uinput_helper_should_spawn(&mut live).expect("try_wait") {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(child) = live.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(reaped, "dead helper is reaped so a new one can spawn");
+        assert!(live.is_none());
+
+        let mut finished = Some(Command::new("true").spawn().expect("true"));
+        let mut exited = false;
+        for _ in 0..50 {
+            if uinput_helper_should_spawn(&mut finished).expect("try_wait") {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(exited, "exited helper is reaped");
+        assert!(finished.is_none());
     }
 
     #[test]
