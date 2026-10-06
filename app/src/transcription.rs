@@ -2078,7 +2078,7 @@ mod app_shell {
 
     #[test]
     fn model_status_cleanup_model_env_override_takes_precedence_over_settings() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let override_path = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-override-{}-{}.gguf",
             std::process::id(),
@@ -2119,7 +2119,7 @@ mod app_shell {
 
     #[test]
     fn rerun_explicit_asr_model_ignores_env_override_path() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let cache_root = std::env::temp_dir().join(format!(
             "pepper-x-rerun-asr-explicit-{}-{}",
             std::process::id(),
@@ -2152,7 +2152,7 @@ mod app_shell {
 
     #[test]
     fn rerun_explicit_cleanup_model_ignores_env_override_path() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let cache_root = std::env::temp_dir().join(format!(
             "pepper-x-rerun-cleanup-explicit-{}-{}",
             std::process::id(),
@@ -2231,7 +2231,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_context_capture_can_be_explicitly_disabled_for_headless_runs() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let previous = std::env::var_os(DISABLE_CONTEXT_CAPTURE_ENV);
         std::env::set_var(DISABLE_CONTEXT_CAPTURE_ENV, "1");
 
@@ -2246,7 +2246,7 @@ mod app_shell {
 
     #[test]
     fn app_shell_archives_friendly_insert_success_diagnostics() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-friendly-insert-success-{}-{}",
             std::process::id(),
@@ -2313,7 +2313,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_runtime_archives_cleaned_text_separately_from_raw_transcript() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-success-{}-{}",
             std::process::id(),
@@ -2371,7 +2371,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_runtime_falls_back_to_raw_transcript_when_model_is_unavailable() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-failure-{}-{}",
             std::process::id(),
@@ -2513,7 +2513,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_ocr_runtime_archives_used_ocr_flag_from_cleanup_result() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-ocr-{}-{}",
             std::process::id(),
@@ -2572,7 +2572,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_ocr_runtime_archives_supporting_context_artifacts() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-context-{}-{}",
             std::process::id(),
@@ -2636,7 +2636,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_corrections_runtime_does_not_rewrite_cleanup_output() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-corrections-preferred-{}-{}",
             std::process::id(),
@@ -2696,7 +2696,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_corrections_runtime_keeps_phrase_replacement_memory_out_of_current_output() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-corrections-replacements-{}-{}",
             std::process::id(),
@@ -2757,7 +2757,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_ocr_runtime_archives_used_ocr_flag_on_cleanup_failure() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-ocr-failure-{}-{}",
             std::process::id(),
@@ -2816,7 +2816,7 @@ mod app_shell {
 
     #[test]
     fn app_shell_archives_clipboard_insert_success_diagnostics() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-clipboard-insert-success-{}-{}",
             std::process::id(),
@@ -3183,7 +3183,7 @@ mod app_shell {
 
     #[test]
     fn app_shell_archives_friendly_insert_failure_diagnostics() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-friendly-insert-failure-{}-{}",
             std::process::id(),
@@ -3236,7 +3236,7 @@ mod app_shell {
 
     #[test]
     fn app_shell_archives_selected_backend_failure_diagnostics() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-selected-backend-failure-{}-{}",
             std::process::id(),
@@ -3300,7 +3300,7 @@ mod app_shell {
 
     #[test]
     fn app_shell_archives_unsupported_target_failure_application_name() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-unsupported-target-failure-{}-{}",
             std::process::id(),
@@ -3358,7 +3358,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_insert_runtime_uses_cleaned_text_for_friendly_insertion() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-insert-success-{}-{}",
             std::process::id(),
@@ -3442,7 +3442,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_insert_runtime_returns_insertion_error_after_archiving_entry() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-insert-failure-{}-{}",
             std::process::id(),
@@ -3525,7 +3525,7 @@ mod app_shell {
                 libatspi aborts the whole test binary (SIGTRAP). Run manually inside a \
                 GNOME session with --ignored."]
     fn cleanup_insert_runtime_skips_cleanup_when_settings_disable_it() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-disabled-{}-{}",
             std::process::id(),
@@ -3590,7 +3590,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_insert_runtime_archives_live_transcription_failures_for_retry() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-live-cleanup-insert-transcription-failure-{}-{}",
             std::process::id(),
@@ -3636,6 +3636,13 @@ mod app_shell {
             .next()
             .expect("expected archived run");
 
+        match previous_state_root {
+            Some(previous_state_root) => {
+                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
+            }
+            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
+        }
+
         assert!(matches!(
             error,
             TranscriptionRunError::Asr(TranscriptionError::DecodeFailed(_))
@@ -3654,7 +3661,7 @@ mod app_shell {
             .with_failure(
                 "transcription",
                 format!(
-                    "Pepper X transcription failed: failed to decode {}",
+                    "Pepper X transcription failed: failed to transcribe {}",
                     source_wav_path.display()
                 ),
             )
@@ -3664,18 +3671,12 @@ mod app_shell {
             Some(archived.run_dir.join("source.wav").as_path())
         );
 
-        match previous_state_root {
-            Some(previous_state_root) => {
-                std::env::set_var("PEPPERX_STATE_ROOT", previous_state_root)
-            }
-            None => std::env::remove_var("PEPPERX_STATE_ROOT"),
-        }
         let _ = std::fs::remove_dir_all(state_root);
     }
 
     #[test]
     fn cleanup_insert_runtime_archives_live_runtime_metadata_for_recorded_runs() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-live-runtime-metadata-success-{}-{}",
             std::process::id(),
@@ -3761,7 +3762,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_insert_runtime_archives_live_browser_targets_honestly() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-live-browser-target-{}-{}",
             std::process::id(),
@@ -3857,7 +3858,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_insert_runtime_archives_live_terminal_fallback_honestly() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-live-terminal-target-{}-{}",
             std::process::id(),
@@ -3953,7 +3954,7 @@ mod app_shell {
 
     #[test]
     fn cleanup_insert_runtime_archives_live_runtime_metadata_on_insertion_failure() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-live-runtime-metadata-insert-failure-{}-{}",
             std::process::id(),
@@ -4029,7 +4030,7 @@ mod app_shell {
 
     #[test]
     fn post_paste_learning_persists_prompt_memory_for_future_cleanup() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-post-paste-learning-success-{}-{}",
             std::process::id(),
@@ -4117,7 +4118,7 @@ mod app_shell {
 
     #[test]
     fn post_paste_learning_rejects_failed_insertions() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-post-paste-learning-failed-insert-{}-{}",
             std::process::id(),
@@ -4177,7 +4178,7 @@ mod app_shell {
 
     #[test]
     fn post_paste_learning_rejects_destructive_prompt_memory_updates() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-post-paste-learning-destructive-{}-{}",
             std::process::id(),
@@ -4240,7 +4241,7 @@ mod app_shell {
 
     #[test]
     fn rerun_archived_run_uses_archived_wav_and_override_models_and_prompt() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-rerun-archived-run-{}-{}",
             std::process::id(),
@@ -4374,7 +4375,7 @@ mod app_shell {
 
     #[test]
     fn rerun_archived_run_skips_cleanup_when_request_disables_it() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-rerun-skip-cleanup-{}-{}",
             std::process::id(),
@@ -4464,7 +4465,7 @@ mod app_shell {
 
     #[test]
     fn rerun_archived_run_uses_current_cleanup_defaults_when_enabled_without_overrides() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-rerun-default-cleanup-{}-{}",
             std::process::id(),
@@ -4573,7 +4574,7 @@ mod app_shell {
 
     #[test]
     fn rerun_archived_cleanup_reruns_cleanup_only_with_existing_transcript() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-rerun-cleanup-{}-{}",
             std::process::id(),
@@ -4685,7 +4686,7 @@ mod app_shell {
 
     #[test]
     fn rerun_archived_cleanup_on_rerun_links_back_to_original_parent() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let state_root = std::env::temp_dir().join(format!(
             "pepper-x-cleanup-rerun-parent-{}-{}",
             std::process::id(),
