@@ -6,6 +6,7 @@ use pepperx_models::{supported_models, ModelKind};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::history_store::{ArchivedRun, HistoryStore};
 use crate::settings::AppSettings;
@@ -23,8 +24,20 @@ pub(crate) enum HistoryListMode {
 /// Callback that reruns an archived run (run id, ASR model id).
 pub(crate) type RerunArchivedRunFn = Rc<dyn Fn(String, String) -> Option<TranscriptEntry>>;
 /// Callback that reruns cleanup for an archived run (run id, cleanup model id, custom prompt).
+/// `Arc` so the history view can call it off the GTK thread.
 pub(crate) type RerunCleanupFn =
-    Rc<dyn Fn(String, String, Option<String>) -> Option<TranscriptEntry>>;
+    Arc<dyn Fn(String, String, Option<String>) -> Option<TranscriptEntry> + Send + Sync>;
+
+/// Worker entry for the history "Run cleanup" click.
+/// Profile and errors stay inside `rerun_cleanup`; this only forwards the view's prompt.
+pub(crate) fn invoke_cleanup_rerun(
+    rerun_cleanup: &RerunCleanupFn,
+    run_id: String,
+    cleanup_model_id: String,
+    custom_prompt: Option<String>,
+) -> Option<TranscriptEntry> {
+    rerun_cleanup(run_id, cleanup_model_id, custom_prompt)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HistoryBrowserModel {
@@ -535,10 +548,10 @@ pub(crate) fn build_history_browser(
         rerun_button.set_sensitive(false);
     }
 
-    // Rerun cleanup button
-    // The click handler runs the cleanup rerun itself on a worker thread; the
-    // callback only signals that cleanup reruns are enabled for this view.
-    if rerun_cleanup.is_some() {
+    // Rerun cleanup button.
+    // Llama stays off the GTK thread. The worker calls `rerun_cleanup`, which
+    // loads the prompt profile from settings and reports errors on stderr.
+    if let Some(rerun_cleanup) = rerun_cleanup {
         rerun_cleanup_button.set_sensitive(model.borrow().cleanup_rerunnable_run_id().is_some());
         {
             let model = model.clone();
@@ -549,6 +562,7 @@ pub(crate) fn build_history_browser(
             let rerun_cleaned_card_label = rerun_cleaned_card.1.clone();
             let original_cleaned_label = original_cleaned_card.1.clone();
             let cleanup_timing_label = cleanup_timing_label.clone();
+            let rerun_cleanup = Arc::clone(&rerun_cleanup);
             rerun_cleanup_button.connect_clicked(move |button| {
                 let run_id = {
                     let model = model.borrow();
@@ -580,19 +594,16 @@ pub(crate) fn build_history_browser(
                 let button = button.clone();
                 let rerun_cleaned_card_frame = rerun_cleaned_card_frame.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
+                let rerun_cleanup = Arc::clone(&rerun_cleanup);
                 std::thread::Builder::new()
                     .name("pepperx-cleanup-rerun".into())
                     .spawn(move || {
-                        use crate::transcription::{
-                            experiment_rerun_archived_cleanup, ArchivedCleanupRerunRequest,
-                        };
-                        let request = ArchivedCleanupRerunRequest {
+                        let result = invoke_cleanup_rerun(
+                            &rerun_cleanup,
                             run_id,
-                            cleanup_model_id: Some(cleanup_model_id),
-                            cleanup_prompt_profile: None,
-                            custom_prompt_text: custom_prompt,
-                        };
-                        let result = experiment_rerun_archived_cleanup(request).ok();
+                            cleanup_model_id,
+                            custom_prompt,
+                        );
                         let _ = tx.send(result);
                     })
                     .expect("failed to spawn cleanup rerun thread");
@@ -2284,6 +2295,39 @@ mod history_view_tests {
 
         assert!(model.select_run("run-parent"));
         assert_eq!(model.cleanup_rerunnable_run_id(), Some("run-parent"));
+    }
+
+    #[test]
+    fn history_view_cleanup_click_uses_callback_profile_and_error() {
+        let settings = crate::settings::AppSettings {
+            cleanup_prompt_profile: "literal-dictation".into(),
+            ..Default::default()
+        };
+        let callback: RerunCleanupFn = Arc::new(move |run_id, cleanup_model_id, custom_prompt| {
+            let request = crate::app::cleanup_rerun_request_from_settings(
+                &settings,
+                run_id,
+                cleanup_model_id,
+                custom_prompt,
+            );
+            assert_eq!(
+                request.cleanup_prompt_profile.as_deref(),
+                Some("literal-dictation")
+            );
+            assert_eq!(
+                request.custom_prompt_text.as_deref(),
+                Some("keep my wording")
+            );
+            crate::app::cleanup_rerun_entry_or_log(Err::<TranscriptEntry, &str>("cleanup failed"))
+        });
+
+        let entry = invoke_cleanup_rerun(
+            &callback,
+            "run-1".into(),
+            "qwen".into(),
+            Some("keep my wording".into()),
+        );
+        assert!(entry.is_none());
     }
 
     #[test]

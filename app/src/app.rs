@@ -9,6 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::io;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app_model::{initial_surface, AppModel, InitialSurface};
@@ -27,6 +28,32 @@ use crate::transcription::{
 use crate::window::{diagnostics_summary_text, MainWindow};
 
 pub const APPLICATION_ID: &str = "com.obra.PepperX";
+
+pub(crate) fn cleanup_rerun_request_from_settings(
+    settings: &AppSettings,
+    run_id: String,
+    cleanup_model_id: String,
+    custom_prompt: Option<String>,
+) -> ArchivedCleanupRerunRequest {
+    ArchivedCleanupRerunRequest {
+        run_id,
+        cleanup_model_id: Some(cleanup_model_id),
+        cleanup_prompt_profile: Some(settings.cleanup_prompt_profile.clone()),
+        custom_prompt_text: custom_prompt,
+    }
+}
+
+pub(crate) fn cleanup_rerun_entry_or_log<E: std::fmt::Display>(
+    result: Result<crate::transcript_log::TranscriptEntry, E>,
+) -> Option<crate::transcript_log::TranscriptEntry> {
+    match result {
+        Ok(entry) => Some(entry),
+        Err(error) => {
+            eprintln!("[Pepper X] failed to rerun cleanup: {error}");
+            None
+        }
+    }
+}
 
 pub fn build_application() -> adw::Application {
     adw::Application::builder()
@@ -157,23 +184,16 @@ pub fn run() {
                 }
             }
         })),
-        Some(Rc::new(
+        Some(Arc::new(
             move |run_id, cleanup_model_id: String, custom_prompt: Option<String>| {
                 let settings = AppSettings::load_or_default();
-                let request = ArchivedCleanupRerunRequest {
+                let request = cleanup_rerun_request_from_settings(
+                    &settings,
                     run_id,
-                    cleanup_model_id: Some(cleanup_model_id),
-                    cleanup_prompt_profile: Some(settings.cleanup_prompt_profile.clone()),
-                    custom_prompt_text: custom_prompt,
-                };
-
-                match experiment_rerun_archived_cleanup(request) {
-                    Ok(entry) => Some(entry),
-                    Err(error) => {
-                        eprintln!("[Pepper X] failed to rerun cleanup: {error}");
-                        None
-                    }
-                }
+                    cleanup_model_id,
+                    custom_prompt,
+                );
+                cleanup_rerun_entry_or_log(experiment_rerun_archived_cleanup(request))
             },
         )),
         Some(Rc::new(|wav_path| {
