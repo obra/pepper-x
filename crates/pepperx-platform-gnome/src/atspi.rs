@@ -1,23 +1,15 @@
 use crate::service::PepperXService;
-use gtk::prelude::*;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::Mutex;
-use std::time::Duration;
 
 const CONTROL_LEFT_KEYSYM: u32 = 65_507;
 const CONTROL_RIGHT_KEYSYM: u32 = 65_508;
-// The clipboard-paste backend is retired (UinputText is preferred, see
-// `backend_matches_target`) but kept, with its tests, so it can be revived.
-// Its pieces are marked `allow(dead_code)` instead of being deleted.
-#[allow(dead_code)]
-const V_KEYSYM: u32 = b'v' as u32;
-#[allow(dead_code)]
-const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(75);
 
 pub const FRIENDLY_INSERT_BACKEND_NAME: &str = "atspi-editable-text";
 pub const STRING_INJECTION_BACKEND_NAME: &str = "atspi-key-string";
+/// Name of the removed clipboard-paste backend. Kept so archived runs that used it still match.
 pub const CLIPBOARD_PASTE_BACKEND_NAME: &str = "clipboard-paste";
 pub const UINPUT_TEXT_BACKEND_NAME: &str = "uinput-text";
 
@@ -76,8 +68,6 @@ pub fn modifier_capture_probe(modifier_capture_supported: bool) -> RecoveryProbe
 enum FriendlyInsertBackend {
     EditableText,
     StringInjection,
-    #[allow(dead_code)] // retired clipboard-paste backend, never selected
-    ClipboardPaste,
     UinputText,
 }
 
@@ -86,7 +76,6 @@ impl FriendlyInsertBackend {
         match self {
             Self::EditableText => FRIENDLY_INSERT_BACKEND_NAME,
             Self::StringInjection => STRING_INJECTION_BACKEND_NAME,
-            Self::ClipboardPaste => CLIPBOARD_PASTE_BACKEND_NAME,
             Self::UinputText => UINPUT_TEXT_BACKEND_NAME,
         }
     }
@@ -742,50 +731,6 @@ pub fn insert_text_into_friendly_target(
     }
 }
 
-#[allow(dead_code)] // retired clipboard-paste backend (exercised by tests)
-fn run_clipboard_paste_with_adapter<A: ClipboardPasteAdapter>(
-    text: &str,
-    selection: &FriendlyInsertSelection,
-    target_application_name: &str,
-    target_class: &'static str,
-    adapter: &mut A,
-) -> Result<FriendlyInsertOutcome, FriendlyInsertRunError> {
-    let snapshot = adapter.snapshot()?;
-    adapter.set_text(text)?;
-
-    let paste_result = adapter.paste();
-    let restore_result = adapter.restore(snapshot);
-
-    restore_result?;
-
-    paste_result?;
-
-    Ok(FriendlyInsertOutcome {
-        selection: selection.clone(),
-        target_application_name: target_application_name.into(),
-        target_class: target_class.into(),
-        caret_offset: -1,
-        before_text: String::new(),
-        after_text: String::new(),
-    })
-}
-
-#[allow(dead_code)] // retired clipboard-paste backend
-fn clipboard_paste_adapter() -> Result<GdkClipboardPasteAdapter, FriendlyInsertRunError> {
-    // GTK must be initialized on the main thread. If it's already initialized
-    // (by the application), we can safely access the default display from any
-    // thread. If not, we cannot initialize it here from a worker thread.
-    let display = gtk::gdk::Display::default().ok_or_else(|| {
-        FriendlyInsertRunError::Access(
-            "GTK clipboard mediation requires a live default display".into(),
-        )
-    })?;
-
-    Ok(GdkClipboardPasteAdapter {
-        clipboard: display.clipboard(),
-    })
-}
-
 fn control_bit(keysym: u32) -> Option<u8> {
     match keysym {
         CONTROL_LEFT_KEYSYM => Some(0b01),
@@ -831,10 +776,6 @@ fn backend_matches_target(
         }
         FriendlyInsertBackend::StringInjection => {
             target_class == FriendlyInsertTargetClass::Terminal && target.supports_text
-        }
-        FriendlyInsertBackend::ClipboardPaste => {
-            // Clipboard paste is no longer used; prefer UinputText instead.
-            false
         }
         FriendlyInsertBackend::UinputText => true,
     }
@@ -885,7 +826,7 @@ fn ensure_runtime_supported_backend(
 ) -> Result<(), FriendlyInsertRunError> {
     if matches!(
         selection.backend_name,
-        FRIENDLY_INSERT_BACKEND_NAME | STRING_INJECTION_BACKEND_NAME | CLIPBOARD_PASTE_BACKEND_NAME
+        FRIENDLY_INSERT_BACKEND_NAME | STRING_INJECTION_BACKEND_NAME
     ) {
         return Ok(());
     }
@@ -908,56 +849,6 @@ struct FocusedFriendlyTarget {
     editable_text: Option<OwnedGObject<ffi::AtspiEditableText>>,
     before_text: Option<String>,
     caret_offset: Option<i32>,
-}
-
-#[allow(dead_code)] // retired clipboard-paste backend
-trait ClipboardPasteAdapter {
-    type Snapshot;
-
-    fn snapshot(&mut self) -> Result<Option<Self::Snapshot>, FriendlyInsertRunError>;
-    fn set_text(&mut self, text: &str) -> Result<(), FriendlyInsertRunError>;
-    fn paste(&mut self) -> Result<(), FriendlyInsertRunError>;
-    fn restore(&mut self, snapshot: Option<Self::Snapshot>) -> Result<(), FriendlyInsertRunError>;
-}
-
-#[allow(dead_code)] // retired clipboard-paste backend
-struct GdkClipboardPasteAdapter {
-    clipboard: gtk::gdk::Clipboard,
-}
-
-impl ClipboardPasteAdapter for GdkClipboardPasteAdapter {
-    type Snapshot = gtk::gdk::ContentProvider;
-
-    fn snapshot(&mut self) -> Result<Option<Self::Snapshot>, FriendlyInsertRunError> {
-        Ok(self.clipboard.content())
-    }
-
-    fn set_text(&mut self, text: &str) -> Result<(), FriendlyInsertRunError> {
-        self.clipboard.set_text(text);
-        Ok(())
-    }
-
-    fn paste(&mut self) -> Result<(), FriendlyInsertRunError> {
-        unsafe {
-            generate_keyboard_key_press(CONTROL_LEFT_KEYSYM.into())?;
-            generate_keyboard_key_press_release(V_KEYSYM.into())?;
-            generate_keyboard_key_release(CONTROL_LEFT_KEYSYM.into())?;
-        }
-
-        // Let the focused target request clipboard contents before restoring ownership.
-        std::thread::sleep(CLIPBOARD_RESTORE_DELAY);
-        Ok(())
-    }
-
-    fn restore(&mut self, snapshot: Option<Self::Snapshot>) -> Result<(), FriendlyInsertRunError> {
-        self.clipboard
-            .set_content(snapshot.as_ref())
-            .map_err(|error| {
-                FriendlyInsertRunError::Access(format!(
-                    "failed to restore clipboard contents: {error}"
-                ))
-            })
-    }
 }
 
 struct OwnedGObject<T> {
@@ -1010,10 +901,7 @@ fn focused_friendly_target(
         ))
     })?;
     ensure_runtime_supported_backend(&selection, &snapshot.application_name)?;
-    if matches!(
-        selection.backend_name,
-        STRING_INJECTION_BACKEND_NAME | CLIPBOARD_PASTE_BACKEND_NAME
-    ) {
+    if selection.backend_name == STRING_INJECTION_BACKEND_NAME {
         return Ok(FocusedFriendlyTarget {
             selection,
             application_name: snapshot.application_name,
@@ -1384,27 +1272,6 @@ unsafe fn generate_keyboard_string(text: *const c_char) -> Result<(), FriendlyIn
     generate_keyboard_event(0, text, ffi::ATSPI_KEY_STRING)
 }
 
-#[allow(dead_code)] // only used by the retired clipboard-paste backend
-unsafe fn generate_keyboard_key_press(
-    keyval: glib::ffi::glong,
-) -> Result<(), FriendlyInsertRunError> {
-    generate_keyboard_event(keyval, std::ptr::null(), ffi::ATSPI_KEY_PRESS)
-}
-
-#[allow(dead_code)] // only used by the retired clipboard-paste backend
-unsafe fn generate_keyboard_key_release(
-    keyval: glib::ffi::glong,
-) -> Result<(), FriendlyInsertRunError> {
-    generate_keyboard_event(keyval, std::ptr::null(), ffi::ATSPI_KEY_RELEASE)
-}
-
-#[allow(dead_code)] // only used by the retired clipboard-paste backend
-unsafe fn generate_keyboard_key_press_release(
-    keyval: glib::ffi::glong,
-) -> Result<(), FriendlyInsertRunError> {
-    generate_keyboard_event(keyval, std::ptr::null(), ffi::ATSPI_KEY_PRESSRELEASE)
-}
-
 unsafe fn generate_keyboard_event(
     keyval: glib::ffi::glong,
     keystring: *const c_char,
@@ -1494,12 +1361,6 @@ mod ffi {
 
     pub const ATSPI_STATE_EDITABLE: AtspiStateType = 7;
     pub const ATSPI_STATE_FOCUSED: AtspiStateType = 12;
-    #[allow(dead_code)]
-    pub const ATSPI_KEY_PRESS: AtspiKeySynthType = 0;
-    #[allow(dead_code)]
-    pub const ATSPI_KEY_RELEASE: AtspiKeySynthType = 1;
-    #[allow(dead_code)]
-    pub const ATSPI_KEY_PRESSRELEASE: AtspiKeySynthType = 2;
     pub const ATSPI_KEY_STRING: AtspiKeySynthType = 4;
 
     #[link(name = "atspi")]
@@ -2006,59 +1867,6 @@ mod focused_target_snapshot {
 mod accessible_insert_runtime_helpers {
     use super::*;
 
-    #[derive(Debug, Default)]
-    struct FakeClipboardPasteAdapter {
-        current_text: Option<String>,
-        calls: Vec<String>,
-    }
-
-    impl FakeClipboardPasteAdapter {
-        fn with_text(text: &str) -> Self {
-            Self {
-                current_text: Some(text.into()),
-                calls: Vec::new(),
-            }
-        }
-    }
-
-    impl ClipboardPasteAdapter for FakeClipboardPasteAdapter {
-        type Snapshot = String;
-
-        fn snapshot(&mut self) -> Result<Option<Self::Snapshot>, FriendlyInsertRunError> {
-            self.calls.push("snapshot".into());
-            Ok(self.current_text.clone())
-        }
-
-        fn set_text(&mut self, text: &str) -> Result<(), FriendlyInsertRunError> {
-            self.calls.push(format!("set_text:{text}"));
-            self.current_text = Some(text.into());
-            Ok(())
-        }
-
-        fn paste(&mut self) -> Result<(), FriendlyInsertRunError> {
-            self.calls.push("paste".into());
-            Ok(())
-        }
-
-        fn restore(
-            &mut self,
-            snapshot: Option<Self::Snapshot>,
-        ) -> Result<(), FriendlyInsertRunError> {
-            match snapshot {
-                Some(snapshot) => {
-                    self.calls.push(format!("restore:{snapshot}"));
-                    self.current_text = Some(snapshot);
-                }
-                None => {
-                    self.calls.push("restore:none".into());
-                    self.current_text = None;
-                }
-            }
-
-            Ok(())
-        }
-    }
-
     #[test]
     fn accessible_insert_runtime_helpers_map_text_editor_executable() {
         assert_eq!(
@@ -2116,60 +1924,6 @@ mod accessible_insert_runtime_helpers {
         assert_eq!(
             apply_insert_at_char_offset("ab🙂d", "X", 3),
             Some("ab🙂Xd".into())
-        );
-    }
-
-    #[test]
-    fn clipboard_insert_accepts_selected_backend() {
-        ensure_runtime_supported_backend(
-            &FriendlyInsertSelection {
-                backend_name: CLIPBOARD_PASTE_BACKEND_NAME,
-                target_application_id: "firefox".into(),
-                target_class: "browser-textarea",
-                attempted_backends: vec![
-                    FRIENDLY_INSERT_BACKEND_NAME,
-                    CLIPBOARD_PASTE_BACKEND_NAME,
-                ],
-            },
-            "Firefox",
-        )
-        .expect("clipboard backend should be supported");
-    }
-
-    #[test]
-    fn clipboard_insert_restores_previous_clipboard_text_after_paste() {
-        let mut adapter = FakeClipboardPasteAdapter::with_text("original clipboard");
-
-        let outcome = run_clipboard_paste_with_adapter(
-            "pepper x transcript",
-            &FriendlyInsertSelection {
-                backend_name: CLIPBOARD_PASTE_BACKEND_NAME,
-                target_application_id: "firefox".into(),
-                target_class: "browser-textarea",
-                attempted_backends: vec![
-                    FRIENDLY_INSERT_BACKEND_NAME,
-                    CLIPBOARD_PASTE_BACKEND_NAME,
-                ],
-            },
-            "Firefox",
-            "browser-textarea",
-            &mut adapter,
-        )
-        .expect("clipboard paste should succeed");
-
-        assert_eq!(outcome.selection.backend_name, CLIPBOARD_PASTE_BACKEND_NAME);
-        assert_eq!(outcome.target_application_name, "Firefox");
-        assert_eq!(outcome.target_class, "browser-textarea");
-        assert_eq!(outcome.caret_offset, -1);
-        assert_eq!(adapter.current_text.as_deref(), Some("original clipboard"));
-        assert_eq!(
-            adapter.calls,
-            vec![
-                "snapshot".to_string(),
-                "set_text:pepper x transcript".to_string(),
-                "paste".to_string(),
-                "restore:original clipboard".to_string(),
-            ]
         );
     }
 }

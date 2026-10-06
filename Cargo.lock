@@ -2044,7 +2044,6 @@ name = "pepperx-platform-gnome"
 version = "0.1.0"
 dependencies = [
  "glib",
- "gtk4",
  "libc",
  "pepperx-ipc",
  "pepperx-session",
