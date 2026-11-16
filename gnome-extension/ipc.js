@@ -74,6 +74,15 @@ export class PepperXClient {
 }
 
 export function createPepperXClient(connection = Gio.DBus.session) {
-    const proxy = new PepperXProxy(connection, SERVICE_NAME, OBJECT_PATH);
+    // Do not auto-start the well-known name. The extension watches the name
+    // and only builds this proxy while com.obra.PepperX.Service is owned.
+    const proxy = new PepperXProxy(
+        connection,
+        SERVICE_NAME,
+        OBJECT_PATH,
+        null,
+        null,
+        Gio.DBusProxyFlags.DO_NOT_AUTO_START | Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES
+    );
     return new PepperXClient(proxy);
 }

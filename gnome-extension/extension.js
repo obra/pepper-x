@@ -9,7 +9,7 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {createPepperXClient} from './ipc.js';
+import {createPepperXClient, SERVICE_NAME} from './ipc.js';
 
 // D-Bus interface for screenshot service (called by the app)
 const SCREENSHOT_SERVICE_XML = `<node>
@@ -25,6 +25,7 @@ const LOG_PREFIX = '[Pepper X]';
 const STATUS_LABEL_PREFIX = 'Status';
 const SETTINGS_ACTION_LABEL = 'Open Pepper X Settings';
 const HISTORY_ACTION_LABEL = 'Open Pepper X History';
+// Live status while the service name is owned. No polling when it is absent.
 const STATUS_POLL_INTERVAL_MS = 500;
 
 const ICON_READY = 'audio-input-microphone-symbolic';
@@ -98,7 +99,9 @@ class PepperXIndicator extends PanelMenu.Button {
 
 export default class PepperXExtension extends Extension {
     enable() {
-        this._client = createPepperXClient();
+        this._client = null;
+        this._serviceOwned = false;
+        this._disconnectLogged = false;
         this._indicator = new PepperXIndicator(
             () => this.showSettings(),
             () => this.showHistory()
@@ -106,22 +109,55 @@ export default class PepperXExtension extends Extension {
 
         Main.panel.addToStatusArea(this.uuid, this._indicator);
         this._createStatusPill();
-        this._bootstrapConnection();
-        this._startStatusPolling();
+        this._setDisconnectedState();
+        this._watchId = Gio.bus_watch_name(
+            Gio.BusType.SESSION,
+            SERVICE_NAME,
+            Gio.BusNameWatcherFlags.NONE,
+            () => this._onServiceAppeared(),
+            () => this._onServiceVanished()
+        );
         this._startScreenshotService();
     }
 
     disable() {
         this._destroyStatusPill();
         this._stopScreenshotService();
-        if (this._statusPollId) {
-            GLib.source_remove(this._statusPollId);
-            this._statusPollId = 0;
+        this._stopStatusPolling();
+        if (this._watchId) {
+            Gio.bus_unwatch_name(this._watchId);
+            this._watchId = 0;
         }
         this._indicator?.destroy();
         this._indicator = null;
         this._client = null;
         this._capabilities = null;
+        this._serviceOwned = false;
+    }
+
+    _onServiceAppeared() {
+        if (!this._indicator)
+            return;
+        this._serviceOwned = true;
+        this._disconnectLogged = false;
+        this._client = createPepperXClient();
+        this._bootstrapConnection();
+        this._startStatusPolling();
+    }
+
+    _onServiceVanished() {
+        if (!this._indicator)
+            return;
+        const wasOwned = this._serviceOwned || this._client;
+        this._serviceOwned = false;
+        this._stopStatusPolling();
+        this._client = null;
+        this._capabilities = null;
+        this._setDisconnectedState();
+        if (wasOwned && !this._disconnectLogged) {
+            console.log(`${LOG_PREFIX} service name ${SERVICE_NAME} is gone`);
+            this._disconnectLogged = true;
+        }
     }
 
     _createStatusPill() {
@@ -267,24 +303,32 @@ export default class PepperXExtension extends Extension {
     }
 
     _bootstrapConnection() {
+        if (!this._client)
+            return;
         try {
             const reply = this._client.ping();
             if (reply !== 'pong') {
                 this._indicator?.setStatus('Degraded');
-                console.error(`${LOG_PREFIX} Unexpected Ping response: ${reply}`);
+                console.log(`${LOG_PREFIX} unexpected Ping response: ${reply}`);
             }
 
             this._capabilities = this._client.getCapabilities();
             this._refreshIndicatorState();
-            console.log(`${LOG_PREFIX} capabilities`, this._capabilities);
+            console.log(`${LOG_PREFIX} connected`);
         } catch (error) {
             this._capabilities = null;
+            this._client = null;
             this._setDisconnectedState();
-            console.error(`${LOG_PREFIX} Failed to reach Pepper X app service`, error);
+            if (!this._disconnectLogged) {
+                console.log(`${LOG_PREFIX} service owned but Ping failed`);
+                this._disconnectLogged = true;
+            }
         }
     }
 
     _startStatusPolling() {
+        if (this._statusPollId)
+            return;
         this._statusPollId = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT,
             STATUS_POLL_INTERVAL_MS,
@@ -295,17 +339,16 @@ export default class PepperXExtension extends Extension {
         );
     }
 
-    _refreshIndicatorState() {
-        if (!this._client) {
-            // Retry connection with a fresh proxy
-            try {
-                this._client = createPepperXClient();
-                this._bootstrapConnection();
-            } catch (error) {
-                this._setDisconnectedState();
-                return;
-            }
+    _stopStatusPolling() {
+        if (this._statusPollId) {
+            GLib.source_remove(this._statusPollId);
+            this._statusPollId = 0;
         }
+    }
+
+    _refreshIndicatorState() {
+        if (!this._serviceOwned || !this._client)
+            return;
 
         try {
             if (!this._capabilities)
@@ -318,8 +361,12 @@ export default class PepperXExtension extends Extension {
         } catch (error) {
             this._capabilities = null;
             this._client = null;
+            this._stopStatusPolling();
             this._setDisconnectedState();
-            console.error(`${LOG_PREFIX} Failed to refresh Pepper X status`, error);
+            if (!this._disconnectLogged) {
+                console.log(`${LOG_PREFIX} status call failed; waiting for the name owner`);
+                this._disconnectLogged = true;
+            }
         }
     }
 
