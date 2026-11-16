@@ -618,6 +618,53 @@ fn is_keyboard_device(file: &File) -> bool {
 // Main capture loop
 // ---------------------------------------------------------------------------
 
+/// Bytes read from one evdev fd, and whether that fd must leave the epoll set.
+struct CapturedRead {
+    byte_count: usize,
+    drop_device: bool,
+}
+
+/// Level-triggered epoll keeps reporting `EPOLLHUP` / `EPOLLERR`. A disconnected
+/// keyboard must be removed or `epoll_wait` returns immediately forever.
+fn classify_device_read(epoll_events: u32, read: io::Result<usize>) -> CapturedRead {
+    let dead = (epoll_events & (libc::EPOLLHUP | libc::EPOLLERR) as u32) != 0;
+    match read {
+        Ok(0) => CapturedRead {
+            byte_count: 0,
+            drop_device: true,
+        },
+        Ok(byte_count) => CapturedRead {
+            byte_count,
+            drop_device: dead,
+        },
+        Err(error)
+            if error.kind() == io::ErrorKind::WouldBlock
+                || error.kind() == io::ErrorKind::Interrupted =>
+        {
+            CapturedRead {
+                byte_count: 0,
+                drop_device: dead,
+            }
+        }
+        Err(_) => CapturedRead {
+            byte_count: 0,
+            drop_device: true,
+        },
+    }
+}
+
+fn set_nonblocking(file: &File) -> io::Result<()> {
+    let fd = file.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn run_capture_loop(
     device_paths: &[PathBuf],
     stop: &AtomicBool,
@@ -631,7 +678,7 @@ fn run_capture_loop(
         return Err(io::Error::last_os_error());
     }
 
-    let mut files: Vec<File> = Vec::new();
+    let mut files: Vec<Option<File>> = Vec::new();
     for path in device_paths {
         let file = match File::open(path) {
             Ok(f) => f,
@@ -640,6 +687,13 @@ fn run_capture_loop(
                 continue;
             }
         };
+        if let Err(e) = set_nonblocking(&file) {
+            eprintln!(
+                "[Pepper X] evdev: skipping {} (nonblocking): {e}",
+                path.display()
+            );
+            continue;
+        }
 
         let mut event = libc::epoll_event {
             events: libc::EPOLLIN as u32,
@@ -655,7 +709,7 @@ fn run_capture_loop(
                 continue;
             }
         }
-        files.push(file);
+        files.push(Some(file));
     }
 
     if files.is_empty() {
@@ -709,15 +763,21 @@ fn run_capture_loop(
             }
         }
 
+        let mut drop_device: Vec<usize> = Vec::new();
         for event in events.iter().take(nfds as usize) {
             let file_idx = event.u64 as usize;
-            let file = &files[file_idx];
-
-            let n = match (&*file).read(&mut buf) {
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(_) => continue,
+            let Some(file) = files.get_mut(file_idx).and_then(|slot| slot.as_mut()) else {
+                continue;
             };
+
+            let captured = classify_device_read(event.events, file.read(&mut buf));
+            if captured.drop_device {
+                drop_device.push(file_idx);
+            }
+            let n = captured.byte_count;
+            if n == 0 {
+                continue;
+            }
 
             let event_count = n / INPUT_EVENT_SIZE;
             for j in 0..event_count {
@@ -767,6 +827,29 @@ fn run_capture_loop(
                     None => {}
                 }
             }
+        }
+
+        drop_device.sort_unstable();
+        drop_device.dedup();
+        for file_idx in drop_device {
+            if let Some(file) = files.get_mut(file_idx).and_then(|slot| slot.take()) {
+                unsafe {
+                    libc::epoll_ctl(
+                        epoll_fd,
+                        libc::EPOLL_CTL_DEL,
+                        file.as_raw_fd(),
+                        std::ptr::null_mut(),
+                    );
+                }
+                eprintln!("[Pepper X] evdev: dropped closed keyboard fd {file_idx}");
+            }
+        }
+        if files.iter().all(|slot| slot.is_none()) {
+            unsafe { libc::close(epoll_fd) };
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "all keyboard devices closed",
+            ));
         }
     }
 
@@ -1139,5 +1222,37 @@ mod tests {
         assert_eq!(gdk_keyval_to_evdev(0xffeb), Some(KEY_LEFTMETA));
         assert_eq!(gdk_keyval_to_evdev(0x20), Some(KEY_SPACE));
         assert_eq!(gdk_keyval_to_evdev(0x41), None); // 'A' — not mapped
+    }
+
+    #[test]
+    fn disconnected_keyboard_is_removed_from_the_capture_set() {
+        let hangup = libc::EPOLLHUP as u32;
+        let error = libc::EPOLLERR as u32;
+        let readable = libc::EPOLLIN as u32;
+
+        let eof = classify_device_read(hangup, Ok(0));
+        assert!(eof.drop_device);
+        assert_eq!(eof.byte_count, 0);
+
+        let failed = classify_device_read(
+            error,
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "device")),
+        );
+        assert!(failed.drop_device);
+
+        let idle = classify_device_read(
+            readable,
+            Err(io::Error::new(io::ErrorKind::WouldBlock, "idle")),
+        );
+        assert!(!idle.drop_device);
+        assert_eq!(idle.byte_count, 0);
+
+        let last_events = classify_device_read(readable | hangup, Ok(INPUT_EVENT_SIZE));
+        assert!(last_events.drop_device);
+        assert_eq!(last_events.byte_count, INPUT_EVENT_SIZE);
+
+        let live = classify_device_read(readable, Ok(INPUT_EVENT_SIZE));
+        assert!(!live.drop_device);
+        assert_eq!(live.byte_count, INPUT_EVENT_SIZE);
     }
 }
