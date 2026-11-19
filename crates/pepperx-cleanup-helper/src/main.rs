@@ -1,4 +1,3 @@
-use pepperx_platform::gpu::get_gpu_info;
 use llama_cpp_4::context::params::LlamaContextParams;
 use llama_cpp_4::context::LlamaContext;
 use llama_cpp_4::llama_backend::LlamaBackend;
@@ -8,6 +7,7 @@ use llama_cpp_4::model::LlamaModel;
 use llama_cpp_4::model::{AddBos, Special};
 use llama_cpp_4::sampling::LlamaSampler;
 use llama_cpp_4::token::LlamaToken;
+use pepperx_platform::gpu::get_gpu_info;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;
@@ -164,7 +164,8 @@ fn load_model(
 
 impl ModelSlot {
     fn matches_request(&self, model_path: &PathBuf, use_gpu: bool, requested_layers: u32) -> bool {
-        self.mismatch_reason(model_path, use_gpu, requested_layers).is_none()
+        self.mismatch_reason(model_path, use_gpu, requested_layers)
+            .is_none()
     }
 
     fn mismatch_reason(
@@ -291,9 +292,7 @@ fn main() {
         std::process::id()
     );
 
-    let mut daemon = DaemonState {
-        model_slot: None,
-    };
+    let mut daemon = DaemonState { model_slot: None };
 
     let stdin = io::stdin().lock();
     for line in stdin.lines() {
@@ -457,6 +456,7 @@ fn new_context(
 // Prefill
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn handle_prefill(
     model: &'static LlamaModel,
     backend: &LlamaBackend,
@@ -559,12 +559,10 @@ fn handle_generate(
             (wc, 0)
         }
         // No context at all — create fresh (expensive, first call only).
-        (_, None) => {
-            match new_context(model, backend, n_threads, use_gpu, gpu_layers) {
-                Ok(c) => (c, 0),
-                Err(resp) => return resp,
-            }
-        }
+        (_, None) => match new_context(model, backend, n_threads, use_gpu, gpu_layers) {
+            Ok(c) => (c, 0),
+            Err(resp) => return resp,
+        },
     };
 
     // Decode only the suffix tokens (everything after the prefilled prefix).

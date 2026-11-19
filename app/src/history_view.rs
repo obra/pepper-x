@@ -1128,6 +1128,7 @@ pub(crate) fn build_history_browser(
     root
 }
 
+#[allow(clippy::too_many_arguments)] // one GTK widget per history pane
 fn rebuild_history_list_ui(
     model: &Rc<RefCell<HistoryBrowserModel>>,
     list_box: &gtk::ListBox,

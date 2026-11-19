@@ -408,7 +408,11 @@ mod cleanup_runtime {
         assert!(text.chars().count() > 2400);
 
         let chunks = chunk_transcript(&text, 2400);
-        assert!(chunks.len() >= 2, "expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "expected multiple chunks, got {}",
+            chunks.len()
+        );
         for chunk in &chunks {
             assert!(
                 chunk.chars().count() <= 2400,
@@ -435,5 +439,4 @@ mod cleanup_runtime {
             assert!(chunk.chars().count() <= 250);
         }
     }
-
 }

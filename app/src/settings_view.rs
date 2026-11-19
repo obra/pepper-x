@@ -283,8 +283,7 @@ impl SettingsView {
         cleanup_use_gpu_row.add_suffix(&cleanup_use_gpu_switch);
         cleanup_list.append(&list_box_row(&cleanup_use_gpu_row));
 
-        let cleanup_gpu_layers_adjustment =
-            gtk::Adjustment::new(0.0, 0.0, 999.0, 1.0, 10.0, 0.0);
+        let cleanup_gpu_layers_adjustment = gtk::Adjustment::new(0.0, 0.0, 999.0, 1.0, 10.0, 0.0);
         let cleanup_gpu_layers_spin = gtk::SpinButton::builder()
             .adjustment(&cleanup_gpu_layers_adjustment)
             .valign(Align::Center)
@@ -494,10 +493,8 @@ impl SettingsView {
             .iter()
             .map(|(_, label)| *label)
             .collect();
-        let asr_language_codes: Vec<&str> = ASR_LANGUAGE_OPTIONS
-            .iter()
-            .map(|(code, _)| *code)
-            .collect();
+        let asr_language_codes: Vec<&str> =
+            ASR_LANGUAGE_OPTIONS.iter().map(|(code, _)| *code).collect();
         let asr_language_list = gtk::StringList::new(&asr_language_labels);
         let asr_language_dropdown =
             gtk::DropDown::new(Some(asr_language_list), None::<gtk::Expression>);
@@ -1548,8 +1545,8 @@ pub fn settings_form_sections(surface_state: &SettingsSurfaceState) -> Vec<Setti
                 }),
                 SettingsControl::Slider(SettingsSliderControl {
                     title: "GPU layers".into(),
-                    subtitle:
-                        "0 uses automatic detection; higher values offload more layers".into(),
+                    subtitle: "0 uses automatic detection; higher values offload more layers"
+                        .into(),
                     value: surface_state.cleanup_gpu_layers,
                     enabled: surface_state.cleanup_enabled && surface_state.cleanup_use_gpu,
                     visible: surface_state.cleanup_use_gpu,
@@ -1623,8 +1620,9 @@ pub fn settings_form_sections(surface_state: &SettingsSurfaceState) -> Vec<Setti
                 }),
                 SettingsControl::Select(SettingsSelectControl {
                     title: "Transcription language".into(),
-                    subtitle: "Target language for multilingual Nemotron (ignored on English-only models)"
-                        .into(),
+                    subtitle:
+                        "Target language for multilingual Nemotron (ignored on English-only models)"
+                            .into(),
                     selected: resolve_asr_language(&surface_state.preferred_asr_language)
                         .to_string(),
                     options: ASR_LANGUAGE_OPTIONS

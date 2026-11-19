@@ -400,13 +400,13 @@ fn present_primary_surface(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // GTK widget wiring
 enum UiWake {
     Command(AppCommand),
     Status(pepperx_ipc::LiveStatus),
     ExtensionConnected(bool),
 }
 
+#[allow(clippy::too_many_arguments)] // GTK widget wiring
 fn install_command_pump(
     app: adw::Application,
     window: MainWindow,

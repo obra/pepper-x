@@ -166,9 +166,9 @@ impl LayoutSession {
         let mapper = build_char_mapper(&id.layout, &id.variant)?;
         if verbose_logging() {
             eprintln!(
-                        "[Pepper X uinput] active layout '{}' (source={source})",
-                        id.display()
-                    );
+                "[Pepper X uinput] active layout '{}' (source={source})",
+                id.display()
+            );
         }
         Ok(Self { id, mapper, source })
     }
@@ -181,10 +181,10 @@ impl LayoutSession {
         }
         if verbose_logging() {
             eprintln!(
-                        "[Pepper X uinput] layout switched '{}' → '{}' (source={source})",
-                        self.id.display(),
-                        id.display()
-                    );
+                "[Pepper X uinput] layout switched '{}' → '{}' (source={source})",
+                self.id.display(),
+                id.display()
+            );
         }
         let mapper = build_char_mapper(&id.layout, &id.variant)?;
         self.id = id;
@@ -231,9 +231,9 @@ fn detect_gnome_active_layout() -> Option<LayoutId> {
         if let Some(id) = first_xkb_entry(&entries) {
             if verbose_logging() {
                 eprintln!(
-                                "[Pepper X uinput] detected active layout from mru-sources: {}",
-                                id.display()
-                            );
+                    "[Pepper X uinput] detected active layout from mru-sources: {}",
+                    id.display()
+                );
             }
             return Some(id);
         }
@@ -250,10 +250,7 @@ fn detect_gnome_active_layout() -> Option<LayoutId> {
         .and_then(|s| parse_gsettings_uint32(&s))
         .unwrap_or(0) as usize;
 
-    let chosen = entries
-        .get(index)
-        .or_else(|| entries.first())
-        .cloned()?;
+    let chosen = entries.get(index).or_else(|| entries.first()).cloned()?;
 
     if chosen.0 != "xkb" {
         eprintln!(
@@ -267,9 +264,9 @@ fn detect_gnome_active_layout() -> Option<LayoutId> {
     let id = LayoutId::new(layout, variant);
     if verbose_logging() {
         eprintln!(
-                "[Pepper X uinput] detected active layout from sources[{index}]: {}",
-                id.display()
-            );
+            "[Pepper X uinput] detected active layout from sources[{index}]: {}",
+            id.display()
+        );
     }
     Some(id)
 }
@@ -857,10 +854,10 @@ fn type_text(device: &mut VirtualDevice, text: &str, mapper: &CharMapper) -> Res
             Ok(()) => {
                 if verbose_logging() {
                     eprintln!(
-                                        "[Pepper X uinput] pasted {} chars via clipboard ({} not on active layout)",
-                                        strokes.len(),
-                                        unmapped
-                                    );
+                        "[Pepper X uinput] pasted {} chars via clipboard ({} not on active layout)",
+                        strokes.len(),
+                        unmapped
+                    );
                 }
                 return Ok(());
             }
@@ -893,9 +890,9 @@ fn type_text(device: &mut VirtualDevice, text: &str, mapper: &CharMapper) -> Res
                 unicode_fallbacks += 1;
                 if verbose_logging() {
                     eprintln!(
-                                        "[Pepper X uinput] unicode hex fallback for {:?} (U+{cp:04X})",
-                                        ch
-                                    );
+                        "[Pepper X uinput] unicode hex fallback for {:?} (U+{cp:04X})",
+                        ch
+                    );
                 }
                 emit_unicode_hex(device, *cp, mapper)?;
                 // Hex entry is easy to leave half-open; force modifiers up before next char.
@@ -907,14 +904,12 @@ fn type_text(device: &mut VirtualDevice, text: &str, mapper: &CharMapper) -> Res
 
     release_all_modifiers(device)?;
 
-    if unicode_fallbacks > 0 {
-        if verbose_logging() {
-            eprintln!(
-                        "[Pepper X uinput] typed {} chars ({} via unicode hex)",
-                        strokes.len(),
-                        unicode_fallbacks
-                    );
-        }
+    if unicode_fallbacks > 0 && verbose_logging() {
+        eprintln!(
+            "[Pepper X uinput] typed {} chars ({} via unicode hex)",
+            strokes.len(),
+            unicode_fallbacks
+        );
     }
 
     Ok(())
@@ -984,9 +979,10 @@ fn emit_unicode_hex(
 
     let hex = format!("{codepoint:x}");
     for digit in hex.chars() {
-        let chord = mapper.hex_digits.get(&digit).copied().ok_or_else(|| {
-            format!("internal error: missing hex digit mapping for {digit:?}")
-        })?;
+        let chord =
+            mapper.hex_digits.get(&digit).copied().ok_or_else(|| {
+                format!("internal error: missing hex digit mapping for {digit:?}")
+            })?;
         // Hex digits must be plain key presses — never with leftover AltGr/Shift
         // from a previous dead-key chord on another layout.
         if chord.shift || chord.alt_gr {
@@ -1151,7 +1147,7 @@ mod tests {
         match stroke {
             CharStroke::Chords(seq) => {
                 assert!(
-                    seq.len() >= 1,
+                    !seq.is_empty(),
                     "ê should map to at least one chord, got {seq:?}"
                 );
                 // Prefer real layout sequence over unicode when possible.
@@ -1170,7 +1166,9 @@ mod tests {
     #[test]
     fn french_layout_maps_common_accents() {
         let mapper = mapper_for_layout("fr");
-        for ch in ['é', 'è', 'à', 'ù', 'ç', 'â', 'ê', 'î', 'ô', 'û', 'ë', 'ï', 'ü'] {
+        for ch in [
+            'é', 'è', 'à', 'ù', 'ç', 'â', 'ê', 'î', 'ô', 'û', 'ë', 'ï', 'ü',
+        ] {
             match resolve_stroke(&mapper, ch) {
                 CharStroke::Chords(seq) => assert!(!seq.is_empty(), "{ch} empty sequence"),
                 CharStroke::UnicodeHex(_) => {
@@ -1235,10 +1233,7 @@ mod tests {
 
     #[test]
     fn first_xkb_entry_prefers_active_xkb() {
-        let entries = vec![
-            ("xkb".into(), "us".into()),
-            ("xkb".into(), "fr+mac".into()),
-        ];
+        let entries = vec![("xkb".into(), "us".into()), ("xkb".into(), "fr+mac".into())];
         let id = first_xkb_entry(&entries).unwrap();
         assert_eq!(id, LayoutId::new("us", ""));
     }
@@ -1278,10 +1273,7 @@ mod tests {
             }
         }
         assert!(
-            matches!(
-                resolve_stroke(&mapper, 'ê'),
-                CharStroke::Chords(_)
-            ),
+            matches!(resolve_stroke(&mapper, 'ê'), CharStroke::Chords(_)),
             "ê in sample phrase must use layout chords on fr"
         );
     }

@@ -282,8 +282,8 @@ impl LiveRuntimeHandle {
             .unwrap_or(readiness.install_path);
 
         let target_lang = if crate::settings::asr_model_is_multilingual(model_id) {
-            let lang = crate::settings::resolve_asr_language(&settings.preferred_asr_language)
-                .to_string();
+            let lang =
+                crate::settings::resolve_asr_language(&settings.preferred_asr_language).to_string();
             eprintln!("[Pepper X] multilingual ASR target language: {lang}");
             Some(lang)
         } else {

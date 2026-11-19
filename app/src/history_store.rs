@@ -701,7 +701,9 @@ mod history_store_tests {
 
         let store = HistoryStore::open(&root).expect("history store should open");
         let archived = store
-            .archive_run(&ArchiveWriteRequest::new(transcript_entry(&source_wav_path)))
+            .archive_run(&ArchiveWriteRequest::new(transcript_entry(
+                &source_wav_path,
+            )))
             .expect("archive write should succeed");
         assert!(archived.metadata_path.is_file());
         assert!(root.join("transcript-log.jsonl").is_file());

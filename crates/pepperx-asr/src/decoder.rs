@@ -405,11 +405,7 @@ fn resample_mono_parallel(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<
 }
 
 /// Offline rubato FFT resample following the crate's recommended clip procedure.
-fn resample_mono_rubato(
-    samples: &[f32],
-    from_rate: u32,
-    to_rate: u32,
-) -> Result<Vec<f32>, String> {
+fn resample_mono_rubato(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>, String> {
     use rubato::{FftFixedIn, Resampler};
 
     let from = from_rate as usize;
@@ -508,9 +504,7 @@ fn append_planar_or_interleaved_f32(decoded: &AudioBufferRef<'_>, out: &mut Vec<
         }
         AudioBufferRef::S8(buf) => append_converted(buf, out, |s| f32::from(s) / 128.0),
         AudioBufferRef::S16(buf) => append_converted(buf, out, |s| f32::from(s) / 32768.0),
-        AudioBufferRef::S24(buf) => {
-            append_converted(buf, out, |s| s.inner() as f32 / 8_388_608.0)
-        }
+        AudioBufferRef::S24(buf) => append_converted(buf, out, |s| s.inner() as f32 / 8_388_608.0),
         AudioBufferRef::S32(buf) => {
             append_converted(buf, out, |s| (s as f64 / 2_147_483_648.0) as f32)
         }
@@ -585,7 +579,12 @@ mod tests {
         let samples: Vec<f32> = (0..300_000).map(|i| (i as f32 * 0.0005).sin()).collect();
         let out = resample_mono(&samples, 48_000, 16_000);
         let expected = ((300_000.0_f64) * 16_000.0 / 48_000.0).round() as i32;
-        assert!((out.len() as i32 - expected).abs() <= 16, "len={} expected={}", out.len(), expected);
+        assert!(
+            (out.len() as i32 - expected).abs() <= 16,
+            "len={} expected={}",
+            out.len(),
+            expected
+        );
     }
 
     #[test]

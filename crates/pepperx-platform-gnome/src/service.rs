@@ -77,12 +77,14 @@ impl std::fmt::Debug for PepperXService {
     }
 }
 
+type ExtensionConnectedListener = Arc<dyn Fn(bool) + Send + Sync>;
+
 struct ServiceState {
     recording_runtime: Arc<dyn RecordingRuntime>,
     live_status: SharedLiveStatus,
     capabilities: Mutex<Capabilities>,
     command_sender: Sender<AppCommand>,
-    extension_connected_listener: Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>>,
+    extension_connected_listener: Mutex<Option<ExtensionConnectedListener>>,
 }
 
 impl PepperXService {

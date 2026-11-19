@@ -652,9 +652,15 @@ mod tests {
 
     #[test]
     fn asr_language_helpers_resolve_known_codes_and_multilingual_models() {
-        assert!(asr_model_is_multilingual("nemotron-3.5-asr-streaming-0.6b-int8"));
-        assert!(asr_model_is_multilingual("nemotron-3.5-asr-streaming-0.6b-int4"));
-        assert!(!asr_model_is_multilingual("nemotron-speech-streaming-en-0.6b"));
+        assert!(asr_model_is_multilingual(
+            "nemotron-3.5-asr-streaming-0.6b-int8"
+        ));
+        assert!(asr_model_is_multilingual(
+            "nemotron-3.5-asr-streaming-0.6b-int4"
+        ));
+        assert!(!asr_model_is_multilingual(
+            "nemotron-speech-streaming-en-0.6b"
+        ));
         assert!(!asr_model_is_multilingual("nemo-parakeet-tdt-0.6b-v3-int8"));
 
         assert_eq!(resolve_asr_language("en-US"), "en-US");

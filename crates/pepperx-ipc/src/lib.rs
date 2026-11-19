@@ -278,10 +278,7 @@ mod ipc_contract {
         let round_trip = LiveStatus::from_dbus_payload(status.to_dbus_payload());
 
         assert_eq!(round_trip, status);
-        assert_eq!(
-            status.to_dbus_payload().0,
-            LIVE_STATUS_NOTICE
-        );
+        assert_eq!(status.to_dbus_payload().0, LIVE_STATUS_NOTICE);
     }
 
     #[test]

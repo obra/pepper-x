@@ -113,8 +113,7 @@ pub fn transcribe_wav(
 
     // Always normalize through mono 16 kHz PCM (in-memory). For non-WAV sources
     // this is required; for multi-rate/multi-channel WAV it is also required.
-    let decoded =
-        decode_audio_file(&canonical_source_path).map_err(|error| map_decode_error(error))?;
+    let decoded = decode_audio_file(&canonical_source_path).map_err(map_decode_error)?;
     debug_assert_eq!(decoded.sample_rate, TARGET_SAMPLE_RATE);
 
     let start = Instant::now();
@@ -140,8 +139,6 @@ pub struct StreamingTranscriber {
     /// Leftover samples from the previous `feed_chunk` call that did not fill
     /// a complete 560ms window.
     pending: Vec<f32>,
-    /// Target language used for this transcriber (for logging / debugging)
-    target_lang: Option<String>,
 }
 
 impl StreamingTranscriber {
@@ -152,8 +149,9 @@ impl StreamingTranscriber {
     ) -> Result<Self, TranscriptionError> {
         validate_model_dir(model_dir)?;
 
-        let mut model = Nemotron::from_pretrained(model_dir, None)
-            .map_err(|_| TranscriptionError::RecognizerInitializationFailed(model_dir.to_path_buf()))?;
+        let mut model = Nemotron::from_pretrained(model_dir, None).map_err(|_| {
+            TranscriptionError::RecognizerInitializationFailed(model_dir.to_path_buf())
+        })?;
 
         let lang = target_lang.map(Into::into);
         configure_multilingual(&mut model, lang.as_deref())?;
@@ -161,7 +159,6 @@ impl StreamingTranscriber {
         Ok(Self {
             model,
             pending: Vec::with_capacity(STREAMING_CHUNK_SAMPLES),
-            target_lang: lang,
         })
     }
 
@@ -226,9 +223,9 @@ fn configure_multilingual(
 ) -> Result<(), TranscriptionError> {
     if model.mode() == NemotronMode::Multilingual {
         let lang = target_lang.unwrap_or("fr-FR");
-        model
-            .set_target_lang(lang)
-            .map_err(|e| TranscriptionError::LanguageConfigFailed(format!("lang={}: {}", lang, e)))?;
+        model.set_target_lang(lang).map_err(|e| {
+            TranscriptionError::LanguageConfigFailed(format!("lang={}: {}", lang, e))
+        })?;
     }
     Ok(())
 }
@@ -278,11 +275,14 @@ fn cached_parakeet_tdt(
     let mut guard = asr_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let reusable = guard.as_ref().is_some_and(|cached| {
-        cached.force_cpu == force_cpu && cached.model_dir == model_dir
-    });
+    let reusable = guard
+        .as_ref()
+        .is_some_and(|cached| cached.force_cpu == force_cpu && cached.model_dir == model_dir);
     if reusable {
-        let provider = guard.as_ref().map(|cached| cached.provider).unwrap_or("cpu");
+        let provider = guard
+            .as_ref()
+            .map(|cached| cached.provider)
+            .unwrap_or("cpu");
         eprintln!("[Pepper X] ASR reusing cached model ({provider})");
         return Ok(guard);
     }
@@ -330,15 +330,11 @@ fn transcribe_wav_tdt(
     request: &TranscriptionRequest,
 ) -> Result<TranscriptionResult, TranscriptionError> {
     let mut cached = cached_parakeet_tdt(&request.model_dir)?;
-    let model = &mut cached
-        .as_mut()
-        .expect("cached parakeet model")
-        .model;
+    let model = &mut cached.as_mut().expect("cached parakeet model").model;
 
     let canonical_source_path = std::fs::canonicalize(&request.wav_path)
         .map_err(|_| TranscriptionError::MissingWavFile(request.wav_path.clone()))?;
-    let decoded =
-        decode_audio_file(&canonical_source_path).map_err(|error| map_decode_error(error))?;
+    let decoded = decode_audio_file(&canonical_source_path).map_err(map_decode_error)?;
 
     let start = Instant::now();
     let transcript = model
@@ -427,15 +423,13 @@ fn map_decode_error(error: DecodeError) -> TranscriptionError {
 ///
 /// Kept for tests and internal callers; production transcription goes through
 /// [`transcribe_wav`].
-pub fn load_audio_for_asr(audio_path: &Path) -> Result<(PathBuf, i32, Vec<f32>), TranscriptionError> {
+pub fn load_audio_for_asr(
+    audio_path: &Path,
+) -> Result<(PathBuf, i32, Vec<f32>), TranscriptionError> {
     let canonical = std::fs::canonicalize(audio_path)
         .map_err(|_| TranscriptionError::MissingWavFile(audio_path.to_path_buf()))?;
     let decoded = decode_audio_file(&canonical).map_err(map_decode_error)?;
-    Ok((
-        canonical,
-        decoded.sample_rate as i32,
-        decoded.samples,
-    ))
+    Ok((canonical, decoded.sample_rate as i32, decoded.samples))
 }
 
 // ---------------------------------------------------------------------------
@@ -473,15 +467,14 @@ mod tests {
         let wav_path = model_dir.join("existing.wav");
         fs::copy(fixture_path(), &wav_path).unwrap();
 
-        let request = TranscriptionRequest::new(
-            &wav_path,
-            &model_dir,
-            "nemotron-3.5-0.6b",
-        );
+        let request = TranscriptionRequest::new(&wav_path, &model_dir, "nemotron-3.5-0.6b");
 
         let error = transcribe_wav(&request).unwrap_err();
 
-        assert!(matches!(error, TranscriptionError::IncompleteModelDir { .. }));
+        assert!(matches!(
+            error,
+            TranscriptionError::IncompleteModelDir { .. }
+        ));
     }
 
     #[test]
@@ -541,11 +534,8 @@ mod tests {
             std::env::var("PEPPERX_PARAKEET_MODEL_DIR")
                 .expect("PEPPERX_PARAKEET_MODEL_DIR must point at a Parakeet model bundle"),
         );
-        let request = TranscriptionRequest::new(
-            fixture_path(),
-            model_dir,
-            "nemotron-3.5-0.6b-multilingual",
-        );
+        let request =
+            TranscriptionRequest::new(fixture_path(), model_dir, "nemotron-3.5-0.6b-multilingual");
 
         let result = transcribe_wav(&request).expect("transcribe fixture");
 
