@@ -8,11 +8,15 @@ publish = false
 name = "pepper-x"
 path = "src/main.rs"
 
+[features]
+default = ["cuda"]
+cuda = ["pepperx-asr/cuda"]
+
 [dependencies]
 async-channel = "2.5"
 adw = { package = "libadwaita", version = "0.9.1", features = ["v1_5"] }
 gtk = { package = "gtk4", version = "0.11.1", features = ["gnome_46"] }
-pepperx-asr = { path = "../crates/pepperx-asr" }
+pepperx-asr = { path = "../crates/pepperx-asr", default-features = false }
 pepperx-audio = { path = "../crates/pepperx-audio" }
 pepperx-cleanup = { path = "../crates/pepperx-cleanup" }
 pepperx-corrections = { path = "../crates/pepperx-corrections" }

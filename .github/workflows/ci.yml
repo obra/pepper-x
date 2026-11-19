@@ -37,7 +37,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Lint with clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --workspace --no-default-features

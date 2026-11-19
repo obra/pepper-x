@@ -4,10 +4,15 @@ version = "1.0.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["cuda"]
+cuda = ["parakeet-rs/cuda"]
+
 [dependencies]
 hound = "3.5.1"
 # 0.3 for multilingual NemotronMode (all-features stack)
-parakeet-rs = { version = "0.3", default-features = false, features = ["cpu", "cuda", "ort-defaults"] }
+# CUDA is the default feature. CI passes --no-default-features (no nvcc on the runner).
+parakeet-rs = { version = "0.3", default-features = false, features = ["cpu", "ort-defaults"] }
 rayon = "1.12.0"
 rubato = "0.16"
 # Pure-Rust demux/decode for external audio import (WAV/MP3/FLAC/OGG/AAC/…).

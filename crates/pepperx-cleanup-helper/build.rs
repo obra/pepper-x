@@ -1,5 +1,5 @@
 fn main() {
-    if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") || std::env::var("CARGO_FEATURE_CUDA").is_err() {
         return;
     }
 

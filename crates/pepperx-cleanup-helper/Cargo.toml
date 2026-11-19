@@ -9,18 +9,21 @@ build = "build.rs"
 name = "pepperx-cleanup-helper"
 path = "src/main.rs"
 
+[features]
+default = ["cuda"]
+cuda = ["llama-cpp-4/cuda", "llama-cpp-sys-4/cuda"]
+
 [dependencies]
 pepperx-platform = { path = "../pepperx-platform" }
 # GPU backends for llama.cpp (see README.md § "GPU acceleration for cleanup"):
-#   cuda   — NVIDIA GPUs; requires CUDA toolkit at build time (nvcc, libcudart)
+#   cuda   — NVIDIA GPUs; requires CUDA toolkit at build time (nvcc, libcudart).
+#            On by default. CI passes --no-default-features.
 #   vulkan — AMD/Intel; disabled here (needs glslc from shaderc / Vulkan SDK).
-#            Install glslc, then add "vulkan" to both llama-cpp-4 and llama-cpp-sys-4.
-# CPU-only: remove "cuda" from both feature lists below.
-llama-cpp-4 = { version = "0.3.2", default-features = false, features = ["native", "cuda"] }
-llama-cpp-sys-4 = { version = "0.3.2", default-features = false, features = ["native", "cuda"] }
+llama-cpp-4 = { version = "0.3.2", default-features = false, features = ["native"] }
+llama-cpp-sys-4 = { version = "0.3.2", default-features = false, features = ["native"] }
 num_cpus = "1.16"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 
 [dev-dependencies]
-llama-cpp-4 = { version = "0.3.2", default-features = false, features = ["native", "cuda"] }
+llama-cpp-4 = { version = "0.3.2", default-features = false, features = ["native"] }
