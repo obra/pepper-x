@@ -317,11 +317,7 @@ export default class PepperXExtension extends Extension {
                 '/com/obra/PepperX',
                 'org.gtk.Actions',
                 'Activate',
-                new GLib.Variant('(sava{sv})', [
-                    'quit',
-                    new GLib.Variant('av', []),
-                    new GLib.Variant('a{sv}', {}),
-                ]),
+                GLib.Variant.new('(sava{sv})', ['quit', [], {}]),
                 null,
                 Gio.DBusCallFlags.NONE,
                 -1,
