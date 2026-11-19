@@ -152,9 +152,12 @@ impl LiveStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+type LiveStatusWatch = Arc<dyn Fn(LiveStatus) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct SharedLiveStatus {
     current: Arc<Mutex<LiveStatus>>,
+    watchers: Arc<Mutex<Vec<LiveStatusWatch>>>,
 }
 
 impl Default for SharedLiveStatus {
@@ -167,11 +170,28 @@ impl SharedLiveStatus {
     pub fn new() -> Self {
         Self {
             current: Arc::new(Mutex::new(LiveStatus::ready())),
+            watchers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
+    /// Run `watcher` on the thread that calls [`replace`](Self::replace).
+    pub fn watch(&self, watcher: impl Fn(LiveStatus) + Send + Sync + 'static) {
+        self.watchers
+            .lock()
+            .expect("live status watchers poisoned")
+            .push(Arc::new(watcher));
+    }
+
     pub fn replace(&self, next: LiveStatus) {
-        *self.current.lock().expect("live status lock poisoned") = next;
+        *self.current.lock().expect("live status lock poisoned") = next.clone();
+        let watchers = self
+            .watchers
+            .lock()
+            .expect("live status watchers poisoned")
+            .clone();
+        for watcher in watchers {
+            watcher(next.clone());
+        }
     }
 
     pub fn snapshot(&self) -> LiveStatus {
@@ -224,7 +244,7 @@ mod ipc_contract {
         let capabilities = Capabilities {
             modifier_only_supported: true,
             extension_connected: false,
-            version: "0.1.0".to_string(),
+            version: "1.0.0".to_string(),
         };
 
         let round_trip = Capabilities::from_dbus_payload(capabilities.to_dbus_payload());

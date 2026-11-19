@@ -52,7 +52,7 @@ class PepperXIndicator extends PanelMenu.Button {
         });
         this.menu.addMenuItem(this._statusItem);
 
-        this._versionItem = new PopupMenu.PopupMenuItem('Pepper X v0.1.0', {
+        this._versionItem = new PopupMenu.PopupMenuItem('Pepper X v1.0.0', {
             reactive: false,
             can_focus: false,
         });

@@ -622,7 +622,7 @@ mod app_shell {
             &RuntimeReadinessSummary {
                 modifier_capture_supported: true,
                 extension_connected: std::cell::Cell::new(false),
-                service_version: "0.1.0".into(),
+                service_version: "1.0.0".into(),
             },
         );
 
@@ -668,7 +668,7 @@ mod app_shell {
             &cache_root,
             &[],
             Some(&archived_run(entry)),
-            &RuntimeReadinessSummary::from_capabilities(&Capabilities::shell_default("0.1.0")),
+            &RuntimeReadinessSummary::from_capabilities(&Capabilities::shell_default("1.0.0")),
         );
 
         assert!(summary.contains("Latest run ID: run-1"));
@@ -979,7 +979,7 @@ mod app_shell {
     #[test]
     fn window_diagnostics_page_scaffold_builds_card_entries() {
         let scaffold = diagnostics_page_scaffold(
-            "Modifier-only capture supported: true\nExtension connected: false\nService version: 0.1.0",
+            "Modifier-only capture supported: true\nExtension connected: false\nService version: 1.0.0",
         );
 
         assert_eq!(scaffold.container_kind, DiagnosticsContainerKind::CardList);

@@ -174,6 +174,19 @@ type LivePipelineTranscriber =
 type LiveSessionRuntime =
     SessionRuntime<PipeWireRecorder, fn() -> PathBuf, LivePipelineTranscriber>;
 
+static PUBLISHED_LIVE_RUNTIME: std::sync::OnceLock<std::sync::Arc<LiveRuntimeHandle>> =
+    std::sync::OnceLock::new();
+
+pub fn publish_live_runtime(runtime: std::sync::Arc<LiveRuntimeHandle>) {
+    let _ = PUBLISHED_LIVE_RUNTIME.set(runtime);
+}
+
+pub fn apply_play_sounds(enabled: bool) {
+    if let Some(runtime) = PUBLISHED_LIVE_RUNTIME.get() {
+        runtime.set_play_sounds(enabled);
+    }
+}
+
 pub struct LiveRuntimeHandle {
     runtime: Mutex<LiveSessionRuntime>,
     selected_microphone: Option<SelectedMicrophone>,

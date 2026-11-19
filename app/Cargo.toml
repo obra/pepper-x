@@ -1,6 +1,6 @@
 [package]
 name = "pepper-x-app"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 publish = false
 
@@ -9,6 +9,7 @@ name = "pepper-x"
 path = "src/main.rs"
 
 [dependencies]
+async-channel = "2.5"
 adw = { package = "libadwaita", version = "0.9.1", features = ["v1_5"] }
 gtk = { package = "gtk4", version = "0.11.1", features = ["gnome_46"] }
 pepperx-asr = { path = "../crates/pepperx-asr" }

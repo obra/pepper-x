@@ -476,7 +476,7 @@ mod tests {
         RuntimeReadinessSummary {
             modifier_capture_supported: true,
             extension_connected: std::cell::Cell::new(true),
-            service_version: "0.1.0".into(),
+            service_version: "1.0.0".into(),
         }
     }
 

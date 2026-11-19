@@ -82,6 +82,7 @@ struct ServiceState {
     live_status: SharedLiveStatus,
     capabilities: Mutex<Capabilities>,
     command_sender: Sender<AppCommand>,
+    extension_connected_listener: Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>>,
 }
 
 impl PepperXService {
@@ -96,8 +97,20 @@ impl PepperXService {
                 live_status,
                 capabilities: Mutex::new(Capabilities::shell_default(env!("CARGO_PKG_VERSION"))),
                 command_sender,
+                extension_connected_listener: Mutex::new(None),
             }),
         }
+    }
+
+    pub fn set_extension_connected_listener(
+        &self,
+        listener: impl Fn(bool) + Send + Sync + 'static,
+    ) {
+        *self
+            .state
+            .extension_connected_listener
+            .lock()
+            .expect("extension listener poisoned") = Some(Arc::new(listener));
     }
 
     pub fn set_modifier_only_supported(&self, supported: bool) {
@@ -129,11 +142,25 @@ impl PepperXService {
     }
 
     fn mark_extension_connected(&self) {
-        self.state
+        let mut capabilities = self
+            .state
             .capabilities
             .lock()
-            .expect("capabilities lock poisoned")
-            .extension_connected = true;
+            .expect("capabilities lock poisoned");
+        if capabilities.extension_connected {
+            return;
+        }
+        capabilities.extension_connected = true;
+        drop(capabilities);
+        let listener = self
+            .state
+            .extension_connected_listener
+            .lock()
+            .expect("extension listener poisoned")
+            .clone();
+        if let Some(listener) = listener {
+            listener(true);
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -361,7 +388,7 @@ mod service_contract {
             Capabilities {
                 modifier_only_supported: false,
                 extension_connected: false,
-                version: "0.1.0".to_string(),
+                version: "1.0.0".to_string(),
             }
         );
     }
@@ -443,7 +470,7 @@ mod service_contract {
             Capabilities {
                 modifier_only_supported: false,
                 extension_connected: false,
-                version: "0.1.0".to_string(),
+                version: "1.0.0".to_string(),
             }
         );
     }

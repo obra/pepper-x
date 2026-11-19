@@ -1206,6 +1206,7 @@ impl SettingsView {
                     feedback_label.set_label(&format!("Failed to save settings: {error}"));
                     feedback_label.set_visible(true);
                 } else {
+                    crate::session_runtime::apply_play_sounds(play_sounds);
                     feedback_label.set_label("Saved settings");
                     feedback_label.set_visible(true);
                 }

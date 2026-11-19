@@ -1952,8 +1952,9 @@ dependencies = [
 
 [[package]]
 name = "pepper-x-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
+ "async-channel",
  "gtk4",
  "libadwaita",
  "pepperx-asr",
@@ -1971,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "pepperx-asr"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hound",
  "parakeet-rs",
@@ -1982,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "pepperx-audio"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hound",
  "pipewire",
@@ -1992,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "pepperx-cleanup"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2000,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "pepperx-cleanup-helper"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "llama-cpp-4",
  "llama-cpp-sys-4",
@@ -2012,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "pepperx-corrections"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2020,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "pepperx-ipc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "pepperx-session",
  "serde",
@@ -2028,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "pepperx-models"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bzip2",
  "tar",
@@ -2037,11 +2038,11 @@ dependencies = [
 
 [[package]]
 name = "pepperx-platform"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "pepperx-platform-gnome"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "glib",
  "libc",
@@ -2052,11 +2053,11 @@ dependencies = [
 
 [[package]]
 name = "pepperx-session"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "pepperx-uinput-helper"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "evdev",
  "serde",
