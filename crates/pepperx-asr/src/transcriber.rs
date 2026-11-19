@@ -1,8 +1,5 @@
 use crate::decoder::{decode_audio_file, DecodeError, TARGET_SAMPLE_RATE};
-use parakeet_rs::{
-    ExecutionConfig, ExecutionProvider, Nemotron, NemotronMode, ParakeetTDT, TimestampMode,
-    Transcriber,
-};
+use parakeet_rs::{Nemotron, NemotronMode, ParakeetTDT, TimestampMode, Transcriber};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -298,26 +295,39 @@ fn cached_parakeet_tdt(
 }
 
 fn load_parakeet_tdt(model_dir: &Path) -> Result<(ParakeetTDT, &'static str), TranscriptionError> {
-    let force_cpu = std::env::var("PEPPERX_ASR_EP")
-        .ok()
-        .is_some_and(|value| value.eq_ignore_ascii_case("cpu"));
-    if !force_cpu {
-        let config = ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda);
-        match ParakeetTDT::from_pretrained(model_dir, Some(config)) {
-            Ok(model) => {
-                eprintln!("[Pepper X] ASR execution provider: cuda");
-                return Ok((model, "cuda"));
-            }
-            Err(error) => {
-                eprintln!("[Pepper X] ASR CUDA init failed, falling back to cpu: {error}");
-            }
-        }
-    } else {
+    if asr_force_cpu() {
         eprintln!("[Pepper X] ASR execution provider: cpu (PEPPERX_ASR_EP=cpu)");
+    } else if let Some(loaded) = try_load_parakeet_cuda(model_dir) {
+        return loaded;
     }
     ParakeetTDT::from_pretrained(model_dir, None)
         .map(|model| (model, "cpu"))
         .map_err(|_| TranscriptionError::RecognizerInitializationFailed(model_dir.to_path_buf()))
+}
+
+#[cfg(feature = "cuda")]
+fn try_load_parakeet_cuda(
+    model_dir: &Path,
+) -> Option<Result<(ParakeetTDT, &'static str), TranscriptionError>> {
+    use parakeet_rs::{ExecutionConfig, ExecutionProvider};
+    let config = ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda);
+    match ParakeetTDT::from_pretrained(model_dir, Some(config)) {
+        Ok(model) => {
+            eprintln!("[Pepper X] ASR execution provider: cuda");
+            Some(Ok((model, "cuda")))
+        }
+        Err(error) => {
+            eprintln!("[Pepper X] ASR CUDA init failed, falling back to cpu: {error}");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "cuda"))]
+fn try_load_parakeet_cuda(
+    _model_dir: &Path,
+) -> Option<Result<(ParakeetTDT, &'static str), TranscriptionError>> {
+    None
 }
 
 fn is_parakeet_tdt_dir(model_dir: &Path) -> bool {
