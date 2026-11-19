@@ -817,6 +817,13 @@ fn streaming_transcript_or_batch(
     transcribe_wav_result(wav_path)
 }
 
+pub(crate) fn prewarm_preferred_asr_model() -> Result<(), TranscriptionRunError> {
+    let settings = AppSettings::load_or_default();
+    let model_dir = configured_model_dir_for_model_id(&settings.preferred_asr_model)?;
+    pepperx_asr::prewarm_parakeet_tdt(&model_dir)?;
+    Ok(())
+}
+
 fn transcribe_wav_result(wav_path: &Path) -> Result<TranscriptionResult, TranscriptionRunError> {
     let settings = AppSettings::load_or_default();
     transcribe_wav_result_with_model_id(wav_path, &settings.preferred_asr_model)

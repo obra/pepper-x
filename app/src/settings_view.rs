@@ -898,6 +898,12 @@ impl SettingsView {
                         feedback_label.set_label(&format!("Failed to save settings: {error}"));
                         feedback_label.set_visible(true);
                     } else {
+                        std::thread::Builder::new()
+                            .name("pepperx-asr-warmup".into())
+                            .spawn(|| {
+                                let _ = crate::transcription::prewarm_preferred_asr_model();
+                            })
+                            .ok();
                         feedback_label.set_label("Saved settings");
                         feedback_label.set_visible(true);
                     }

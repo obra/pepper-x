@@ -133,6 +133,19 @@ pub fn run() {
             })
             .ok();
     }
+
+    // Keep the selected Parakeet TDT model loaded. The ONNX session is large
+    // and was previously rebuilt on every dictation.
+    {
+        std::thread::Builder::new()
+            .name("pepperx-asr-warmup".into())
+            .spawn(|| {
+                if let Err(error) = crate::transcription::prewarm_preferred_asr_model() {
+                    eprintln!("[Pepper X] ASR prewarm skipped: {error}");
+                }
+            })
+            .ok();
+    }
     let shared_trigger_config = modifier_capture.as_ref().map(|h| h.shared_config().clone());
     let app_model = Rc::new(AppModel::for_startup(
         &setup_state,

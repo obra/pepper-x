@@ -1,5 +1,8 @@
 use crate::decoder::{decode_audio_file, DecodeError, TARGET_SAMPLE_RATE};
-use parakeet_rs::{Nemotron, NemotronMode, ParakeetTDT, TimestampMode, Transcriber};
+use parakeet_rs::{
+    ExecutionConfig, ExecutionProvider, Nemotron, NemotronMode, ParakeetTDT, TimestampMode,
+    Transcriber,
+};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -238,6 +241,85 @@ fn validate_audio_path(audio_path: &Path) -> Result<(), TranscriptionError> {
     }
 }
 
+struct CachedParakeetTdt {
+    model_dir: std::path::PathBuf,
+    force_cpu: bool,
+    provider: &'static str,
+    model: ParakeetTDT,
+}
+
+fn asr_cache() -> &'static std::sync::Mutex<Option<CachedParakeetTdt>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedParakeetTdt>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn asr_force_cpu() -> bool {
+    std::env::var("PEPPERX_ASR_EP")
+        .ok()
+        .is_some_and(|value| value.eq_ignore_ascii_case("cpu"))
+}
+
+/// Load a Parakeet TDT model and keep it for the life of the process.
+/// A Nemotron directory is ignored. A later call with another directory
+/// replaces the cached model.
+pub fn prewarm_parakeet_tdt(model_dir: &Path) -> Result<(), TranscriptionError> {
+    if !is_parakeet_tdt_dir(model_dir) {
+        return Ok(());
+    }
+    let _cached = cached_parakeet_tdt(model_dir)?;
+    Ok(())
+}
+
+fn cached_parakeet_tdt(
+    model_dir: &Path,
+) -> Result<std::sync::MutexGuard<'static, Option<CachedParakeetTdt>>, TranscriptionError> {
+    let force_cpu = asr_force_cpu();
+    let mut guard = asr_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let reusable = guard.as_ref().is_some_and(|cached| {
+        cached.force_cpu == force_cpu && cached.model_dir == model_dir
+    });
+    if reusable {
+        let provider = guard.as_ref().map(|cached| cached.provider).unwrap_or("cpu");
+        eprintln!("[Pepper X] ASR reusing cached model ({provider})");
+        return Ok(guard);
+    }
+    let (model, provider) = load_parakeet_tdt(model_dir)?;
+    eprintln!("[Pepper X] ASR model cached ({provider})");
+    *guard = Some(CachedParakeetTdt {
+        model_dir: model_dir.to_path_buf(),
+        force_cpu,
+        provider,
+        model,
+    });
+    Ok(guard)
+}
+
+fn load_parakeet_tdt(model_dir: &Path) -> Result<(ParakeetTDT, &'static str), TranscriptionError> {
+    let force_cpu = std::env::var("PEPPERX_ASR_EP")
+        .ok()
+        .is_some_and(|value| value.eq_ignore_ascii_case("cpu"));
+    if !force_cpu {
+        let config = ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda);
+        match ParakeetTDT::from_pretrained(model_dir, Some(config)) {
+            Ok(model) => {
+                eprintln!("[Pepper X] ASR execution provider: cuda");
+                return Ok((model, "cuda"));
+            }
+            Err(error) => {
+                eprintln!("[Pepper X] ASR CUDA init failed, falling back to cpu: {error}");
+            }
+        }
+    } else {
+        eprintln!("[Pepper X] ASR execution provider: cpu (PEPPERX_ASR_EP=cpu)");
+    }
+    ParakeetTDT::from_pretrained(model_dir, None)
+        .map(|model| (model, "cpu"))
+        .map_err(|_| TranscriptionError::RecognizerInitializationFailed(model_dir.to_path_buf()))
+}
+
 fn is_parakeet_tdt_dir(model_dir: &Path) -> bool {
     model_dir.join("encoder-model.onnx").is_file()
         && model_dir.join("decoder_joint-model.onnx").is_file()
@@ -247,9 +329,11 @@ fn is_parakeet_tdt_dir(model_dir: &Path) -> bool {
 fn transcribe_wav_tdt(
     request: &TranscriptionRequest,
 ) -> Result<TranscriptionResult, TranscriptionError> {
-    let mut model = ParakeetTDT::from_pretrained(&request.model_dir, None).map_err(|_| {
-        TranscriptionError::RecognizerInitializationFailed(request.model_dir.clone())
-    })?;
+    let mut cached = cached_parakeet_tdt(&request.model_dir)?;
+    let model = &mut cached
+        .as_mut()
+        .expect("cached parakeet model")
+        .model;
 
     let canonical_source_path = std::fs::canonicalize(&request.wav_path)
         .map_err(|_| TranscriptionError::MissingWavFile(request.wav_path.clone()))?;
