@@ -272,7 +272,7 @@ fn format_chat_prompt(system_prompt: &str, transcript: &str) -> String {
     format!(
         "<|im_start|>system\n{system_prompt}<|im_end|>\n\
          <|im_start|>user\n<USER-INPUT>\n{transcript}\n</USER-INPUT><|im_end|>\n\
-         <|im_start|>assistant\n"
+         <|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
 }
 
@@ -924,9 +924,9 @@ fn normalize_cleanup_output(output: &str) -> String {
 
     let first_line = sanitized
         .lines()
-        .next()
-        .unwrap_or(&sanitized)
-        .trim()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !is_thinking_preamble(line))
+        .unwrap_or("")
         .trim_matches('"')
         .trim();
 
@@ -952,6 +952,11 @@ pub(crate) fn sanitize_insertable_text(text: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+fn is_thinking_preamble(line: &str) -> bool {
+    let trimmed = line.trim().trim_matches(':').trim();
+    trimmed.eq_ignore_ascii_case("thinking process")
 }
 
 /// Strip matched `<think>...</think>` blocks and orphan leading `<think>` tags.

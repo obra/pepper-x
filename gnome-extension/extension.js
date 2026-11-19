@@ -25,6 +25,7 @@ const LOG_PREFIX = '[Pepper X]';
 const STATUS_LABEL_PREFIX = 'Status';
 const SETTINGS_ACTION_LABEL = 'Open Pepper X Settings';
 const HISTORY_ACTION_LABEL = 'Open Pepper X History';
+const QUIT_ACTION_LABEL = 'Quit Pepper X';
 // Live status while the service name is owned. No polling when it is absent.
 const STATUS_POLL_INTERVAL_MS = 500;
 
@@ -36,7 +37,7 @@ const ICON_DISCONNECTED = 'network-offline-symbolic';
 
 const PepperXIndicator = GObject.registerClass(
 class PepperXIndicator extends PanelMenu.Button {
-    _init(onOpenSettings, onOpenHistory) {
+    _init(onOpenSettings, onOpenHistory, onQuit) {
         super._init(0.0, 'Pepper X');
 
         this._icon = new St.Icon({
@@ -64,6 +65,12 @@ class PepperXIndicator extends PanelMenu.Button {
         const historyItem = new PopupMenu.PopupMenuItem(HISTORY_ACTION_LABEL);
         historyItem.connect('activate', () => onOpenHistory());
         this.menu.addMenuItem(historyItem);
+
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const quitItem = new PopupMenu.PopupMenuItem(QUIT_ACTION_LABEL);
+        quitItem.connect('activate', () => onQuit());
+        this.menu.addMenuItem(quitItem);
     }
 
     setStatus(statusLabel) {
@@ -104,7 +111,8 @@ export default class PepperXExtension extends Extension {
         this._disconnectLogged = false;
         this._indicator = new PepperXIndicator(
             () => this.showSettings(),
-            () => this.showHistory()
+            () => this.showHistory(),
+            () => this.quitApp()
         );
 
         Main.panel.addToStatusArea(this.uuid, this._indicator);
@@ -299,6 +307,28 @@ export default class PepperXExtension extends Extension {
             this._client.showHistory();
         } catch (error) {
             console.error(`${LOG_PREFIX} Failed to open history`, error);
+        }
+    }
+
+    quitApp() {
+        try {
+            Gio.DBus.session.call_sync(
+                'com.obra.PepperX',
+                '/com/obra/PepperX',
+                'org.gtk.Actions',
+                'Activate',
+                new GLib.Variant('(sava{sv})', [
+                    'quit',
+                    new GLib.Variant('av', []),
+                    new GLib.Variant('a{sv}', {}),
+                ]),
+                null,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                null
+            );
+        } catch (error) {
+            console.error(`${LOG_PREFIX} Failed to quit`, error);
         }
     }
 

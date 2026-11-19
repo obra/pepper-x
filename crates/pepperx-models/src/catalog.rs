@@ -39,7 +39,7 @@ pub struct CatalogModel {
     pub download_files: &'static [(&'static str, &'static str)],
 }
 
-const SUPPORTED_MODELS: [CatalogModel; 7] = [
+const SUPPORTED_MODELS: [CatalogModel; 10] = [
     // === DEFAULT ASR MODEL ===
     // Nemotron 3.5 0.6B Multilingual INT8 (smcleod) - Recommended default
     CatalogModel {
@@ -158,6 +158,32 @@ const SUPPORTED_MODELS: [CatalogModel; 7] = [
         download_files: &[],
     },
 
+    // Parakeet Ultra (Moondream), ONNX TDT layout for parakeet-rs.
+    CatalogModel {
+        id: "parakeet-ultra",
+        kind: ModelKind::Asr,
+        install_path: "asr/parakeet-ultra",
+        required_files: &[
+            "encoder-model.onnx",
+            "encoder-model.onnx.data",
+            "decoder_joint-model.onnx",
+            "vocab.txt",
+        ],
+        install_layout: InstallLayout::Directory,
+        download_artifact: DownloadArtifact {
+            url: "https://huggingface.co/altunenes/parakeet-rs/resolve/main/parakeet-ultra/",
+            file_name: "",
+            kind: DownloadArtifactKind::MultiFile,
+            strip_prefix: None,
+        },
+        download_files: &[
+            ("encoder-model.onnx", "https://huggingface.co/altunenes/parakeet-rs/resolve/main/parakeet-ultra/encoder-model.onnx"),
+            ("encoder-model.onnx.data", "https://huggingface.co/altunenes/parakeet-rs/resolve/main/parakeet-ultra/encoder-model.onnx.data"),
+            ("decoder_joint-model.onnx", "https://huggingface.co/altunenes/parakeet-rs/resolve/main/parakeet-ultra/decoder_joint-model.onnx"),
+            ("vocab.txt", "https://huggingface.co/altunenes/parakeet-rs/resolve/main/parakeet-ultra/vocab.txt"),
+        ],
+    },
+
     // === Cleanup models ===
 
     // Default cleanup: Qwen 3.5 2B (recommended)
@@ -170,6 +196,36 @@ const SUPPORTED_MODELS: [CatalogModel; 7] = [
         download_artifact: DownloadArtifact {
             url: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
             file_name: "Qwen3.5-2B-Q4_K_M.gguf",
+            kind: DownloadArtifactKind::File,
+            strip_prefix: None,
+        },
+        download_files: &[],
+    },
+
+    CatalogModel {
+        id: "qwen3.5-4b-q4_k_m.gguf",
+        kind: ModelKind::Cleanup,
+        install_path: "cleanup/Qwen3.5-4B-Q4_K_M.gguf",
+        required_files: &[],
+        install_layout: InstallLayout::File,
+        download_artifact: DownloadArtifact {
+            url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+            file_name: "Qwen3.5-4B-Q4_K_M.gguf",
+            kind: DownloadArtifactKind::File,
+            strip_prefix: None,
+        },
+        download_files: &[],
+    },
+
+    CatalogModel {
+        id: "qwen3.5-9b-q4_k_m.gguf",
+        kind: ModelKind::Cleanup,
+        install_path: "cleanup/Qwen3.5-9B-Q4_K_M.gguf",
+        required_files: &[],
+        install_layout: InstallLayout::File,
+        download_artifact: DownloadArtifact {
+            url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf",
+            file_name: "Qwen3.5-9B-Q4_K_M.gguf",
             kind: DownloadArtifactKind::File,
             strip_prefix: None,
         },

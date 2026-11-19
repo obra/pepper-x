@@ -622,9 +622,10 @@ fn handle_generate(
         };
         generated.push_str(&piece);
 
-        // Stop on newline (ignoring <think> blocks the model may emit).
-        let stripped = strip_think_blocks(&generated);
-        if stripped.contains('\n') || stripped.len() >= OUTPUT_LIMIT {
+        // Stop on a newline in the answer. Ignore <think> and a
+        // "Thinking Process:" header so Qwen does not return only that line.
+        let answer = answer_text(&generated);
+        if answer.contains('\n') || answer.len() >= OUTPUT_LIMIT {
             break;
         }
         if Instant::now() > deadline {
@@ -659,6 +660,20 @@ fn write_response(response: &HelperResponse) {
     let _ = serde_json::to_writer(&mut stdout, response);
     let _ = stdout.write_all(b"\n");
     let _ = stdout.flush();
+}
+
+fn answer_text(text: &str) -> String {
+    strip_think_blocks(text)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_thinking_preamble(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_thinking_preamble(line: &str) -> bool {
+    let trimmed = line.trim().trim_matches(':').trim();
+    trimmed.eq_ignore_ascii_case("thinking process")
 }
 
 fn strip_think_blocks(text: &str) -> String {

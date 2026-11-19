@@ -56,10 +56,25 @@ mod tests {
             model.id == "nemotron-speech-streaming-en-0.6b" && model.kind == ModelKind::Asr
         }));
         assert!(models.iter().any(|model| {
+            model.id == "parakeet-ultra"
+                && model.kind == ModelKind::Asr
+                && model.install_path == "asr/parakeet-ultra"
+        }));
+        assert!(models.iter().any(|model| {
             model.id == "qwen3.5-2b-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
         }));
         assert!(models.iter().any(|model| {
             model.id == "qwen3.5-0.8b-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
+        }));
+        assert!(models.iter().any(|model| {
+            model.id == "qwen3.5-4b-q4_k_m.gguf"
+                && model.kind == ModelKind::Cleanup
+                && model.install_path == "cleanup/Qwen3.5-4B-Q4_K_M.gguf"
+        }));
+        assert!(models.iter().any(|model| {
+            model.id == "qwen3.5-9b-q4_k_m.gguf"
+                && model.kind == ModelKind::Cleanup
+                && model.install_path == "cleanup/Qwen3.5-9B-Q4_K_M.gguf"
         }));
     }
 

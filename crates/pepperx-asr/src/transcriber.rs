@@ -1,5 +1,5 @@
 use crate::decoder::{decode_audio_file, DecodeError, TARGET_SAMPLE_RATE};
-use parakeet_rs::{Nemotron, NemotronMode};
+use parakeet_rs::{Nemotron, NemotronMode, ParakeetTDT, TimestampMode, Transcriber};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -94,6 +94,10 @@ pub fn transcribe_wav(
 ) -> Result<TranscriptionResult, TranscriptionError> {
     validate_audio_path(&request.wav_path)?;
     validate_model_dir(&request.model_dir)?;
+
+    if is_parakeet_tdt_dir(&request.model_dir) {
+        return transcribe_wav_tdt(request);
+    }
 
     let mut model = Nemotron::from_pretrained(&request.model_dir, None).map_err(|_| {
         TranscriptionError::RecognizerInitializationFailed(request.model_dir.clone())
@@ -234,7 +238,48 @@ fn validate_audio_path(audio_path: &Path) -> Result<(), TranscriptionError> {
     }
 }
 
+fn is_parakeet_tdt_dir(model_dir: &Path) -> bool {
+    model_dir.join("encoder-model.onnx").is_file()
+        && model_dir.join("decoder_joint-model.onnx").is_file()
+        && model_dir.join("vocab.txt").is_file()
+}
+
+fn transcribe_wav_tdt(
+    request: &TranscriptionRequest,
+) -> Result<TranscriptionResult, TranscriptionError> {
+    let mut model = ParakeetTDT::from_pretrained(&request.model_dir, None).map_err(|_| {
+        TranscriptionError::RecognizerInitializationFailed(request.model_dir.clone())
+    })?;
+
+    let canonical_source_path = std::fs::canonicalize(&request.wav_path)
+        .map_err(|_| TranscriptionError::MissingWavFile(request.wav_path.clone()))?;
+    let decoded =
+        decode_audio_file(&canonical_source_path).map_err(|error| map_decode_error(error))?;
+
+    let start = Instant::now();
+    let transcript = model
+        .transcribe_samples(
+            decoded.samples,
+            TARGET_SAMPLE_RATE,
+            1,
+            Some(TimestampMode::Words),
+        )
+        .map_err(|_| TranscriptionError::DecodeFailed(request.wav_path.clone()))?;
+
+    Ok(TranscriptionResult {
+        wav_path: canonical_source_path,
+        transcript_text: transcript.text,
+        backend_name: BACKEND_NAME.to_string(),
+        model_name: request.model_name.clone(),
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
 fn validate_model_dir(model_dir: &Path) -> Result<(), TranscriptionError> {
+    if is_parakeet_tdt_dir(model_dir) {
+        required_model_file(model_dir, "encoder-model.onnx.data")?;
+        return Ok(());
+    }
     // Base files (compatible with both English-only and smcleod INT8 multilingual)
     for file_name in [
         ENCODER_FILE_NAME,
@@ -353,6 +398,34 @@ mod tests {
         let error = transcribe_wav(&request).unwrap_err();
 
         assert!(matches!(error, TranscriptionError::IncompleteModelDir { .. }));
+    }
+
+    #[test]
+    fn transcriber_accepts_parakeet_tdt_layout_before_load() {
+        let model_dir = unique_test_root("tdt-layout");
+        fs::create_dir_all(&model_dir).unwrap();
+        for name in [
+            "encoder-model.onnx",
+            "encoder-model.onnx.data",
+            "decoder_joint-model.onnx",
+            "vocab.txt",
+        ] {
+            fs::write(model_dir.join(name), b"not-a-model").unwrap();
+        }
+        let wav_path = model_dir.join("existing.wav");
+        fs::copy(fixture_path(), &wav_path).unwrap();
+
+        let error = transcribe_wav(&TranscriptionRequest::new(
+            &wav_path,
+            &model_dir,
+            "parakeet-ultra",
+        ))
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TranscriptionError::RecognizerInitializationFailed(_)
+        ));
     }
 
     #[test]

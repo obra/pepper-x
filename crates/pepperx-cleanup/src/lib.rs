@@ -94,6 +94,7 @@ mod cleanup_runtime {
         });
 
         assert!(prompt.contains("<USER-INPUT>\nhello from pepper x\n</USER-INPUT>"));
+        assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
     }
 
     #[test]
