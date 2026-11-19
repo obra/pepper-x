@@ -5,8 +5,8 @@ GNOME-first local dictation for Linux. Hold a key combo, speak, release — your
 ## What it does
 
 - **Hold Alt+Super** (configurable) to record, release to stop
-- **Streaming transcription** via Nemotron 0.6B — text is ready the instant you stop talking
-- **LLM cleanup** via Qwen 3.5 — fixes filler words, punctuation, capitalization, self-corrections
+- **Transcription** via Nemotron (streaming) or a Parakeet TDT model (Parakeet Ultra, Fluid Speech Pro: whole file after release). The inserted text appears when you release the shortcut, after cleanup.
+- **LLM cleanup** via Qwen 3.5 — fixes filler words, punctuation, capitalization, self-corrections. Thinking is disabled so the model does not return a "Thinking Process:" preamble.
 - **Text insertion** — AT-SPI first when possible; XKB-aware uinput fallback for hostile apps (Wine, some terminals, custom UIs)
 - **Focused widget context** — cleanup receives the accessible text of the focused widget, around the caret, or the end of the buffer when there is no caret. Not a screenshot.
 - **Speaker diarization** — filters out other voices (experimental)
@@ -19,7 +19,7 @@ On an Intel Core Ultra 7 155U (CPU only):
 record=3.2s  transcribe=0.0s  cleanup=0.5s  insert=0.2s  total=0.7s
 ```
 
-Transcription happens during recording (streaming). Cleanup uses a pre-warmed KV cache.
+Nemotron transcribes during recording (streaming). Parakeet Ultra and Fluid Speech Pro transcribe the finished WAV after release. Cleanup uses a pre-warmed KV cache in both cases.
 
 With an NVIDIA GPU and CUDA enabled, cleanup is typically ~0.1s instead of several seconds on some CPUs.
 
@@ -124,8 +124,8 @@ Log out and back in for the GNOME extension to load.
 
 Launch the app, go to the **Models** section, and click **Download Missing Models**. Or download manually:
 
-- **ASR**: Nemotron 0.6B int8 (~850MB) — downloaded from HuggingFace on first run
-- **Cleanup**: Qwen 3.5 0.8B Q4_K_M (~500MB) or 2B Q4_K_M (~1.3GB)
+- **ASR**: Nemotron 0.6B int8 (~850MB), Nemotron 3.5 multilingual int8, Parakeet Ultra (~2.4GB), or Fluid Speech Pro (~2.6GB encoder). Parakeet Ultra and Fluid Speech Pro are batch only — no streaming.
+- **Cleanup**: Qwen 3.5 Q4_K_M at 0.8B (~500MB), 2B (~1.3GB), 4B (~2.6GB), or 9B (~5.3GB)
 
 ## Usage
 
@@ -134,7 +134,7 @@ pepper-x
 ```
 
 That's it. The app:
-1. Starts the GNOME Shell extension (tray icon + status pill)
+1. Starts the GNOME Shell extension (tray icon + status pill). The menu has Settings, History, and Quit. Quit calls `app.quit()` and releases the keyboard grab. Shell keeps extension JavaScript until you log out and back in.
 2. Pre-warms the cleanup model in the background
 3. Listens for your trigger keys (Alt+Super by default)
 
@@ -177,7 +177,7 @@ The app window is organized into sections:
 - **Recording** — Shortcut recorders (hold-to-record + toggle-to-record), mic picker, sound effects, speaker filtering, test dictation
 - **Cleanup** — Enable/disable, GPU offload toggle, window context toggle, prompt profile, custom prompt editor
 - **Corrections** — Editable preferred transcriptions and commonly misheard replacements
-- **Models** — ASR and cleanup model selection with download progress; **Transcription language** dropdown when a multilingual Nemotron 3.5 model is selected (`fr-FR` default, or `auto` / other locales)
+- **Models** — ASR and cleanup model selection with download progress. **Transcription language** appears only for multilingual Nemotron 3.5 (`fr-FR` default, or `auto` / other locales). Parakeet Ultra and Fluid Speech Pro pick the language from the audio and have no language selector.
 - **History** — Transcription lab with per-stage model pickers, inline prompt editor, word-level diff, audio playback, diarization timeline
 - **General** — Launch at login
 - **Diagnostics** — Runtime status
@@ -200,13 +200,13 @@ pepper-x --rerun-archived-run <run-id>
 - **`pepper-x`** — GTK4/libadwaita app, owns the recording pipeline, settings, history
 - **`pepperx-cleanup-helper`** — Persistent subprocess running llama.cpp (llama-cpp-4) for Qwen 3.5 inference, isolated to avoid ONNX Runtime symbol collision with the ASR engine
 - **`pepperx-uinput-helper`** — Persistent uinput daemon: active-layout XKB reverse map, dead keys, clipboard paste for off-layout Unicode
-- **`pepperx@obra` GNOME extension** — Tray icon, floating status pill overlay, D-Bus bridge
+- **`pepperx@obra` GNOME extension** — Tray icon (Settings, History, Quit), floating status pill overlay, D-Bus bridge
 
 ### Key crates
 
 | Crate | Purpose |
 |-------|---------|
-| `pepperx-asr` | Streaming ASR via parakeet-rs (Nemotron 0.6B) |
+| `pepperx-asr` | ASR via parakeet-rs: streaming Nemotron, batch Parakeet TDT (Parakeet Ultra, Fluid Speech Pro) |
 | `pepperx-cleanup` | Cleanup prompt assembly, subprocess communication |
 | `pepperx-cleanup-helper` | llama-cpp-4 inference (Qwen 3.5) |
 | `pepperx-audio` | PipeWire recording with streaming chunk delivery |

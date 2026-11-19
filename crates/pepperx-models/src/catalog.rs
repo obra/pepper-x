@@ -39,7 +39,7 @@ pub struct CatalogModel {
     pub download_files: &'static [(&'static str, &'static str)],
 }
 
-const SUPPORTED_MODELS: [CatalogModel; 10] = [
+const SUPPORTED_MODELS: [CatalogModel; 11] = [
     // === DEFAULT ASR MODEL ===
     // Nemotron 3.5 0.6B Multilingual INT8 (smcleod) - Recommended default
     CatalogModel {
@@ -181,6 +181,32 @@ const SUPPORTED_MODELS: [CatalogModel; 10] = [
             ("encoder-model.onnx.data", "https://huggingface.co/altunenes/parakeet-rs/resolve/main/parakeet-ultra/encoder-model.onnx.data"),
             ("decoder_joint-model.onnx", "https://huggingface.co/altunenes/parakeet-rs/resolve/main/parakeet-ultra/decoder_joint-model.onnx"),
             ("vocab.txt", "https://huggingface.co/altunenes/parakeet-rs/resolve/main/parakeet-ultra/vocab.txt"),
+        ],
+    },
+
+    // Fluid Speech Pro, same Parakeet TDT ONNX layout as parakeet-ultra.
+    CatalogModel {
+        id: "fluid-speech-pro",
+        kind: ModelKind::Asr,
+        install_path: "asr/fluid-speech-pro",
+        required_files: &[
+            "encoder-model.onnx",
+            "encoder-model.onnx.data",
+            "decoder_joint-model.onnx",
+            "vocab.txt",
+        ],
+        install_layout: InstallLayout::Directory,
+        download_artifact: DownloadArtifact {
+            url: "https://huggingface.co/FluidVoice-Labs/fluid-speech-pro-onnx/resolve/main/",
+            file_name: "",
+            kind: DownloadArtifactKind::MultiFile,
+            strip_prefix: None,
+        },
+        download_files: &[
+            ("encoder-model.onnx", "https://huggingface.co/FluidVoice-Labs/fluid-speech-pro-onnx/resolve/main/encoder-model.onnx"),
+            ("encoder-model.onnx.data", "https://huggingface.co/FluidVoice-Labs/fluid-speech-pro-onnx/resolve/main/encoder-model.onnx.data"),
+            ("decoder_joint-model.onnx", "https://huggingface.co/FluidVoice-Labs/fluid-speech-pro-onnx/resolve/main/decoder_joint-model.onnx"),
+            ("vocab.txt", "https://huggingface.co/FluidVoice-Labs/fluid-speech-pro-onnx/resolve/main/vocab.txt"),
         ],
     },
 

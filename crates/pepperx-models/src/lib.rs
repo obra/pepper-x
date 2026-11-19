@@ -61,6 +61,11 @@ mod tests {
                 && model.install_path == "asr/parakeet-ultra"
         }));
         assert!(models.iter().any(|model| {
+            model.id == "fluid-speech-pro"
+                && model.kind == ModelKind::Asr
+                && model.install_path == "asr/fluid-speech-pro"
+        }));
+        assert!(models.iter().any(|model| {
             model.id == "qwen3.5-2b-q4_k_m.gguf" && model.kind == ModelKind::Cleanup
         }));
         assert!(models.iter().any(|model| {
